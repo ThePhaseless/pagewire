@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: printscan
+  namespace: printing
+rules:
+  # The device Deployment printscan-device (server-side apply, so patch) and the
+  # owner lookup of this control plane's own Deployment.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, patch, delete]
+  # The device Deployment's ownerReference sets blockOwnerDeletion on the owner
+  # Deployment, which needs update on its finalizers subresource.
+  - apiGroups: [apps]
+    resources: [deployments/finalizers]
+    verbs: [update]
+  # The device ConfigMap printscan-device (ipp-usb, SANE and AirSane settings).
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, patch, delete]
+  # The agent token Secret.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [printscan-agent-token]
+    verbs: [get, patch]
+  # create cannot be scoped by resourceNames (the name is not known at authorization
+  # time), so it applies to any Secret in this namespace.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  # Observe lists the device pod; RestartPod lists the device pods and deletes them
+  # one by one by name, so deletecollection is not granted.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]

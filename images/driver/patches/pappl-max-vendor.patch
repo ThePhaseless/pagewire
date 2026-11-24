@@ -1,0 +1,58 @@
+PAPPL v1.4.12 changes made by the OpenPrinting retrofit Printer Application
+rock recipes (ps-, hplip-, gutenprint- and ghostscript-printer-app,
+rockcraft.yaml part "pappl", which applies them with perl one-liners):
+
+- Raise PAPPL_MAX_VENDOR from 32 to 256: 32 vendor options are too few for
+  some busy PPD files.
+- Turn off log rotation (log_max_size = 0; the rock's edit targets the
+  pre-1.4.12 field name logmaxsize): it does not work with the forked filter
+  processes.
+- Make the web interface's manual "Network Printer" use a "cups:socket://"
+  device URI, because the retrofit apps disable PAPPL's own backends and use
+  the CUPS backends through the "cups:" scheme.
+
+PAPPL is Copyright (c) 2019-2026 by Michael R Sweet and is licensed under
+the Apache License, Version 2.0, with an (optional) exception to allow
+linking against GPL2/LGPL2 software (see the LICENSE and NOTICE files in the
+PAPPL source). This patch is a modification of PAPPL and is distributed
+under the same licence.
+
+diff --git a/pappl/printer.h b/pappl/printer.h
+index c261f5f..860cae0 100644
+--- a/pappl/printer.h
++++ b/pappl/printer.h
+@@ -27,7 +27,7 @@ extern "C" {
+ #  define PAPPL_MAX_SOURCE	16	// Maximum number of sources/rolls
+ #  define PAPPL_MAX_SUPPLY	32	// Maximum number of supplies
+ #  define PAPPL_MAX_TYPE	32	// Maximum number of media types
+-#  define PAPPL_MAX_VENDOR	32	// Maximum number of vendor extension attributes
++#  define PAPPL_MAX_VENDOR	256	// Maximum number of vendor extension attributes
+ 
+ 
+ //
+diff --git a/pappl/system-webif.c b/pappl/system-webif.c
+index 4fc176f..9a7f49f 100644
+--- a/pappl/system-webif.c
++++ b/pappl/system-webif.c
+@@ -451,7 +451,7 @@ _papplSystemWebAddPrinter(
+ 	    else
+ 	    {
+ 	      httpAddrFreeList(list);
+-	      httpAssembleURI(HTTP_URI_CODING_ALL, device_uri, sizeof(device_uri), "socket", NULL, hostname, port, "/");
++	      httpAssembleURI(HTTP_URI_CODING_ALL, device_uri, sizeof(device_uri), "cups:socket", NULL, hostname, port, "/");
+ 	    }
+ 	  }
+ 	}
+diff --git a/pappl/system.c b/pappl/system.c
+index 7bb63b6..af5702a 100644
+--- a/pappl/system.c
++++ b/pappl/system.c
+@@ -192,7 +192,7 @@ papplSystemCreate(
+   system->log_fd            = -1;
+   system->log_file          = logfile ? strdup(logfile) : NULL;
+   system->log_level         = loglevel;
+-  system->log_max_size      = 1024 * 1024;
++  system->log_max_size      = 0;
+   system->next_client       = 1;
+   system->next_printer_id   = 1;
+   system->subtypes          = subtypes ? strdup(subtypes) : NULL;

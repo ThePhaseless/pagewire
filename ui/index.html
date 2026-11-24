@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f8f9fb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#121822" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="Print and scan on the household printer." />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='2' width='16' height='20' rx='3' fill='%232f5fb3'/%3E%3Cpath d='M8 8h8M8 12h8M8 16h5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <title>printscan</title>
+    <!-- react-aria's usePress adds an inline style element unless an element with this id exists. The CSP
+         forbids inline styles, so this marker stops it; base.css carries the same touch-action rule. -->
+    <meta name="react-aria-pressable-style" id="react-aria-pressable-style" content="base.css" />
+    <script type="module" src="./src/main.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

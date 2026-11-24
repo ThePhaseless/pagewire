@@ -1,0 +1,10 @@
+# Toolchain pins. CI installs these with jdx/mise-action; the Dockerfiles'
+# golang: and oven/bun: tags must match (checked by test/consistency).
+[tools]
+go = "1.27.1"
+bun = "1.4.5"
+golangci-lint = "2.15.0"
+actionlint = "1.7.12"
+kubeconform = "0.8.0"
+kube-linter = "0.8.3"
+kustomize = "5.8.3"

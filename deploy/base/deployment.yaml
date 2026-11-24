@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # PRINTSCAN_K8S_OWNER below must name this Deployment: it owns the device pod.
+  name: printscan
+  namespace: printing
+  annotations:
+    # printscan watches its config file itself; a restart is never needed.
+    reloader.stakater.com/auto: "false"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # the data volume is ReadWriteOnce
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: printscan
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: printscan
+    spec:
+      serviceAccountName: printscan
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # The name is load-bearing: the control plane reads the image of the container
+        # named "printscan" in this Deployment and runs the device pod's probe, agent
+        # and fetch-blobs containers from it. Renaming it falls back to a registry tag.
+        - name: printscan
+          image: ghcr.io/thephaseless/printscan:0.0.0
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: internal
+              containerPort: 8081
+          env:
+            # Must equal <generic-device-plugin --domain>/<device name>, see
+            # deploy/examples/generic-device-plugin.yaml. Empty disables USB (simulated only).
+            - name: PRINTSCAN_USB_RESOURCE
+              value: devic.es/printer
+            - name: PRINTSCAN_K8S_OWNER
+              value: printscan
+            - name: TZ
+              value: Etc/UTC
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: printscan-data
+        - name: tmp
+          emptyDir: {}

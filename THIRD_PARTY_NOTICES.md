@@ -1,0 +1,247 @@
+# Third-party notices
+
+printscan's own code is licensed under Apache-2.0 (`LICENSE`, `NOTICE`). The container images also contain third-party software, listed here per image: what it is, its licence, how it gets into the image, where its source is, and whether printscan changes it.
+
+Versions were read from images built from this repository on 2026-11-24 (linux/arm64). Ubuntu and Debian package versions move with security updates, because every image build runs `apt-get upgrade`. For a given image the authoritative lists are inside it and attached to it:
+
+- the SBOM attestation published with every image (Go modules, npm packages, Alpine, Debian and Ubuntu packages);
+- `/licenses` in the control-plane image (`go/` for Go modules, `c/` for the statically linked C libraries, `printscan/` for this project);
+- `/usr/share/printscan/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`.
+
+Licence cells give the licence of the component's own files. Debian packaging files (`debian/*`) are often GPL-2.0-or-later and are not repeated here; the copyright file in the image has every stanza.
+
+"Linked" below means compiled into the printscan binary. "Separate program" means a program installed unmodified next to others in the image and run as its own process (aggregation). printscan never links against GPL, LGPL or AGPL code.
+
+## Control-plane image (`printscan`)
+
+A single statically linked Go binary with the web UI embedded, on Google's distroless base.
+
+### Go modules (linked)
+
+Licences as classified by `go tool go-licenses`. The full texts ship in the image under `/licenses/go/`, and each module's source is at `https://pkg.go.dev/<module>@<version>`. None is modified.
+
+| Module | Version | Licence |
+|---|---|---|
+| Go standard library | 1.27.1 | BSD-3-Clause |
+| `github.com/bahlo/generic-list-go` | v0.2.0 | BSD-3-Clause |
+| `github.com/buger/jsonparser` | v1.1.2 | MIT |
+| `github.com/cloudflare/circl` | v1.6.3 | BSD-3-Clause |
+| `github.com/davecgh/go-spew` | v1.1.2-0.20180830191138-d8f796af33cc | ISC |
+| `github.com/emicklei/go-restful/v3` | v3.13.0 | MIT |
+| `github.com/fsnotify/fsnotify` | v1.10.1 | BSD-3-Clause |
+| `github.com/fxamacker/cbor/v2` | v2.9.1 | MIT |
+| `github.com/gabriel-vasile/mimetype` | v1.4.16 | MIT |
+| `github.com/go-logr/logr` | v1.4.3 | Apache-2.0 |
+| `github.com/go-openapi/jsonpointer` | v1.0.0 | Apache-2.0 |
+| `github.com/go-openapi/jsonreference` | v1.0.0 | Apache-2.0 |
+| `github.com/go-openapi/swag` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/cmdutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/conv` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/fileutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/jsonutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/loading` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/mangling` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/netutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/pools` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/stringutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/typeutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-openapi/swag/yamlutils` | v0.27.1 | Apache-2.0 |
+| `github.com/go-playground/locales` | v0.14.2 | MIT |
+| `github.com/go-playground/universal-translator` | v0.18.2 | MIT |
+| `github.com/go-playground/validator/v10` | v10.30.6 | MIT |
+| `github.com/goccy/go-yaml` | v1.19.2 | MIT |
+| `github.com/godbus/dbus/v5` | v5.2.4 | BSD-2-Clause |
+| `github.com/google/gnostic-models` | v0.7.0 | Apache-2.0 |
+| `github.com/google/renameio/v2` | v2.0.2 | Apache-2.0 |
+| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause |
+| `github.com/invopop/jsonschema` | v0.14.0 | MIT |
+| `github.com/json-iterator/go` | v1.1.12 | MIT |
+| `github.com/leodido/go-urn` | v1.5.0 | MIT |
+| `github.com/modern-go/concurrent` | v0.0.0-20180306012644-bacd9c7ef1dd | Apache-2.0 |
+| `github.com/modern-go/reflect2` | v1.0.3-0.20250322232337-35a7c28c31ee | Apache-2.0 |
+| `github.com/munnerz/goautoneg` | v0.0.0-20191010083416-a7dc8b61c822 | BSD-3-Clause |
+| `github.com/OpenPrinting/go-mfp` | v0.0.0-20261123173030-b3cc636803df | BSD-2-Clause |
+| `github.com/OpenPrinting/goipp` | v1.2.1-0.20260630192304-61012e2ae9bf | BSD-2-Clause |
+| `github.com/pb33f/ordered-map/v2` | v2.3.1 | Apache-2.0 |
+| `github.com/ProtonMail/go-crypto` | v1.5.2 | BSD-3-Clause |
+| `github.com/x448/float16` | v0.8.4 | MIT |
+| `go.yaml.in/yaml/v2` | v2.4.4 | Apache-2.0 |
+| `go.yaml.in/yaml/v3` | v3.0.4 | MIT |
+| `go.yaml.in/yaml/v4` | v4.0.0-rc.2 | MIT |
+| `golang.org/x/crypto` | v0.58.0 | BSD-3-Clause |
+| `golang.org/x/image` | v0.24.0 | BSD-3-Clause |
+| `golang.org/x/net` | v0.60.0 | BSD-3-Clause |
+| `golang.org/x/oauth2` | v0.36.0 | BSD-3-Clause |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause |
+| `golang.org/x/term` | v0.47.0 | BSD-3-Clause |
+| `golang.org/x/text` | v0.43.0 | BSD-3-Clause |
+| `golang.org/x/time` | v0.15.0 | BSD-3-Clause |
+| `google.golang.org/protobuf` | v1.36.12-0.20260120151049-f2248ac996af | BSD-3-Clause |
+| `gopkg.in/evanphx/json-patch.v4` | v4.13.0 | BSD-3-Clause |
+| `gopkg.in/inf.v0` | v0.9.1 | BSD-3-Clause |
+| `k8s.io/api` | v0.37.2 | Apache-2.0 |
+| `k8s.io/apimachinery` | v0.37.2 | Apache-2.0 AND BSD-3-Clause |
+| `k8s.io/client-go` | v0.37.2 | Apache-2.0 |
+| `k8s.io/klog/v2` | v2.140.0 | Apache-2.0 |
+| `k8s.io/kube-openapi` | v0.0.0-20260721132016-d427ff9ee9ad | Apache-2.0 AND BSD-3-Clause |
+| `k8s.io/utils` | v0.0.0-20260626114624-be93311217bd | Apache-2.0 AND BSD-3-Clause |
+| `sigs.k8s.io/json` | v0.0.0-20250730193827-2d320260d730 | Apache-2.0 AND BSD-3-Clause |
+| `sigs.k8s.io/randfill` | v1.0.0 | Apache-2.0 |
+| `sigs.k8s.io/structured-merge-diff/v6` | v6.4.2 | Apache-2.0 |
+| `sigs.k8s.io/yaml` | v1.6.0 | Apache-2.0 AND BSD-3-Clause AND MIT |
+
+### C libraries (linked statically)
+
+go-mfp's image conversion code uses libjpeg and libpng through cgo. The binary is linked statically against musl. The packages come from Alpine (the `golang:1.27.1-alpine` build stage), and their licence texts ship under `/licenses/c/`.
+
+| Component | Version | Licence | Source |
+|---|---|---|---|
+| musl | 1.2.6 (Alpine 1.2.6-r3) | MIT | https://musl.libc.org/releases/ |
+| libjpeg-turbo | 3.1.3 (Alpine 3.1.3-r0) | IJG AND BSD-3-Clause AND Zlib | https://github.com/libjpeg-turbo/libjpeg-turbo |
+| libpng | 1.6.59 (Alpine 1.6.59-r0) | Libpng-2.0 | https://github.com/pnggroup/libpng |
+| zlib | Alpine 1.4-r0 | Zlib | https://zlib.net |
+
+Alpine's package sources, including its patches, are in https://gitlab.alpinelinux.org/alpine/aports. None is modified by printscan.
+
+### Web UI (npm packages, bundled)
+
+The production dependencies bundled into the UI. Their full licence texts ship inside the binary as `THIRD_PARTY_LICENSES.txt`, served next to the UI at `/THIRD_PARTY_LICENSES.txt`. Sources are at `https://www.npmjs.com/package/<name>/v/<version>`. None is modified.
+
+| Package | Version | Licence |
+|---|---|---|
+| `@fontsource-variable/figtree` | 5.3.0 | OFL-1.1 |
+| `@internationalized/date` | 3.12.4 | Apache-2.0 |
+| `@internationalized/number` | 3.6.9 | Apache-2.0 |
+| `@internationalized/string` | 3.2.10 | Apache-2.0 |
+| `@react-types/shared` | 3.37.0 | Apache-2.0 |
+| `@swc/helpers` | 0.5.24 | Apache-2.0 |
+| `aria-hidden` | 1.2.6 | MIT |
+| `client-only` | 0.0.1 | MIT |
+| `clsx` | 2.1.1 | MIT |
+| `react-aria-components` | 1.22.1 | Apache-2.0 |
+| `react-aria` | 3.53.1 | Apache-2.0 |
+| `react-dom` | 19.3.1 | MIT |
+| `react-stately` | 3.51.0 | Apache-2.0 |
+| `react` | 19.3.1 | MIT |
+| `scheduler` | 0.28.0 | MIT |
+| `tslib` | 2.9.1 | 0BSD |
+| `use-sync-external-store` | 1.7.0 | MIT |
+| `zod` | 4.6.7 | MIT |
+
+The Figtree font files are under the SIL Open Font License 1.1 and are served unmodified.
+
+### Distroless base (Debian packages)
+
+`gcr.io/distroless/static-debian13:nonroot`, pinned by digest in `Dockerfile`. The list below was read from that pinned image (its `/var/lib/dpkg/status.d/` and each package's `/usr/share/doc/<package>/copyright`) for linux/arm64, and it matches the SBOM of the locally built image. Every package except `base-files` is architecture-independent (`Architecture: all`), so the amd64 variant carries the same files; its `base-files` build may differ.
+
+| Package | Version | Licence | How included |
+|---|---|---|---|
+| base-files | 13.8+deb13u8 | GPL-2.0-or-later | Base image: `/etc/os-release` and similar files |
+| ca-certificates | 20250419+deb13u1 | MPL-2.0 (certificate data) AND GPL-2.0-or-later (scripts) | Base image: the CA bundle |
+| media-types | 13.0.0 | public information, no licence claimed (`ad-hoc` in its copyright file) | Base image: `/etc/mime.types` |
+| netbase | 6.5 | GPL-2.0-only | Base image: `/etc/protocols`, `/etc/services` |
+| tzdata | 2026f-0+deb13u1 | public domain | Base image: time zone data |
+| tzdata-legacy | 2026f-0+deb13u1 | public domain | Base image: legacy time zone names |
+
+The packages are unmodified Debian packages. Their sources are at `https://sources.debian.org/src/<package>/<version>/`, and every published version stays available at https://snapshot.debian.org/. printscan builds no `-sources` image for the control plane.
+
+## Device image (`printscan-device`)
+
+dbus, Avahi, ipp-usb, AirSane, the SANE backends and `ippeveprinter`, on `ubuntu:26.04`. Every component is a separate program, or a library linked by one, and none is modified.
+
+Built from upstream source:
+
+| Component | Version | Licence | How included | Source |
+|---|---|---|---|---|
+| ipp-usb | 0.9.34 | BSD-2-Clause | Separate program `/usr/local/sbin/ipp-usb`, with its quirks files in `/usr/share/ipp-usb/quirks/` | https://github.com/OpenPrinting/ipp-usb/tree/0.9.34 |
+| goipp (inside ipp-usb) | v1.2.0 | BSD-2-Clause | Linked into ipp-usb, vendored in its source tree | https://github.com/OpenPrinting/goipp |
+| Go standard library (inside ipp-usb) | 1.27.1 | BSD-3-Clause | Linked into ipp-usb | https://go.dev/dl/ |
+| AirSane | v0.4.16 | GPL-3.0-or-later | Separate program `/usr/local/bin/airsaned` | https://github.com/SimulPiscator/AirSane/tree/v0.4.16 |
+
+The main Ubuntu packages (`apt-get install --no-install-recommends`; the full list, with dependencies and the base image, is `/usr/share/printscan/source-packages.txt`):
+
+| Package (source) | Version | Licence | How included |
+|---|---|---|---|
+| dbus (dbus) | 1.16.2-2ubuntu4 | AFL-2.1 OR GPL-2.0-or-later | Separate program: the pod's system bus |
+| avahi-daemon, libavahi-client3 (avahi) | 0.8-18ubuntu1.1 | LGPL-2.1-or-later | Separate program: the pod's mDNS responder; client library for ipp-usb and AirSane |
+| libsane1 (sane-backends) | 1.4.0-1ubuntu1 | GPL-2.0-or-later WITH SANE-exception | Library loaded by AirSane: the SANE backends and `test` |
+| libsane-hpaio (hplip) | 3.24.4+dfsg0-0ubuntu8.4 | GPL-2.0-or-later | SANE backend for HP scanners, loaded by AirSane |
+| cups-ipp-utils (cups) | 2.4.16-1ubuntu1.3 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | Separate program `ippeveprinter`, for simulated mode |
+| libusb-1.0-0 (libusb-1.0) | 2:1.0.29-2build1 | LGPL-2.1-or-later | Library used by ipp-usb and the SANE backends |
+| libjpeg-turbo8 (libjpeg-turbo) | 2.1.5-4ubuntu4 | IJG AND BSD-3-Clause AND Zlib | Library |
+| libpng16-16t64 (libpng1.6) | 1.6.57-1ubuntu0.1 | Libpng-2.0 | Library |
+| ca-certificates | 20260816ubuntu0.26.04.2 | MPL-2.0 AND GPL-2.0-or-later | CA bundle |
+
+The image's 139 source packages at the time of writing include the `ubuntu:26.04` base (glibc, bash, coreutils and so on).
+
+The HP plug-in paths (`/usr/share/hplip/{prnt,scan,fax}/plugins`, `/usr/share/hplip/data/firmware`, `/var/lib/hp/hplip.state`) are symlinks into the vendor-file volume. The image contains no plug-in files.
+
+## Driver images (`printscan-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`)
+
+Each image holds one PAPPL retrofit printer application, on `ubuntu:26.04`, built the way the upstream rock recipes build it, plus CUPS (for its `usb`, `socket` and `ipp` backends; `cupsd` is never started) and that family's Ubuntu driver packages.
+
+Built from upstream source (identical in all four images, except the application):
+
+| Component | Version | Licence | How included | Modifications | Source |
+|---|---|---|---|---|---|
+| PAPPL | v1.4.12 | Apache-2.0 (with its optional GPL2/LGPL2 exception) | Library linked into the application | Yes: `images/driver/patches/pappl-max-vendor.patch`, the changes the upstream rock recipes make. It raises `PAPPL_MAX_VENDOR` from 32 to 256, turns off log rotation, and makes the web interface's manual network printer use a `cups:socket://` URI | https://github.com/michaelrsweet/pappl/tree/v1.4.12 |
+| pappl-retrofit | 1.0b3 | Apache-2.0 (with the CUPS exceptions) | Library linked into the application | None | https://github.com/OpenPrinting/pappl-retrofit/tree/1.0b3 |
+| ps-printer-app | commit 5ce06c52f8a3a00420587f885e7eb4a238d586ee | Apache-2.0 | Separate program, `printscan-driver-ps` only | None | https://github.com/OpenPrinting/ps-printer-app |
+| hplip-printer-app | commit 90478d9edd063df2756e1a1045aaf1bc4012e3f5 | Apache-2.0 | Separate program, `printscan-driver-hplip` only | None | https://github.com/OpenPrinting/hplip-printer-app |
+| gutenprint-printer-app | commit fbfce9086b3e612447eec729240ab68986608857 | Apache-2.0 | Separate program, `printscan-driver-gutenprint` only | None | https://github.com/OpenPrinting/gutenprint-printer-app |
+| ghostscript-printer-app | commit acf18a476bee525b88526ff8e0154f004b361914 | Apache-2.0 | Separate program, `printscan-driver-ghostscript` only | None | https://github.com/OpenPrinting/ghostscript-printer-app |
+
+Their LICENSE and NOTICE files are in `/usr/share/licenses/<component>/`. The patch carries PAPPL's licence and is published in the `-sources` images.
+
+The main Ubuntu packages (all unmodified):
+
+| Package (source) | Version | Licence | Images | How included |
+|---|---|---|---|---|
+| cups, libcups2t64 (cups) | 2.4.16-1ubuntu1.3 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | all | Library, plus the CUPS backends run as separate programs |
+| libcupsfilters2t64 (libcupsfilters) | 2.1.1-0ubuntu5 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | all | Library linked into the application |
+| libppd2 (libppd) | 2:2.1.1-0ubuntu2 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | all | Library linked into the application |
+| cups-filters-core-drivers (cups-filters) | 2.0.1-0ubuntu4.1 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | all | Separate programs (filters) |
+| libavahi-client3 (avahi) | 0.8-18ubuntu1.1 | LGPL-2.1-or-later | all | Library |
+| libgnutls30t64 (gnutls28) | 3.8.12-2ubuntu1.1 | LGPL-2.1-or-later (its bundled libunistring code: LGPL-3.0-or-later OR GPL-2.0-or-later) | all | Library |
+| libusb-1.0-0 (libusb-1.0) | 2:1.0.29-2build1 | LGPL-2.1-or-later | all | Library |
+| ghostscript (ghostscript) | 10.06.0~dfsg-3ubuntu1.2 | AGPL-3.0-or-later | all four (a dependency in hplip and gutenprint) | Separate program, run by the filters |
+| foomatic-db-compressed-ppds (foomatic-db) | 20250819-1build1 | GPL-2.0-only AND GPL-2.0-or-later AND MIT | ps, ghostscript | PPD data files |
+| hplip, printer-driver-hpcups, hplip-data (hplip) | 3.24.4+dfsg0-0ubuntu8.4 | GPL-2.0-or-later AND BSD-3-Clause AND MIT | hplip | Separate programs (the `hp` backend and `hpcups` filter) and data |
+| libcurl4t64 (curl) | 8.18.0-1ubuntu2.8 | curl | hplip | Library linked into hplip-printer-app |
+| libssl3t64 (openssl) | 3.5.5-1ubuntu3.7 | Apache-2.0 | all | Library |
+| printer-driver-gutenprint, libgutenprint9 (gutenprint) | 5.3.4.20220624T01008808d602-4ubuntu2 | GPL-2.0-or-later | gutenprint | Separate program (filter) and its library |
+| printer-driver-foo2zjs (foo2zjs) | 20200505dfsg0-3ubuntu1 | GPL-2.0-or-later | ghostscript | Separate programs (filters) |
+| printer-driver-splix (splix) | 2.0.1-2 | GPL-2.0-only | ghostscript | Separate program (filter) |
+
+The number of source packages per image at the time of writing: ps 151, hplip 182, gutenprint 146, ghostscript 154, including the `ubuntu:26.04` base.
+
+In `printscan-driver-hplip` the HP plug-in paths are symlinks into the vendor-file volume, as in the device image.
+
+## Corresponding source
+
+For every release, CI publishes `ghcr.io/thephaseless/<image>:<version>-sources` for the device image and each driver image. Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
+
+- `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt` (the union of the four lists for the driver images), fetched with `apt-get source`;
+- `upstream/`: the tarballs of everything built from source at the exact tag or commit (ipp-usb and AirSane; PAPPL, pappl-retrofit and the four applications);
+- `patches/` (driver images): the PAPPL patch.
+
+To extract one: `docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .` from a checkout of the release tag, or copy `/sources` out of the published `-sources` image. The `-sources` image must come from the same release as the image it covers.
+
+The control-plane image has no `-sources` image. Its Go and npm dependencies are permissively licensed and listed above. For the distroless Debian packages, see the pointers in that section.
+
+## Explicitly not included
+
+These are never in an image, in this repository or in CI:
+
+- HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files): printscan downloads it at runtime on your cluster, through the `agent fetch` step in the device pod's `fetch-blobs` init container, and only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin` and the matching version). It comes from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`, must match HP's detached OpenPGP signature against the key in `internal/catalog/keys/hplip.asc`, and is unpacked into the vendor-file volume. hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. printscan never opens that page, and the plug-in paths lead into `/blobs`, which is either the read-only vendor-file mount or does not exist on the read-only root file system. The licence link that the setup wizard and Settings show for this plug-in (the catalog EULA `url`, `https://developers.hp.com/hp-linux-imaging-and-printing/plugins`) is not yet confirmed to carry or link HP's licence text, because that page refuses automated clients. The pre-public review has to confirm it or replace it with a page that does. The licence text itself ships inside the `.run` file.
+- foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and printscan adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
+- Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript, foo2zjs, SpliX, HPLIP's free parts) and the SANE backends Ubuntu ships.
+- The Mopria eSCL specification: printscan's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.
+
+## Regenerating these lists
+
+- Go modules: `mise x -- go tool go-licenses report ./cmd/printscan`.
+- npm packages: `bun run build` in `ui/` writes `dist/THIRD_PARTY_LICENSES.txt`.
+- Everything in an image, from a build: `docker buildx build --sbom=true -o type=local,dest=out .` (add `-f images/... --target ...` for the other images), then read `out/sbom*.spdx.json`. For a published image: `docker buildx imagetools inspect ghcr.io/thephaseless/<image>:<tag> --format '{{ json .SBOM }}'`.
+- Ubuntu packages in a device or driver image: `docker run --rm --entrypoint cat <image> /usr/share/printscan/source-packages.txt`.
+- Distroless packages: `docker create` the pinned digest from `Dockerfile`, then `docker cp <container>:/var/lib/dpkg/status.d/ .` and read each package's `/usr/share/doc/<package>/copyright` the same way.

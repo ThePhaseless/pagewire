@@ -1,0 +1,39 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - depguard
+    - errorlint
+    - forbidigo
+    - gosec
+    - misspell
+    - noctx
+  settings:
+    depguard:
+      rules:
+        no-exec:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: os/exec
+              desc: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
+    forbidigo:
+      forbid:
+        - pattern: ^os\.StartProcess$
+          msg: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
+        - pattern: ^(syscall|unix)\.(Exec|ForkExec)$
+          msg: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
+      analyze-types: true
+  exclusions:
+    paths:
+      - ui/node_modules
+
+formatters:
+  enable:
+    - gofumpt
+  exclusions:
+    paths:
+      - ui/node_modules

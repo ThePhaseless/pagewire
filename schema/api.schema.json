@@ -1,0 +1,1191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/api.schema.json",
+  "$defs": {
+    "AdvertisedService": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "name",
+        "port"
+      ]
+    },
+    "BlobStatus": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "installed",
+            "missing",
+            "failed",
+            "disabled"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "state",
+        "message"
+      ]
+    },
+    "Config": {
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "printscan/v1"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "printer-location, 0 to 127 characters."
+        },
+        "device": {
+          "$ref": "#/$defs/Device"
+        },
+        "print": {
+          "$ref": "#/$defs/PrintConfig"
+        },
+        "scan": {
+          "$ref": "#/$defs/ScanConfig"
+        },
+        "licenses": {
+          "$ref": "#/$defs/Licenses"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "name",
+        "location",
+        "device",
+        "print",
+        "scan",
+        "licenses"
+      ]
+    },
+    "ConfigEvent": {
+      "properties": {
+        "etag": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "etag"
+      ]
+    },
+    "ConfigResponse": {
+      "properties": {
+        "etag": {
+          "type": "string"
+        },
+        "config": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Config"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "applied",
+            "invalid"
+          ]
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/FieldError"
+          },
+          "type": "array"
+        },
+        "lastGood": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Config"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "etag",
+        "config",
+        "state",
+        "errors",
+        "lastGood"
+      ]
+    },
+    "Connect": {
+      "properties": {
+        "dnssdName": {
+          "type": "string"
+        },
+        "ippUris": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "esclUrls": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "dnssdName",
+        "ippUris",
+        "esclUrls"
+      ]
+    },
+    "Decision": {
+      "properties": {
+        "printer": {
+          "type": "string"
+        },
+        "scanner": {
+          "type": "string"
+        },
+        "saneBackends": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requiredEulas": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "optionalEulas": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "device": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/USBDevice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "printer",
+        "scanner",
+        "saneBackends",
+        "requiredEulas",
+        "optionalEulas",
+        "rule",
+        "device"
+      ]
+    },
+    "Device": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "usb",
+            "simulated"
+          ],
+          "description": "usb, or simulated (test printer and SANE test scanner, no USB resource).",
+          "default": "usb"
+        },
+        "usb": {
+          "$ref": "#/$defs/USB",
+          "description": "Optional selector when several USB devices are visible. Only allowed with mode usb."
+        },
+        "driver": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "ps",
+            "hplip",
+            "gutenprint",
+            "ghostscript"
+          ],
+          "default": "auto"
+        },
+        "scanner": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "airsane",
+            "none"
+          ],
+          "default": "auto"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "mode",
+        "driver",
+        "scanner"
+      ]
+    },
+    "EULARef": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "version"
+      ]
+    },
+    "FieldError": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "column": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "path",
+        "line",
+        "column",
+        "message"
+      ]
+    },
+    "Inventory": {
+      "properties": {
+        "devices": {
+          "items": {
+            "$ref": "#/$defs/USBDevice"
+          },
+          "type": "array"
+        },
+        "probedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "simulated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "devices",
+        "probedAt",
+        "simulated"
+      ]
+    },
+    "Job": {
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "processing",
+            "completed",
+            "canceled",
+            "aborted",
+            "held",
+            "stopped"
+          ]
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "state",
+        "reasons",
+        "createdAt"
+      ]
+    },
+    "Licenses": {
+      "properties": {
+        "acceptedEulas": {
+          "items": {
+            "$ref": "#/$defs/EULARef"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Each {id, version} must exist in the catalog; duplicates are rejected."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "acceptedEulas"
+      ]
+    },
+    "Marker": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "level": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "color",
+        "level"
+      ]
+    },
+    "PrintConfig": {
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/PrintDefaults"
+        },
+        "maxUploadMiB": {
+          "type": "integer",
+          "maximum": 500,
+          "minimum": 1,
+          "default": 50
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "defaults",
+        "maxUploadMiB"
+      ]
+    },
+    "PrintDefaults": {
+      "properties": {
+        "media": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$",
+          "description": "PWG self-describing media name.",
+          "default": "iso_a4_210x297mm"
+        },
+        "sides": {
+          "type": "string",
+          "enum": [
+            "one-sided",
+            "two-sided-long-edge",
+            "two-sided-short-edge"
+          ],
+          "default": "one-sided"
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "color",
+            "monochrome"
+          ],
+          "default": "auto"
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "normal",
+            "high"
+          ],
+          "default": "normal"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "media",
+        "sides",
+        "colorMode",
+        "quality"
+      ]
+    },
+    "PrintOptions": {
+      "properties": {
+        "copies": {
+          "type": "integer",
+          "maximum": 99,
+          "minimum": 1
+        },
+        "sides": {
+          "type": "string",
+          "enum": [
+            "one-sided",
+            "two-sided-long-edge",
+            "two-sided-short-edge"
+          ]
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "color",
+            "monochrome"
+          ]
+        },
+        "media": {
+          "type": "string"
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "normal",
+            "high"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "copies",
+        "sides",
+        "colorMode",
+        "media",
+        "quality"
+      ]
+    },
+    "Problem": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/FieldError"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "title",
+        "status",
+        "detail",
+        "errors"
+      ]
+    },
+    "ReconcileItem": {
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "item",
+        "ok",
+        "message",
+        "at"
+      ]
+    },
+    "Scan": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "scanning",
+            "completed",
+            "failed",
+            "canceled"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "pages": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "jpeg"
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/ScanSettings"
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "state",
+        "createdAt",
+        "pages",
+        "format",
+        "settings",
+        "error"
+      ]
+    },
+    "ScanConfig": {
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/ScanDefaults"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "maximum": 3650,
+          "minimum": 0,
+          "description": "Days to keep scans; 0 keeps them forever.",
+          "default": 7
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "defaults",
+        "retentionDays"
+      ]
+    },
+    "ScanDefaults": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "platen",
+            "adf",
+            "adf-duplex"
+          ],
+          "default": "platen"
+        },
+        "resolution": {
+          "type": "integer",
+          "maximum": 1200,
+          "minimum": 75,
+          "default": 300
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "color",
+            "grayscale",
+            "blackandwhite"
+          ],
+          "default": "color"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "jpeg"
+          ],
+          "default": "pdf"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source",
+        "resolution",
+        "colorMode",
+        "format"
+      ]
+    },
+    "ScanSettings": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "platen",
+            "adf",
+            "adf-duplex"
+          ]
+        },
+        "resolution": {
+          "type": "integer",
+          "maximum": 1200,
+          "minimum": 75
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "color",
+            "grayscale",
+            "blackandwhite"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "jpeg"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source",
+        "resolution",
+        "colorMode",
+        "format"
+      ]
+    },
+    "ScannerCaps": {
+      "properties": {
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resolutions": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "colorModes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "adf": {
+          "type": "boolean"
+        },
+        "duplex": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "sources",
+        "resolutions",
+        "colorModes",
+        "adf",
+        "duplex"
+      ]
+    },
+    "Setup": {
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "k8s",
+            "sim"
+          ]
+        },
+        "usbResourceConfigured": {
+          "type": "boolean"
+        },
+        "inventory": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Inventory"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eulas": {
+          "items": {
+            "$ref": "#/$defs/SetupEULA"
+          },
+          "type": "array"
+        },
+        "suggested": {
+          "$ref": "#/$defs/Config"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "required",
+        "backend",
+        "usbResourceConfigured",
+        "inventory",
+        "decision",
+        "eulas",
+        "suggested"
+      ]
+    },
+    "SetupEULA": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "title",
+        "vendor",
+        "url",
+        "summary",
+        "required"
+      ]
+    },
+    "Status": {
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/StatusConfig"
+        },
+        "device": {
+          "$ref": "#/$defs/StatusDevice"
+        },
+        "printer": {
+          "$ref": "#/$defs/StatusPrinter"
+        },
+        "scanner": {
+          "$ref": "#/$defs/StatusScanner"
+        },
+        "reconcile": {
+          "items": {
+            "$ref": "#/$defs/ReconcileItem"
+          },
+          "type": "array"
+        },
+        "connect": {
+          "$ref": "#/$defs/Connect"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "config",
+        "device",
+        "printer",
+        "scanner",
+        "reconcile",
+        "connect"
+      ]
+    },
+    "StatusConfig": {
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "missing",
+            "applied",
+            "invalid"
+          ]
+        },
+        "etag": {
+          "type": "string"
+        },
+        "appliedEtag": {
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/FieldError"
+          },
+          "type": "array"
+        },
+        "changedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "state",
+        "etag",
+        "appliedEtag",
+        "errors",
+        "changedAt"
+      ]
+    },
+    "StatusDevice": {
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": [
+            "none",
+            "probing",
+            "deploying",
+            "ready",
+            "degraded",
+            "error"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "usb",
+            "simulated",
+            "probe"
+          ]
+        },
+        "decision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inventory": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Inventory"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "advertised": {
+          "items": {
+            "$ref": "#/$defs/AdvertisedService"
+          },
+          "type": "array"
+        },
+        "blobs": {
+          "items": {
+            "$ref": "#/$defs/BlobStatus"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "phase",
+        "mode",
+        "decision",
+        "inventory",
+        "message",
+        "advertised",
+        "blobs"
+      ]
+    },
+    "StatusPrinter": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "processing",
+            "stopped",
+            "unknown"
+          ]
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "formats": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "media": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "markers": {
+          "items": {
+            "$ref": "#/$defs/Marker"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "available",
+        "uri",
+        "state",
+        "reasons",
+        "formats",
+        "media",
+        "markers"
+      ]
+    },
+    "StatusScanner": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "processing",
+            "stopped",
+            "unknown"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "available",
+        "url",
+        "state"
+      ]
+    },
+    "USB": {
+      "properties": {
+        "vendorId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "productId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "serial": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "vendorId",
+        "productId",
+        "serial"
+      ]
+    },
+    "USBDevice": {
+      "properties": {
+        "vendorId": {
+          "type": "string"
+        },
+        "productId": {
+          "type": "string"
+        },
+        "serial": {
+          "type": "string"
+        },
+        "manufacturer": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "bus": {
+          "type": "integer"
+        },
+        "address": {
+          "type": "integer"
+        },
+        "interfaces": {
+          "items": {
+            "$ref": "#/$defs/USBInterface"
+          },
+          "type": "array"
+        },
+        "deviceId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "vendorId",
+        "productId",
+        "serial",
+        "manufacturer",
+        "product",
+        "bus",
+        "address",
+        "interfaces",
+        "deviceId"
+      ]
+    },
+    "USBInterface": {
+      "properties": {
+        "class": {
+          "type": "integer"
+        },
+        "subClass": {
+          "type": "integer"
+        },
+        "protocol": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "class",
+        "subClass",
+        "protocol"
+      ]
+    }
+  }
+}

@@ -1,0 +1,155 @@
+@layer views {
+  .status-view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+    /* Messages can carry long unbroken tokens (image refs, URIs). */
+    overflow-wrap: anywhere;
+  }
+
+  .status-view .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+    gap: var(--space-4);
+    align-items: start;
+  }
+
+  .status-view .status-connect {
+    grid-column: 1 / -1;
+  }
+
+  .status-view .status-error-title {
+    font-weight: var(--weight-medium);
+  }
+
+  .status-view .status-message {
+    color: var(--ink);
+    max-inline-size: 70ch;
+  }
+
+  .status-view .status-subtle {
+    color: var(--ink-muted);
+    font-size: var(--text-sm);
+  }
+
+  .status-view code {
+    overflow-wrap: anywhere;
+  }
+
+  .status-view .status-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding-block-start: var(--space-3);
+    border-block-start: 1px solid var(--rule);
+  }
+
+  .status-view .status-section h3 {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    color: var(--ink-muted);
+  }
+
+  /* Label and value pairs: stacked in narrow cards, side by side in wide ones. */
+  .status-view .status-facts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .status-view .status-facts > div {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .status-view .status-facts dt {
+    font-size: var(--text-sm);
+    color: var(--ink-muted);
+  }
+
+  .status-view .status-facts dd {
+    display: flex;
+    flex-direction: column;
+    overflow-wrap: anywhere;
+  }
+
+  @container (min-width: 26rem) {
+    .status-view .status-facts > div {
+      display: grid;
+      grid-template-columns: 10rem 1fr;
+      gap: var(--space-3);
+      align-items: baseline;
+    }
+  }
+
+  .status-view .status-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0;
+    list-style: none;
+  }
+
+  .status-view .status-list > li {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    overflow-wrap: anywhere;
+  }
+
+  .status-view .status-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1) var(--space-3);
+  }
+
+  .status-view .status-job-name {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .status-view .status-problem-item {
+    font-weight: var(--weight-medium);
+  }
+
+  .status-view .status-check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--ok-text);
+    font-weight: var(--weight-medium);
+  }
+
+  .status-view .status-steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding-inline-start: var(--space-5);
+    max-inline-size: 70ch;
+  }
+
+  .status-view .status-addresses {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .status-view .status-addresses dt {
+    font-size: var(--text-sm);
+    color: var(--ink-muted);
+  }
+
+  .status-view .status-address {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-3);
+  }
+
+  .status-view .status-address code {
+    min-inline-size: 0;
+  }
+}

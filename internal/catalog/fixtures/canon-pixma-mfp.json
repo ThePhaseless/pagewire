@@ -1,0 +1,20 @@
+{
+  "devices": [
+    {
+      "vendorId": "04a9",
+      "productId": "176e",
+      "serial": "A2E8B1",
+      "manufacturer": "Canon",
+      "product": "MG3600 series",
+      "bus": 1,
+      "address": 7,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2},
+        {"class": 255, "subClass": 255, "protocol": 255}
+      ],
+      "deviceId": "MFG:Canon;CMD:BJL,BJRaster3,BSCCe,IVEC,IVECPLI,URF;SOJ:TXT01;MDL:MG3600 series;CLS:PRINTER;DES:Canon MG3600 series;VER:1.030;STA:10;FSI:03;HRI:ON;PDR:5;PSE:KPLCPDR;CID:CA_IVEC_COLOR;URF:CP1,IS1-5,MT1-3-5,OB10,PQ4-5,RS300-600,SRGB24,V1.4,W8,DM1;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

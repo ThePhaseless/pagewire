@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "0a5f",
+      "productId": "0080",
+      "serial": "28J183301234",
+      "manufacturer": "Zebra Technologies",
+      "product": "ZTC GK420d",
+      "bus": 1,
+      "address": 8,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Zebra Technologies;CMD:ZPL;MDL:ZTC GK420d;CLS:PRINTER;DES:Zebra GK420d label printer;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

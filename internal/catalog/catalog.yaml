@@ -1,0 +1,64 @@
+# printscan device catalog: data only. The dispatcher (dispatch.go) evaluates
+# rules top to bottom and the first match wins. catalog_test.go checks that
+# every reference resolves.
+apiVersion: printscan.catalog/v1
+
+printers:
+  - {id: ipp-usb, role: ipp-usb}                                       # device image, ipp-usb container
+  # deviceSchemes become QueueSpec.Schemes: the preferred CUPS backend when one
+  # device is listed by several (hplip: hp: before usb:).
+  - {id: ps, image: printscan-driver-ps, app: ps-printer-app, port: 8001, deviceSchemes: [usb]}
+  - {id: hplip, image: printscan-driver-hplip, app: hplip-printer-app, port: 8002, deviceSchemes: [hp, usb]}
+  - {id: gutenprint, image: printscan-driver-gutenprint, app: gutenprint-printer-app, port: 8003, deviceSchemes: [usb]}
+  - {id: ghostscript, image: printscan-driver-ghostscript, app: ghostscript-printer-app, port: 8004, deviceSchemes: [usb]}
+  - {id: sim, role: ippeveprinter, port: 8631}                          # simulated mode only
+
+# airsane and sim are the same AirSane daemon in different modes, so they share
+# a port; they never run in the same pod.
+scanners:
+  - {id: ipp-usb}
+  - {id: airsane, port: 8090}
+  - {id: sim, port: 8090}                                               # AirSane + SANE "test"
+
+eulas:
+  - id: hplip-plugin
+    version: "3.24.4"
+    vendor: HP
+    title: HP Linux Imaging and Printing proprietary plug-in
+    # HP's plug-in page: developers.hp.com answers 403 to automated clients, but
+    # the Wayback Machine has a 200 snapshot of it from 2026-03-10. Its content
+    # was not reviewed. The licence text itself ships inside the .run file.
+    url: https://developers.hp.com/hp-linux-imaging-and-printing/plugins
+    summary: Needed by some HP lasers for firmware upload and by some HP scanners.
+
+blobs:
+  - id: hplip-plugin
+    eula: hplip-plugin
+    enabled: true
+    url: https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-3.24.4-plugin.run
+    # keys/hplip.asc: "HPLIP (HP Linux Imaging and Printing) <hplip@hp.com>",
+    # dsa1024, fingerprint 4ABA2F66DBD5A95894910E0673D770CDA59047B9. The
+    # fingerprint is the GPG_Verification default key in hplip 3.24.4's
+    # base/validation.py. The key was fetched from keyserver.ubuntu.com because
+    # the keys.openpgp.org copy has its user ID stripped, which go-crypto
+    # refuses to parse. HP signs the .run with DSA over SHA-1.
+    verify: {pgpSignatureURL: https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-3.24.4-plugin.run.asc, pgpKey: keys/hplip.asc}
+    format: hplip-plugin
+    maxBytes: 52428800
+
+# Used when a rule's saneBackends is empty. Ubuntu 26.04's libsane1 ships every
+# backend here except hpaio, which libsane-hpaio ships; the device image installs
+# both. Never add net, escl or airscan: AirSane would re-export network scanners.
+defaultSaneBackends: [hpaio, epson2, epsonds, pixma, genesys, plustek, fujitsu, canon_dr, xerox_mfp, kodakaio]
+
+# A match is the AND of the keys present. interface: any interface of a device
+# that has a printer-class (7) interface. command: any IEEE-1284 CMD token,
+# case-insensitive. The last rule is the catch-all.
+rules:
+  - {name: ipp-over-usb, match: {interface: {class: 7, subClass: 1, protocol: 4}}, printer: ipp-usb, scanner: ipp-usb}
+  - {name: hp, match: {vendorId: "03f0"}, printer: hplip, scanner: airsane, saneBackends: [hpaio], optionalEulas: [hplip-plugin]}
+  - {name: postscript, match: {command: [POSTSCRIPT, "POSTSCRIPT LEVEL 2", "POSTSCRIPT LEVEL 3", BRSCRIPT]}, printer: ps, scanner: airsane}
+  - {name: epson, match: {vendorId: "04b8"}, printer: gutenprint, scanner: airsane, saneBackends: [epson2, epsonds]}
+  - {name: canon, match: {vendorId: "04a9"}, printer: gutenprint, scanner: airsane, saneBackends: [pixma]}
+  - {name: pcl, match: {command: [PCL, PCLXL, PCL5, PCL5E, PCL5C, PCL6]}, printer: ghostscript, scanner: airsane}
+  - {name: fallback, match: {}, printer: ghostscript, scanner: airsane}

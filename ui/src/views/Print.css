@@ -1,0 +1,105 @@
+@layer views {
+  .print-view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+    /* File and job names can be long unbroken tokens. */
+    overflow-wrap: anywhere;
+  }
+
+  .print-view .print-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    gap: var(--space-4);
+    align-items: start;
+  }
+
+  @media (min-width: 1024px) {
+    .print-view .print-grid {
+      grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    }
+  }
+
+  .print-view .print-files .ui-card-body,
+  .print-view .print-options .ui-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .print-view .ui-dropzone[data-disabled] {
+    opacity: 0.6;
+  }
+
+  .print-view .print-drop-icon {
+    color: var(--ink-muted);
+  }
+
+  .print-view .print-drop-label {
+    font-weight: var(--weight-medium);
+  }
+
+  .print-view .print-subtle {
+    color: var(--ink-muted);
+    font-size: var(--text-sm);
+  }
+
+  .print-view .print-problem {
+    color: var(--problem-text);
+    font-size: var(--text-sm);
+  }
+
+  .print-view .print-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0;
+    list-style: none;
+  }
+
+  .print-view .print-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding-block: var(--space-2);
+    border-block-end: 1px solid var(--rule);
+  }
+
+  .print-view .print-row:last-child {
+    border-block-end: 0;
+  }
+
+  .print-view .print-row-main {
+    display: flex;
+    flex: 1 1 12rem;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-inline-size: 0;
+  }
+
+  .print-view .print-name {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .print-view .print-file-icon {
+    flex: none;
+    color: var(--ink-muted);
+  }
+
+  .print-view .print-row[data-problem] .print-file-icon {
+    color: var(--problem-text);
+  }
+
+  .print-view .print-submit {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  @media (max-width: 767px) {
+    .print-view .print-submit .ui-button {
+      inline-size: 100%;
+    }
+  }
+}

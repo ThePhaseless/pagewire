@@ -1,0 +1,146 @@
+@layer views {
+  .scan-view {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
+  .scan-view .scan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    gap: var(--space-4);
+    align-items: start;
+  }
+
+  @media (min-width: 1024px) {
+    .scan-view .scan-grid {
+      grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    }
+  }
+
+  .scan-view .scan-options .ui-card-body,
+  .scan-view .scan-result .ui-card-body,
+  .scan-view .scan-history .ui-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .scan-view .scan-subtle {
+    color: var(--ink-muted);
+    font-size: var(--text-sm);
+  }
+
+  .scan-view .scan-submit {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  @media (max-width: 767px) {
+    .scan-view .scan-submit .ui-button {
+      inline-size: 100%;
+    }
+  }
+
+  /* Thumbnails: page-shaped wells, as many per row as fit the card. */
+  .scan-view .scan-thumbs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 7.5rem), 1fr));
+    gap: var(--space-3);
+    padding: 0;
+    list-style: none;
+  }
+
+  .scan-view .scan-thumb {
+    position: relative;
+    display: block;
+    inline-size: 100%;
+    min-block-size: var(--touch);
+    padding: 0;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-control);
+    background: var(--paper-sunken);
+    overflow: hidden;
+    cursor: zoom-in;
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+
+  .scan-view .scan-thumb[data-hovered] {
+    border-color: var(--rule-strong);
+  }
+
+  .scan-view .scan-thumb[data-focus-visible] {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  .scan-view .scan-thumb img {
+    display: block;
+    inline-size: 100%;
+    aspect-ratio: 210 / 297;
+    object-fit: contain;
+  }
+
+  .scan-view .scan-thumb-label {
+    position: absolute;
+    inset-block-end: var(--space-1);
+    inset-inline-end: var(--space-1);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--paper-raised);
+    color: var(--ink-muted);
+    font-size: var(--text-xs);
+  }
+
+  .scan-view .scan-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0;
+    list-style: none;
+  }
+
+  .scan-view .scan-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding-block: var(--space-2);
+    border-block-end: 1px solid var(--rule);
+  }
+
+  .scan-view .scan-row:last-child {
+    border-block-end: 0;
+  }
+
+  .scan-view .scan-row-main {
+    display: flex;
+    flex: 1 1 12rem;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-inline-size: 0;
+  }
+
+  .scan-view .scan-row[data-current] .scan-row-main {
+    font-weight: var(--weight-medium);
+  }
+}
+
+/* The dialogs render in a portal outside .scan-view. */
+@layer views {
+  .ui-dialog .scan-preview {
+    display: block;
+    inline-size: 100%;
+    max-block-size: 75dvh;
+    object-fit: contain;
+    background: var(--paper-sunken);
+  }
+
+  .ui-dialog .scan-dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-3);
+    margin-block-start: var(--space-4);
+  }
+}

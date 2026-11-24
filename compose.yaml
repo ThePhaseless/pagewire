@@ -1,0 +1,17 @@
+# Development: the control plane with the simulated backend (in-process virtual printer and scanner).
+# docker compose up, then open http://127.0.0.1:8080
+services:
+  printscan:
+    build: .
+    command: ["serve", "--backend=sim"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - data:/data
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop: [ALL]
+
+volumes:
+  data:

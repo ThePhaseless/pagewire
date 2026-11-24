@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "043d",
+      "productId": "0229",
+      "serial": "4514120B4C1F2",
+      "manufacturer": "Lexmark International",
+      "product": "Lexmark MS610dn",
+      "bus": 1,
+      "address": 3,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Lexmark International;CMD:PJL,PCL,PCLXL,POSTSCRIPT,PDF,PPDS;MDL:Lexmark MS610dn;CLS:PRINTER;DES:Lexmark MS610dn;SN:4514120B4C1F2;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

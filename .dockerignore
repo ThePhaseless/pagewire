@@ -1,0 +1,6 @@
+.git
+ui/node_modules
+ui/dist
+ui/e2e/artifacts
+.worktrees
+.cache

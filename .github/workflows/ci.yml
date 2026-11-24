@@ -1,0 +1,244 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    # A versioned label, so Renovate offers the next Ubuntu as a PR that CI tests first.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - name: Install the cgo build headers (go-mfp imgconv needs libjpeg and libpng)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
+      - run: go mod verify
+      - run: go vet ./...
+      - run: golangci-lint run
+      - run: go test -race -count=1 ./...
+      - run: go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml
+      - run: go tool go-licenses check ./cmd/printscan --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC,MPL-2.0
+      - run: actionlint
+      - name: Validate the example deployment
+        run: kustomize build deploy/base | kubeconform -strict -summary -kubernetes-version 1.37.0 -
+      - name: Validate the rendered device pod goldens and the device plugin example
+        run: kubeconform -strict -summary -kubernetes-version 1.37.0 internal/backend/k8s/testdata/*.golden.yaml deploy/examples/generic-device-plugin.yaml
+      - run: kube-linter lint deploy/base internal/backend/k8s/testdata
+
+  ui:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - run: bun install --frozen-lockfile
+      - run: bun run gen
+      - name: The generated Zod types match the committed schema
+        run: git diff --exit-code src/gen
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun run test
+      - run: bun run build
+      - name: The build keeps dist/.keep and leaves the tree clean
+        run: test -f dist/.keep && test -z "$(git status --porcelain -- .)"
+
+  e2e:
+    needs: [go, ui]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - name: Install the cgo build headers (the harness builds the binary)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
+      - run: bun install --frozen-lockfile
+      - name: Install Chromium for the browser scenarios
+        run: bunx playwright-core install --with-deps chromium-headless-shell
+      - run: bun run build
+      - run: bun run e2e
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-artifacts
+          path: ui/e2e/artifacts
+          if-no-files-found: ignore
+
+  # Real daemons under host networking: dbus, avahi, ippeveprinter, AirSane, ps-printer-app and the agent.
+  integration:
+    needs: go
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - name: Install the cgo build headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build printscan:dev
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          tags: printscan:dev
+          load: true
+          cache-from: type=gha,scope=integration-printscan
+          cache-to: type=gha,mode=max,scope=integration-printscan
+      # The device and driver Dockerfiles end with a sources stage, so the target is always named.
+      - name: Build printscan-device:dev
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/device/Dockerfile
+          target: device
+          tags: printscan-device:dev
+          load: true
+          cache-from: type=gha,scope=integration-printscan-device
+          cache-to: type=gha,mode=max,scope=integration-printscan-device
+      - name: Build printscan-driver-ps:dev
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/driver/Dockerfile
+          target: ps
+          tags: printscan-driver-ps:dev
+          load: true
+          cache-from: type=gha,scope=integration-printscan-driver-ps
+          cache-to: type=gha,mode=max,scope=integration-printscan-driver-ps
+      - name: Free port 5353 for the test's avahi-daemon
+        run: |
+          if systemctl is-active --quiet avahi-daemon.service avahi-daemon.socket; then
+            sudo systemctl stop avahi-daemon.socket avahi-daemon.service
+          fi
+      - name: Start the daemons
+        run: |
+          printf %s "$(openssl rand -hex 16)" > test/integration/token
+          docker compose -f compose.test.yaml up -d
+      - run: go test -tags integration -count=1 ./test/integration/...
+      - if: failure()
+        run: docker compose -f compose.test.yaml logs --tail=500
+      - if: always()
+        run: docker compose -f compose.test.yaml down -v
+
+  # Docker's reusable workflow: one native runner per platform, a merged multi-platform manifest,
+  # provenance and SBOM attestations signed with the job's OIDC identity. A pull request builds without pushing.
+  build:
+    needs: [go, ui, e2e, integration]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: printscan, file: Dockerfile, target: ""}
+          - {image: printscan-device, file: images/device/Dockerfile, target: device}
+          - {image: printscan-driver-ps, file: images/driver/Dockerfile, target: ps}
+          - {image: printscan-driver-hplip, file: images/driver/Dockerfile, target: hplip}
+          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint}
+          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript}
+    uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    with:
+      output: image
+      push: ${{ github.event_name != 'pull_request' }}
+      file: ${{ matrix.file }}
+      target: ${{ matrix.target }}
+      platforms: linux/amd64,linux/arm64
+      cache: true
+      cache-mode: max
+      cache-scope: ${{ matrix.image }}
+      sbom: true
+      set-meta-labels: true
+      build-args: VERSION=${{ github.ref_name }}
+      meta-images: ghcr.io/thephaseless/${{ matrix.image }}
+      # `latest` follows the newest version tag (the action's default flavor).
+      meta-tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=semver,pattern={{major}}
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  # Corresponding source for the GPL/LGPL programs in the device and driver images (<image>:<version>-sources).
+  # Same cache scope as the build, so the final stages' source-packages.txt come from the cache.
+  sources:
+    if: github.ref_type == 'tag'
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: printscan-device, file: images/device/Dockerfile}
+          - {image: printscan-driver-ps, file: images/driver/Dockerfile}
+          - {image: printscan-driver-hplip, file: images/driver/Dockerfile}
+          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile}
+          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile}
+    uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    with:
+      output: image
+      push: true
+      file: ${{ matrix.file }}
+      target: sources
+      platforms: linux/amd64
+      cache: true
+      cache-mode: max
+      cache-scope: ${{ matrix.image }}
+      sbom: true
+      set-meta-labels: true
+      build-args: VERSION=${{ github.ref_name }}
+      meta-images: ghcr.io/thephaseless/${{ matrix.image }}
+      meta-tags: type=semver,pattern={{version}},suffix=-sources
+      # Only the image build moves `latest`.
+      meta-flavor: latest=false
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  # The one check a ruleset requires: a skipped job would satisfy a required check of its own,
+  # and the build jobs carry runner labels in their names. `sources` runs only on tags.
+  ci-ok:
+    if: always()
+    needs: [go, ui, e2e, integration, build, sources]
+    runs-on: ubuntu-26.04
+    steps:
+      - run: |
+          test "${{ needs.go.result }}" = success
+          test "${{ needs.ui.result }}" = success
+          test "${{ needs.e2e.result }}" = success
+          test "${{ needs.integration.result }}" = success
+          test "${{ needs.build.result }}" = success
+          case "${{ needs.sources.result }}" in
+            success) ;;
+            skipped) test "${{ github.ref_type }}" != tag ;;
+            *) exit 1 ;;
+          esac

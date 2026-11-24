@@ -1,0 +1,100 @@
+# printscan agent guide
+
+printscan is a self-hosted print and scan service for one USB multifunction printer. A Go control plane (`cmd/printscan`) serves a React UI (`ui/`), reads one YAML file and renders a device pod through the Kubernetes API, or runs in-process virtual devices (the `sim` backend) outside Kubernetes. `README.md` describes the product; this file holds the rules that keep the code consistent.
+
+## Setup and commands
+
+Once per machine: `mise install`, then the cgo headers go-mfp's image code links against:
+
+```sh
+sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
+```
+
+Without them every Go build and test fails at the cgo step. Run tools through `mise x --` so the pins in `mise.toml` apply.
+
+| What | Command |
+|---|---|
+| Go vet, lint, test | `mise x -- go vet <dirs>`, `mise x -- golangci-lint run <dirs>`, `mise x -- go test -race -count=1 <dirs>` |
+| Validate configs | `mise x -- go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml` |
+| Run locally | `mise x -- go run ./cmd/printscan serve --backend=sim --data-dir .cache/data --config .cache/data/printscan.yaml` |
+| UI | in `ui/`: `bun install --frozen-lockfile`, then `bun run gen`, `typecheck`, `lint`, `test`, `build`, `e2e` |
+| Manifests | `mise x -- kustomize build deploy/base \| mise x -- kubeconform -strict -summary -kubernetes-version 1.37.0 -` and `mise x -- kube-linter lint deploy/base internal/backend/k8s/testdata` |
+| Workflows | `mise x -- actionlint` |
+
+`.github/workflows/ci.yml` is the full list CI runs; match it before calling work done.
+
+## Never shell out
+
+No Go file imports `os/exec` or calls `os.StartProcess`, `syscall.Exec`, `syscall.ForkExec` or `unix.Exec`; depguard and forbidigo in `.golangci.yml` fail the lint. Talk to daemons over IPP, eSCL, D-Bus or the Kubernetes API. Daemons are containers in the rendered pod spec, or in-process virtual devices in `sim`. No Go test spawns a process. The browser e2e harness (`ui/e2e/harness.ts`) builds and starts the binary; it is test infrastructure, outside this rule. Check with:
+
+```sh
+grep -rn --include='*.go' --exclude-dir=node_modules --exclude-dir=.cache '"os/exec"' .
+```
+
+It prints nothing. Rendered pod specs carry no exec probes either.
+
+## Contracts
+
+The contracts are code, and the generated files follow them:
+
+| Contract | Source | Generated |
+|---|---|---|
+| Config file `printscan/v1` | `internal/config/config.go` | `schema/config.schema.json`, `ui/src/gen/config.ts` |
+| REST DTOs | `internal/apitypes/apitypes.go` | `schema/api.schema.json`, `ui/src/gen/api.ts` |
+| Device, Backend, agent protocol | `internal/device/*.go` | none |
+| Printer families, rules, EULAs, blobs | `internal/catalog/catalog.yaml` | none |
+
+A contract change lands as one commit holding the Go types, the regenerated schemas and the regenerated Zod source:
+
+```sh
+UPDATE_SCHEMA=1 mise x -- go test ./internal/schema
+cd ui && mise x -- bun run gen
+```
+
+Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) change in their own commit. During parallel work one owner edits them; any other change that needs a new import stops and names the package and the reason.
+
+### JSON shapes
+
+- Arrays in API responses and SSE events are never `null`. Every writer goes through `encodeJSON` in `internal/api/json.go`, whose `normalize` copies the value with nil slices made empty. Add new response writers through it.
+- Every pointer reachable from an API DTO is either `jsonschema:"nullable"` without `omitempty` (always present, `null` when absent) or `json:",omitempty"` (optional config fields such as `device.usb`). `TestPointersNullable` in `internal/schema` enforces it.
+- API DTOs hold no Go maps; `TestNoMaps` enforces it.
+- GET, PUT and PATCH config, and the 412 of PUT and PATCH, all answer one `ConfigResponse` `{etag, config, state, errors, lastGood}`, built by the one `configResponse()` helper in `internal/api/config.go`.
+- Status enums always hold a schema value, never `""`. Before any input `controller.Current()` returns the initial Status: `config.state: missing`, `device.phase: none`, `device.mode: none`, `printer.state` and `scanner.state: unknown`, empty lists, null `decision` and `inventory`, zero `changedAt`. `device.mode` is the current spec's mode, `none` while the spec is nil.
+
+## Controller and backends
+
+- **Concurrency.** The controller holds its state mutex only to read or write its own fields, never across `backend.Apply`, `backend.Observe`, `RestartPod` or printer and scanner queries. `AgentReport` never calls the backend. The `sim` backend's in-memory agent runs in its own goroutine and is the only caller of the report function; `sim.Apply` never calls it and never waits for an in-flight report. Two tests guard this (a fake backend calling back into the controller, and a mutex held around `sim.Apply`); keep them green.
+- **Effective config.** `controller.Config()` is the only source of config values outside the config path: the applied config, else the last-known-good while the file is invalid, else `config.Default("Printer")`. Read it per use (the upload limit per request, scan retention per janitor run), so edits apply without a restart.
+- **Printer URI, one rule for both backends.** PAPPL families: the controller takes port and path from the agent's latest `QueueResult.PrinterURI` and joins them with `Observation.HostIP` (the node IP in k8s, 127.0.0.1 in sim). `sim` leaves `Endpoints.PrinterURI` empty for PAPPL families. `ipp-usb` and `sim` families: `Observation.Endpoints.PrinterURI` in sim, `pickIPP` over browsed `_ipp._tcp` services in k8s.
+- **Pod hash.** `device.Spec` holds exactly what the renderer and `sim.Apply` read, and its hash is `device.SpecHash` (nil and empty slices hash alike). Anything else stays out of `Spec`: PAPPL queue settings travel in `DesiredState.Queue` and the agent applies them on its next cycle, so they never roll the pod. `BlobRef.Optional` is a renderer input and stays in.
+- **Self image.** The device pod's `probe`, `agent` and `fetch-blobs` containers run the image of the container named `printscan` (`k8s.SelfContainer`) in the owner Deployment. Only without that container does it fall back to the registry tag or the `printscan=` override. The name in `deploy/base/deployment.yaml` is load-bearing.
+- **Job events.** The print handler watches each job it submitted until a terminal state and publishes a `job` SSE event per state or reasons change; DELETE publishes the canceled job. LAN jobs are not watched; the UI's `useJobs()` refetches on printer-state change and SSE reconnect.
+
+## Tests
+
+- Write the test first and watch it fail.
+- Go patterns in use: table tests with inline YAML; `httptest` against fakes; `internal/pappl/papplfake` for PAPPL; `internal/blobs/blobtest` for a synthetic vendor (key, archive, signature, in-memory transport; never the network); client-go's fake clientset; an injected fake clock; sysfs trees in `t.TempDir()`. Tests that need an unwritable directory skip as root. A test that could hang carries a deadline and fails on it.
+- Golden files: `UPDATE_SCHEMA=1` rewrites `schema/*.json`, `UPDATE_GOLDEN=1` rewrites `internal/backend/k8s/testdata/*.golden.yaml`. After regenerating the goldens, run `mise x -- kubeconform -strict -summary -kubernetes-version 1.37.0 internal/backend/k8s/testdata/*.golden.yaml`.
+- UI copy lives in `ui/src/strings.ts` (shared) and `*.strings.ts` beside each view or component; components hard-code no user-visible text.
+- `ui/src/gen` is generated: Biome skips it, `tsc` still type-checks it.
+- `bun test` preloads happy-dom unless `PRINTSCAN_E2E=1`; `bun run e2e` sets it. `ui/e2e/harness.ts` throws at load if a `window` global exists.
+- e2e console rule: any `console` error or `pageerror` fails the scenario, CSP violations included. `consoleAllowlist` stays empty. The one built-in exclusion is Chromium's "Failed to load resource: the server responded with a status of" line for `/api/v1/` URLs; each scenario instead declares its expected 4xx and 5xx API responses with `expectApiStatus`, and any other fails. Fix a CSP violation in the file at fault; the CSP is never loosened to make a test pass.
+
+## Images and CI
+
+- The device and driver Dockerfiles end with a `sources` stage, so every build names its target: `--target device`, or `ps`, `hplip`, `gutenprint`, `ghostscript`. CI matrix entries do too.
+- Every `FROM` naming an external image is `tag@sha256:<multi-arch index digest>` (from `docker buildx imagetools inspect`). Only `FROM scratch` and earlier stage names go without.
+- The control-plane `Dockerfile` links cgo statically through `/usr/local/bin/pkg-config-static` (`exec pkgconf --static "$@"`) with `ENV PKG_CONFIG` pointing at it: cmd/go reads only the first word of `$PKG_CONFIG`, so `--static` cannot go into the variable.
+- The `sources` CI job sets `meta-flavor: latest=false`; only the image build moves `latest`.
+- `ui/dist/.keep` stays committed so Go builds without a UI build; `bun run build` keeps it.
+
+## Parallel work in one tree
+
+When several agents share a working tree:
+
+- Run checks on your own paths only: `go vet`, `golangci-lint run` and `go test` on your package directories (never `./...`); `bun test <files>`, `bunx biome check <files>`, and `bunx tsc --noEmit` counting only errors in your files. Repo-wide runs come last, once everyone is done.
+- Commit only your files: `git add <files> && git commit -m "<message>" -- <files>`. If `.git/index.lock` exists, poll every second for up to 30 s and retry; leave the lock file alone.
+
+## Commits
+
+Conventional commits (`feat(config): ...`, `fix(api): ...`). The message ends on its own content, with no `Co-Authored-By` or "Generated with" trailers.

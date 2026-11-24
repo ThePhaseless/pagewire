@@ -1,0 +1,24 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: printscan-device
+  namespace: printing
+  labels:
+    app.kubernetes.io/managed-by: printscan
+    app.kubernetes.io/name: printscan-device
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: printscan
+    uid: 00000000-0000-0000-0000-000000000001
+    controller: true
+    blockOwnerDeletion: true
+data:
+  access.conf: "# Empty: access from anywhere (see SECURITY.md).\n"
+  dll.conf: |
+    hpaio
+  ignore.conf: |
+    escl:.*
+    airscan:.*
+  ipp-usb.conf: "[network]\n  http-min-port = 60000\n  http-max-port = 60009\n  dns-sd = enable\n  interface = all\n  ipv6 = enable\n\n[auth uid]\n  all = *\n\n[logging]\n  device-log = error\n  main-log = info\n  console-log = info\n  console-color = disable\n"
+  options.conf: "# AirSane per-device options; none are needed.\n"

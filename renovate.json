@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["local>ThePhaseless/renovate-config"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Upstream tags in Dockerfiles: ARG X=<version> # renovate: datasource=<ds> depName=<name>",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG [A-Z0-9_]+=(?<currentValue>[^\\s#]+)[ \\t]+# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)[ \\t]*\\n"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Untagged retrofit apps pinned to a branch commit: ARG X=<sha> # renovate: datasource=git-refs depName=<git url> currentValue=master",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG [A-Z0-9_]+=(?<currentDigest>[0-9a-f]{40})[ \\t]+# renovate: datasource=(?<datasource>git-refs) depName=(?<depName>\\S+) currentValue=(?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Go toolchain: mise.toml and the golang images move together",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "go"
+    },
+    {
+      "description": "Bun: mise.toml, the oven/bun image and @types/bun move together",
+      "matchDepNames": ["bun", "oven/bun", "@types/bun"],
+      "groupName": "bun"
+    },
+    {
+      "description": "go-mfp is pinned to a commit and has no releases; review every bump",
+      "matchPackageNames": ["github.com/OpenPrinting/go-mfp"],
+      "automerge": false
+    },
+    {
+      "matchPackageNames": ["/^k8s\\.io\\//"],
+      "groupName": "k8s.io"
+    },
+    {
+      "description": "The HPLIP plug-in must match the hplip version in the driver image",
+      "matchPackageNames": ["hplip"],
+      "automerge": false,
+      "prBodyNotes": [
+        "Bumping hplip in images/driver/Dockerfile also requires bumping the hplip-plugin EULA version, the blob version and the blob URL in internal/catalog/catalog.yaml."
+      ]
+    }
+  ]
+}

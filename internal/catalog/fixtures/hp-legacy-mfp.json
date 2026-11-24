@@ -1,0 +1,20 @@
+{
+  "devices": [
+    {
+      "vendorId": "03f0",
+      "productId": "042a",
+      "serial": "000000000QH7B4KQPR1a",
+      "manufacturer": "Hewlett-Packard",
+      "product": "HP LaserJet Professional M1132 MFP",
+      "bus": 1,
+      "address": 5,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2},
+        {"class": 255, "subClass": 255, "protocol": 255}
+      ],
+      "deviceId": "MFG:Hewlett-Packard;MDL:HP LaserJet Professional M1132 MFP;CMD:ZJS,PJL,ACL,HTTP,ZJSPCL;CLS:PRINTER;DES:HP LaserJet Professional M1132 MFP;FWVER:20111018;SN:000000000QH7B4KQPR1a;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

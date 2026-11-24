@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "04f9",
+      "productId": "0446",
+      "serial": "E78123A9N456789",
+      "manufacturer": "Brother",
+      "product": "HL-L2350DW series",
+      "bus": 2,
+      "address": 2,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Brother;CMD:PJL,PCL,PCLXL,URF;MDL:HL-L2350DW series;CLS:PRINTER;CID:Brother Laser Type1;URF:W8,CP1,IS4-1,MT1-3-4-5-8,OB10,PQ4,RS300-600,V1.3,DM1;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

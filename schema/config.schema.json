@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/config.schema.json",
+  "$ref": "#/$defs/Config",
+  "$defs": {
+    "Config": {
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "printscan/v1"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "printer-location, 0 to 127 characters."
+        },
+        "device": {
+          "$ref": "#/$defs/Device"
+        },
+        "print": {
+          "$ref": "#/$defs/PrintConfig"
+        },
+        "scan": {
+          "$ref": "#/$defs/ScanConfig"
+        },
+        "licenses": {
+          "$ref": "#/$defs/Licenses"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "name"
+      ]
+    },
+    "Device": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "usb",
+            "simulated"
+          ],
+          "description": "usb, or simulated (test printer and SANE test scanner, no USB resource).",
+          "default": "usb"
+        },
+        "usb": {
+          "$ref": "#/$defs/USB",
+          "description": "Optional selector when several USB devices are visible. Only allowed with mode usb."
+        },
+        "driver": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "ps",
+            "hplip",
+            "gutenprint",
+            "ghostscript"
+          ],
+          "default": "auto"
+        },
+        "scanner": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "airsane",
+            "none"
+          ],
+          "default": "auto"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "EULARef": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Licenses": {
+      "properties": {
+        "acceptedEulas": {
+          "items": {
+            "$ref": "#/$defs/EULARef"
+          },
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Each {id, version} must exist in the catalog; duplicates are rejected."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "PrintConfig": {
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/PrintDefaults"
+        },
+        "maxUploadMiB": {
+          "type": "integer",
+          "maximum": 500,
+          "minimum": 1,
+          "default": 50
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "PrintDefaults": {
+      "properties": {
+        "media": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$",
+          "description": "PWG self-describing media name.",
+          "default": "iso_a4_210x297mm"
+        },
+        "sides": {
+          "type": "string",
+          "enum": [
+            "one-sided",
+            "two-sided-long-edge",
+            "two-sided-short-edge"
+          ],
+          "default": "one-sided"
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "color",
+            "monochrome"
+          ],
+          "default": "auto"
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "normal",
+            "high"
+          ],
+          "default": "normal"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ScanConfig": {
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/ScanDefaults"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "maximum": 3650,
+          "minimum": 0,
+          "description": "Days to keep scans; 0 keeps them forever.",
+          "default": 7
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ScanDefaults": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "platen",
+            "adf",
+            "adf-duplex"
+          ],
+          "default": "platen"
+        },
+        "resolution": {
+          "type": "integer",
+          "maximum": 1200,
+          "minimum": 75,
+          "default": 300
+        },
+        "colorMode": {
+          "type": "string",
+          "enum": [
+            "color",
+            "grayscale",
+            "blackandwhite"
+          ],
+          "default": "color"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "jpeg"
+          ],
+          "default": "pdf"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "USB": {
+      "properties": {
+        "vendorId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "productId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "serial": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  }
+}

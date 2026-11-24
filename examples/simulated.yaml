@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/config.schema.json
+apiVersion: printscan/v1
+name: Simulated printer
+device:
+  mode: simulated

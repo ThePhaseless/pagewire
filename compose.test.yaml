@@ -1,0 +1,145 @@
+# Integration test stack: the device pod's daemons under host networking, with
+# the users, read-only root file systems and writable paths of the device-pod
+# image contract (internal/backend/k8s/render.go renders the same set).
+# Ports are high and fixed so they do not clash with a real device pod.
+# See test/integration/README.md for how to run it.
+name: printscan-it # apart from the dev stack in compose.yaml
+
+x-hardened: &hardened
+  network_mode: host
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: on-failure
+
+services:
+  dbus:
+    <<: *hardened
+    image: printscan-device:dev
+    user: "101:101" # messagebus (LABEL dev.printscan.uid.messagebus)
+    entrypoint: ["/usr/bin/dbus-daemon"]
+    command: ["--config-file=/etc/printscan/dbus.conf", "--nofork", "--nopidfile"]
+    volumes:
+      - run-dbus:/run/dbus
+
+  avahi:
+    <<: *hardened
+    image: printscan-device:dev
+    user: "102:102" # avahi (LABEL dev.printscan.uid.avahi)
+    entrypoint: ["/usr/sbin/avahi-daemon"]
+    command: ["--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/printscan/avahi-daemon.conf"]
+    volumes:
+      - run-dbus:/run/dbus
+    tmpfs:
+      # avahi-daemon insists on creating /run/avahi-daemon itself and owning it
+      # (avahi:avahi), which a mount at that path never is; /run is mounted instead.
+      - /run:mode=1777
+    # AirSane never retries a failed Avahi registration, so the daemons wait for
+    # a running avahi. The rendered pod has no such gate (no exec probes).
+    healthcheck:
+      test: ["CMD", "/usr/sbin/avahi-daemon", "-c"]
+      interval: 5s
+      start_period: 30s
+      start_interval: 1s
+    depends_on: [dbus]
+
+  sim-printer:
+    <<: *hardened
+    image: printscan-device:dev
+    user: "65532:65532"
+    entrypoint: ["/usr/sbin/ippeveprinter"]
+    command:
+      - "-p"
+      - "18631"
+      - "-f"
+      - "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf"
+      - "-l"
+      - "Integration test"
+      - "printscan-it-sim"
+    volumes:
+      - run-dbus:/run/dbus
+    tmpfs:
+      - /tmp:mode=1777
+    depends_on: &avahi-ready
+      avahi:
+        condition: service_healthy
+
+  airsane:
+    <<: *hardened
+    image: printscan-device:dev
+    user: "65532:65532" # simulated mode: SANE "test" needs no USB
+    entrypoint: ["/usr/local/bin/airsaned"]
+    command:
+      - "--listen-port=18090"
+      - "--hotplug=false"
+      # Empty files: compose cannot inject the rendered ConfigMap items into a
+      # read-only container without extra files. None changes the test: no
+      # per-device options, dll.conf has nothing to ignore, access from anywhere.
+      - "--options-file=/dev/null"
+      - "--ignore-list=/dev/null"
+      - "--access-file=/dev/null"
+    environment:
+      SANE_CONFIG_DIR: "/etc/printscan/sane.d:"
+    volumes:
+      - run-dbus:/run/dbus
+      - ./test/integration/sane.d:/etc/printscan/sane.d:ro
+    tmpfs:
+      - /tmp:mode=1777
+    depends_on: *avahi-ready
+
+  printer-app:
+    <<: *hardened
+    image: printscan-driver-ps:dev
+    user: "0:0" # as in usb mode; the cups usb backend is 0744
+    entrypoint: ["/usr/local/bin/ps-printer-app"]
+    command: ["-o", "server-port=18001", "-o", "log-file=-", "server"]
+    volumes:
+      - run-dbus:/run/dbus
+    tmpfs:
+      - /var/lib/ps-printer-app:mode=1777
+      - /var/spool/ps-printer-app:mode=1777
+      - /tmp:mode=1777
+      - /etc/cups/ssl:mode=1777 # PAPPL's self-signed TLS certificate
+      - /run:mode=1777 # PAPPL's control socket /run/ps-printer-app.sock
+      - /var/cache/fontconfig:mode=1777 # the filters' font cache
+    depends_on: *avahi-ready
+
+  agent:
+    <<: *hardened
+    image: printscan:dev
+    user: "65532:65532"
+    command:
+      - "agent"
+      - "run"
+      - "--control-plane-url"
+      - "http://127.0.0.1:18081"
+      - "--token-file"
+      - "/run/secrets/token"
+      - "--pappl-url"
+      - "ipp://127.0.0.1:18001/ipp/system"
+      - "--dbus-address"
+      - "unix:path=/run/dbus/system_bus_socket"
+      - "--pod-uid"
+      - "it"
+    volumes:
+      - run-dbus:/run/dbus
+    secrets: [token]
+    healthcheck:
+      disable: true # the image's HEALTHCHECK probes the control plane's :8080, which the agent never serves
+    depends_on:
+      avahi:
+        condition: service_healthy
+      printer-app:
+        condition: service_started
+
+secrets:
+  token:
+    file: ./test/integration/token # written before "up"; git-ignored
+
+volumes:
+  # Shared like the pod's /run/dbus emptyDir (world-writable, as the kubelet makes it).
+  run-dbus:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: mode=1777

@@ -1,0 +1,458 @@
+package k8s
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
+	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
+	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
+
+	"github.com/ThePhaseless/printscan/internal/catalog"
+	"github.com/ThePhaseless/printscan/internal/device"
+)
+
+// Names and labels of the rendered objects.
+const (
+	DeviceName      = "printscan-device" // Deployment and ConfigMap
+	TokenSecretName = "printscan-agent-token"
+	TokenSecretKey  = "token"
+	NameLabel       = "app.kubernetes.io/name"
+	ManagedByLabel  = "app.kubernetes.io/managed-by"
+	FieldManager    = "printscan"
+
+	SpecHashAnnotation   = "printscan.dev/spec-hash"
+	ConfigHashAnnotation = "printscan.dev/config-hash"
+)
+
+// ErrNoUSBResource is returned for usb and probe specs when Params.USBResource is empty.
+var ErrNoUSBResource = errors.New("needs a USB resource but Params.USBResource is empty")
+
+// Owner is the control plane's own Deployment, which owns everything rendered.
+type Owner struct {
+	Name string
+	UID  types.UID
+}
+
+// Params are the renderer's inputs besides the Spec.
+type Params struct {
+	Namespace   string
+	Owner       Owner
+	Registry    string
+	Tag         string
+	Overrides   map[string]string
+	AgentURL    string
+	USBResource string // extended resource name, e.g. devic.es/printer; "" means no USB
+	BlobPVC     string
+	SelfImage   string // image of the owner's SelfContainer: probe, agent and fetch-blobs
+}
+
+// Fixed uids. messagebus and avahi match the LABELs of images/device/Dockerfile.
+const (
+	uidRoot       = 0
+	uidMessagebus = 101
+	uidAvahi      = 102
+	uidNonroot    = 65532
+)
+
+// Reasons for the kube-linter ignore annotations.
+const (
+	hostNetworkReason = "the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address"
+	rootReason        = "USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664"
+)
+
+// Every volume the pod can mount, in pod order; Render includes only those a container uses.
+var volumeOrder = []string{
+	"run-printscan", "run-dbus", "run-avahi", "tmp", "agent-token", "blobs",
+	"ipp-usb-conf", "ipp-usb-state", "ipp-usb-log", "app-state", "app-spool", "app-run", "app-ssl",
+	"app-fontconfig", "airsane-conf", "sane-conf",
+}
+
+type mount struct {
+	vol, path string
+	ro        bool
+}
+
+type ctr struct {
+	name, image string
+	command     []string
+	args        []string
+	env         []*corev1ac.EnvVarApplyConfiguration
+	uid         int64
+	usb         bool
+	sidecar     bool
+	mounts      []mount
+	res         [4]string // cpu request, memory request, cpu limit, memory limit
+}
+
+// Render builds the device Deployment and ConfigMap for spec. It is pure: it
+// reads only spec, p and the embedded catalog.
+func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration, *corev1ac.ConfigMapApplyConfiguration, error) {
+	if spec == nil {
+		return nil, nil, errors.New("render: nil spec")
+	}
+	usbMode := spec.Mode == device.ModeUSB || spec.Mode == device.ModeProbe
+	if usbMode && p.USBResource == "" {
+		return nil, nil, fmt.Errorf("spec mode %s %w", spec.Mode, ErrNoUSBResource)
+	}
+	cat := catalog.Default()
+	deviceImage := ImageRef(p.Registry, p.Tag, "printscan-device", p.Overrides)
+
+	probe := ctr{
+		name: "probe", image: p.SelfImage, command: []string{"/printscan"},
+		args: []string{"agent", "probe", "--out", device.InventoryFile},
+		uid:  uidNonroot, usb: usbMode,
+		mounts: []mount{{"run-printscan", "/run/printscan", false}},
+		res:    [4]string{"10m", "16Mi", "200m", "64Mi"},
+	}
+	if usbMode {
+		probe.uid = uidRoot
+	}
+	dbus := ctr{
+		name: "dbus", image: deviceImage, sidecar: true, uid: uidMessagebus,
+		command: []string{"/usr/bin/dbus-daemon"},
+		args:    []string{"--config-file=/etc/printscan/dbus.conf", "--nofork", "--nopidfile"},
+		mounts:  []mount{{"run-dbus", "/run/dbus", false}},
+		res:     [4]string{"5m", "8Mi", "100m", "32Mi"},
+	}
+	avahi := ctr{
+		name: "avahi", image: deviceImage, sidecar: true, uid: uidAvahi,
+		command: []string{"/usr/sbin/avahi-daemon"},
+		args:    []string{"--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/printscan/avahi-daemon.conf"},
+		// avahi-daemon creates /run/avahi-daemon itself and refuses it unless it
+		// is owned by avahi:avahi, which an emptyDir mounted there never is; so
+		// its own emptyDir is /run, with the shared /run/dbus mounted inside.
+		mounts: []mount{{"run-avahi", "/run", false}, {"run-dbus", "/run/dbus", false}},
+		res:    [4]string{"5m", "8Mi", "100m", "32Mi"},
+	}
+	agent := ctr{
+		name: "agent", image: p.SelfImage, sidecar: spec.Mode != device.ModeProbe, uid: uidNonroot,
+		command: []string{"/printscan"},
+		args: []string{
+			"agent", "run",
+			"--control-plane-url", p.AgentURL,
+			"--token-file", device.AgentTokenFile,
+			"--pod-uid", "$(POD_UID)",
+			"--dbus-address", device.DBusAddress,
+			"--inventory", device.InventoryFile,
+			"--blob-status", device.BlobStatusFile,
+		},
+		env: []*corev1ac.EnvVarApplyConfiguration{corev1ac.EnvVar().WithName("POD_UID").
+			WithValueFrom(corev1ac.EnvVarSource().WithFieldRef(corev1ac.ObjectFieldSelector().WithFieldPath("metadata.uid")))},
+		mounts: []mount{
+			{"agent-token", "/var/run/printscan", true},
+			{"run-printscan", "/run/printscan", true},
+			{"run-dbus", "/run/dbus", false},
+		},
+		res: [4]string{"10m", "32Mi", "200m", "128Mi"},
+	}
+
+	var printer catalog.Printer
+	if spec.Printer != "" {
+		var ok bool
+		if printer, ok = cat.Printer(spec.Printer); !ok {
+			return nil, nil, fmt.Errorf("render: unknown printer family %q", spec.Printer)
+		}
+		if printer.App != "" {
+			agent.args = append(agent.args, "--pappl-url", fmt.Sprintf("ipp://127.0.0.1:%d/ipp/system", printer.Port))
+		}
+	}
+
+	inits := []ctr{probe, dbus, avahi}
+	var mains []ctr
+	switch spec.Mode {
+	case device.ModeProbe:
+		mains = []ctr{agent}
+	case device.ModeUSB:
+		inits = append(inits, agent)
+		if len(spec.Blobs) > 0 {
+			inits = append(inits, fetchBlobs(spec.Blobs, p.SelfImage))
+		}
+		if spec.Printer == "ipp-usb" || spec.Scanner == "ipp-usb" {
+			mains = append(mains, ctr{
+				name: "ipp-usb", image: deviceImage, uid: uidRoot, usb: true,
+				command: []string{"/usr/local/sbin/ipp-usb"}, args: []string{"standalone"},
+				mounts: []mount{
+					{"ipp-usb-conf", "/etc/ipp-usb", true},
+					{"run-dbus", "/run/dbus", false},
+					{"ipp-usb-state", "/var/ipp-usb", false},
+					{"ipp-usb-log", "/var/log/ipp-usb", false},
+				},
+				res: [4]string{"10m", "32Mi", "500m", "128Mi"},
+			})
+		}
+		if printer.App != "" {
+			c := ctr{
+				name: "printer-app", image: ImageRef(p.Registry, p.Tag, printer.Image, p.Overrides), uid: uidRoot, usb: true,
+				command: []string{"/usr/local/bin/" + printer.App},
+				// log-file=- logs to stderr, so nothing is written under the read-only root.
+				args: []string{"-o", "server-port=" + strconv.Itoa(printer.Port), "-o", "log-file=-", "server"},
+				mounts: []mount{
+					{"app-run", "/run", false}, // PAPPL's control socket /run/<app>.sock
+					{"run-dbus", "/run/dbus", false},
+					{"app-state", "/var/lib/" + printer.App, false},
+					{"app-spool", "/var/spool/" + printer.App, false},
+					{"tmp", "/tmp", false},
+					{"app-ssl", "/etc/cups/ssl", false},                // PAPPL's self-signed TLS certificate
+					{"app-fontconfig", "/var/cache/fontconfig", false}, // the filters' font cache
+				},
+				res: [4]string{"50m", "64Mi", "2", "1Gi"},
+			}
+			if len(spec.Blobs) > 0 {
+				c.mounts = append(c.mounts, mount{"blobs", "/blobs", true})
+			}
+			mains = append(mains, c)
+		}
+		if spec.Scanner == "airsane" {
+			mains = append(mains, airsane(cat, spec, deviceImage, uidRoot, true))
+		}
+	case device.ModeSimulated:
+		inits = append(inits, agent)
+		mains = append(mains, ctr{
+			name: "sim-printer", image: deviceImage, uid: uidNonroot,
+			command: []string{"/usr/sbin/ippeveprinter"},
+			args: []string{
+				"-p", strconv.Itoa(printer.Port),
+				"-f", "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf",
+				"-l", spec.Location, spec.Name,
+			},
+			mounts: []mount{{"run-dbus", "/run/dbus", false}, {"tmp", "/tmp", false}},
+			res:    [4]string{"10m", "16Mi", "500m", "128Mi"},
+		})
+		if spec.Scanner != "" {
+			mains = append(mains, airsane(cat, spec, deviceImage, uidNonroot, false))
+		}
+	default:
+		return nil, nil, fmt.Errorf("render: unknown spec mode %q", spec.Mode)
+	}
+
+	cm := configMap(cat, spec, p)
+	used := map[string]bool{}
+	pod := corev1ac.PodSpec().
+		WithHostNetwork(true).
+		WithDNSPolicy(corev1.DNSClusterFirstWithHostNet).
+		WithAutomountServiceAccountToken(false).
+		WithEnableServiceLinks(false).
+		WithTerminationGracePeriodSeconds(10).
+		WithSecurityContext(corev1ac.PodSecurityContext().
+			WithFSGroup(uidNonroot).
+			WithSeccompProfile(corev1ac.SeccompProfile().WithType(corev1.SeccompProfileTypeRuntimeDefault)))
+	for _, c := range inits {
+		pod.WithInitContainers(c.build(p.USBResource, used))
+	}
+	for _, c := range mains {
+		pod.WithContainers(c.build(p.USBResource, used))
+	}
+	for _, name := range volumeOrder {
+		if used[name] {
+			pod.WithVolumes(volume(name, p.BlobPVC))
+		}
+	}
+
+	labels := map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager}
+	deploy := appsv1ac.Deployment(DeviceName, p.Namespace).
+		WithLabels(labels).
+		WithAnnotations(map[string]string{
+			"reloader.stakater.com/auto":                  "false",
+			SpecHashAnnotation:                            spec.Hash,
+			"ignore-check.kube-linter.io/host-network":    hostNetworkReason,
+			"ignore-check.kube-linter.io/run-as-non-root": rootReason,
+		}).
+		WithOwnerReferences(ownerRef(p.Owner)).
+		WithSpec(appsv1ac.DeploymentSpec().
+			WithReplicas(1).
+			WithStrategy(appsv1ac.DeploymentStrategy().WithType("Recreate")).
+			WithSelector(metav1ac.LabelSelector().WithMatchLabels(map[string]string{NameLabel: DeviceName})).
+			WithTemplate(corev1ac.PodTemplateSpec().
+				WithLabels(labels).
+				WithAnnotations(map[string]string{
+					SpecHashAnnotation:   spec.Hash,
+					ConfigHashAnnotation: dataHash(cm.Data),
+				}).
+				WithSpec(pod)))
+	return deploy, cm, nil
+}
+
+func fetchBlobs(blobs []device.BlobRef, image string) ctr {
+	args := []string{"agent", "fetch", "--dir", "/blobs", "--status-out", device.BlobStatusFile}
+	for _, b := range blobs {
+		ref := b.ID + "@" + b.Version
+		args = append(args, "--blob", ref, "--accept", ref)
+		if b.Optional {
+			args = append(args, "--optional", b.ID)
+		}
+	}
+	return ctr{
+		name: "fetch-blobs", image: image, uid: uidNonroot,
+		command: []string{"/printscan"}, args: args,
+		mounts: []mount{{"blobs", "/blobs", false}, {"run-printscan", "/run/printscan", false}},
+		res:    [4]string{"10m", "32Mi", "500m", "256Mi"},
+	}
+}
+
+func airsane(cat *catalog.Catalog, spec *device.Spec, image string, uid int64, usb bool) ctr {
+	port := 0
+	for _, s := range cat.Scanners {
+		if s.ID == spec.Scanner {
+			port = s.Port
+		}
+	}
+	c := ctr{
+		name: "airsane", image: image, uid: uid, usb: usb,
+		command: []string{"/usr/local/bin/airsaned"},
+		args: []string{
+			"--listen-port=" + strconv.Itoa(port), "--hotplug=false",
+			"--options-file=/etc/printscan/airsane/options.conf",
+			"--ignore-list=/etc/printscan/airsane/ignore.conf",
+			"--access-file=/etc/printscan/airsane/access.conf",
+		},
+		env: []*corev1ac.EnvVarApplyConfiguration{corev1ac.EnvVar().WithName("SANE_CONFIG_DIR").WithValue("/etc/printscan/sane.d:")},
+		mounts: []mount{
+			{"airsane-conf", "/etc/printscan/airsane", true},
+			{"sane-conf", "/etc/printscan/sane.d", true},
+			{"run-dbus", "/run/dbus", false},
+			{"tmp", "/tmp", false},
+		},
+		res: [4]string{"20m", "32Mi", "1", "512Mi"},
+	}
+	if len(spec.Blobs) > 0 {
+		c.mounts = append(c.mounts, mount{"blobs", "/blobs", true})
+	}
+	return c
+}
+
+func (c ctr) build(usbResource string, used map[string]bool) *corev1ac.ContainerApplyConfiguration {
+	req := corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse(c.res[0]), corev1.ResourceMemory: resource.MustParse(c.res[1]),
+	}
+	lim := corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse(c.res[2]), corev1.ResourceMemory: resource.MustParse(c.res[3]),
+	}
+	if c.usb {
+		req[corev1.ResourceName(usbResource)] = resource.MustParse("1")
+		lim[corev1.ResourceName(usbResource)] = resource.MustParse("1")
+	}
+	sc := corev1ac.SecurityContext().
+		WithRunAsUser(c.uid).
+		WithRunAsGroup(c.uid).
+		WithReadOnlyRootFilesystem(true).
+		WithAllowPrivilegeEscalation(false).
+		WithCapabilities(corev1ac.Capabilities().WithDrop("ALL"))
+	if c.uid != uidRoot {
+		sc.WithRunAsNonRoot(true)
+	}
+	out := corev1ac.Container().
+		WithName(c.name).
+		WithImage(c.image).
+		WithImagePullPolicy(PullPolicy(c.image)).
+		WithCommand(c.command...).
+		WithArgs(c.args...).
+		WithEnv(c.env...).
+		WithResources(corev1ac.ResourceRequirements().WithRequests(req).WithLimits(lim)).
+		WithSecurityContext(sc)
+	if c.sidecar {
+		out.WithRestartPolicy(corev1.ContainerRestartPolicyAlways)
+	}
+	for _, m := range c.mounts {
+		used[m.vol] = true
+		vm := corev1ac.VolumeMount().WithName(m.vol).WithMountPath(m.path)
+		if m.ro {
+			vm.WithReadOnly(true)
+		}
+		out.WithVolumeMounts(vm)
+	}
+	return out
+}
+
+func volume(name, blobPVC string) *corev1ac.VolumeApplyConfiguration {
+	v := corev1ac.Volume().WithName(name)
+	items := func(keys ...string) *corev1ac.ConfigMapVolumeSourceApplyConfiguration {
+		s := corev1ac.ConfigMapVolumeSource().WithName(DeviceName)
+		for _, k := range keys {
+			s.WithItems(corev1ac.KeyToPath().WithKey(k).WithPath(k))
+		}
+		return s
+	}
+	switch name {
+	case "agent-token":
+		return v.WithSecret(corev1ac.SecretVolumeSource().WithSecretName(TokenSecretName))
+	case "blobs":
+		return v.WithPersistentVolumeClaim(corev1ac.PersistentVolumeClaimVolumeSource().WithClaimName(blobPVC))
+	case "ipp-usb-conf":
+		return v.WithConfigMap(items("ipp-usb.conf"))
+	case "airsane-conf":
+		return v.WithConfigMap(items("options.conf", "ignore.conf", "access.conf"))
+	case "sane-conf":
+		return v.WithConfigMap(items("dll.conf"))
+	default:
+		return v.WithEmptyDir(corev1ac.EmptyDirVolumeSource())
+	}
+}
+
+const ippUSBConf = `[network]
+  http-min-port = 60000
+  http-max-port = 60009
+  dns-sd = enable
+  interface = all
+  ipv6 = enable
+
+[auth uid]
+  all = *
+
+[logging]
+  device-log = error
+  main-log = info
+  console-log = info
+  console-color = disable
+`
+
+func configMap(cat *catalog.Catalog, spec *device.Spec, p Params) *corev1ac.ConfigMapApplyConfiguration {
+	backends := spec.SaneBackends
+	switch {
+	case spec.Mode == device.ModeSimulated:
+		backends = []string{"test"}
+	case len(backends) == 0:
+		backends = cat.DefaultSaneBackends
+	}
+	return corev1ac.ConfigMap(DeviceName, p.Namespace).
+		WithLabels(map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager}).
+		WithOwnerReferences(ownerRef(p.Owner)).
+		WithData(map[string]string{
+			"ipp-usb.conf": ippUSBConf,
+			"dll.conf":     strings.Join(backends, "\n") + "\n",
+			"options.conf": "# AirSane per-device options; none are needed.\n",
+			// Loop guard: AirSane must not re-export network scanners.
+			"ignore.conf": "escl:.*\nairscan:.*\n",
+			// An empty list allows every client: the control plane scans from the
+			// pod network, which AirSane's "local" rule does not cover.
+			"access.conf": "# Empty: access from anywhere (see SECURITY.md).\n",
+		})
+}
+
+func ownerRef(o Owner) *metav1ac.OwnerReferenceApplyConfiguration {
+	return metav1ac.OwnerReference().
+		WithAPIVersion("apps/v1").WithKind("Deployment").
+		WithName(o.Name).WithUID(o.UID).
+		WithController(true).WithBlockOwnerDeletion(true)
+}
+
+func dataHash(data map[string]string) string {
+	h := sha256.New()
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(k), k, len(data[k]), data[k]) // hash writes never fail
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}

@@ -1,0 +1,363 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: printscan-device
+  namespace: printing
+  labels:
+    app.kubernetes.io/managed-by: printscan
+    app.kubernetes.io/name: printscan-device
+  annotations:
+    ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
+    ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
+    printscan.dev/spec-hash: 44f91a9fb6a0202c2048a0d9f9a1387c758d8e4af8ab3f4f254a87bc9791c2ed
+    reloader.stakater.com/auto: "false"
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: printscan
+    uid: 00000000-0000-0000-0000-000000000001
+    controller: true
+    blockOwnerDeletion: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: printscan-device
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: printscan
+        app.kubernetes.io/name: printscan-device
+      annotations:
+        printscan.dev/config-hash: e43db22957549fd53866691f0c3b8e832e5f520128bf520990728cd44d0642b9
+        printscan.dev/spec-hash: 44f91a9fb6a0202c2048a0d9f9a1387c758d8e4af8ab3f4f254a87bc9791c2ed
+    spec:
+      volumes:
+      - name: run-printscan
+        emptyDir: {}
+      - name: run-dbus
+        emptyDir: {}
+      - name: run-avahi
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: agent-token
+        secret:
+          secretName: printscan-agent-token
+      - name: blobs
+        persistentVolumeClaim:
+          claimName: printscan-blobs
+      - name: app-state
+        emptyDir: {}
+      - name: app-spool
+        emptyDir: {}
+      - name: app-run
+        emptyDir: {}
+      - name: app-ssl
+        emptyDir: {}
+      - name: app-fontconfig
+        emptyDir: {}
+      - name: airsane-conf
+        configMap:
+          name: printscan-device
+          items:
+          - key: options.conf
+            path: options.conf
+          - key: ignore.conf
+            path: ignore.conf
+          - key: access.conf
+            path: access.conf
+      - name: sane-conf
+        configMap:
+          name: printscan-device
+          items:
+          - key: dll.conf
+            path: dll.conf
+      initContainers:
+      - name: probe
+        image: ghcr.io/thephaseless/printscan:0.0.0-test
+        command:
+        - /printscan
+        args:
+        - agent
+        - probe
+        - --out
+        - /run/printscan/inventory.json
+        resources:
+          limits:
+            cpu: 200m
+            devic.es/printer: "1"
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            devic.es/printer: "1"
+            memory: 16Mi
+        volumeMounts:
+        - name: run-printscan
+          mountPath: /run/printscan
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: dbus
+        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        command:
+        - /usr/bin/dbus-daemon
+        args:
+        - --config-file=/etc/printscan/dbus.conf
+        - --nofork
+        - --nopidfile
+        resources:
+          limits:
+            cpu: 100m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 101
+          runAsGroup: 101
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: avahi
+        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        command:
+        - /usr/sbin/avahi-daemon
+        args:
+        - --no-drop-root
+        - --no-chroot
+        - --no-rlimits
+        - -f
+        - /etc/printscan/avahi-daemon.conf
+        resources:
+          limits:
+            cpu: 100m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: run-avahi
+          mountPath: /run
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 102
+          runAsGroup: 102
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: agent
+        image: ghcr.io/thephaseless/printscan:0.0.0-test
+        command:
+        - /printscan
+        args:
+        - agent
+        - run
+        - --control-plane-url
+        - http://printscan.printing.svc:8081
+        - --token-file
+        - /var/run/printscan/token
+        - --pod-uid
+        - $(POD_UID)
+        - --dbus-address
+        - unix:path=/run/dbus/system_bus_socket
+        - --inventory
+        - /run/printscan/inventory.json
+        - --blob-status
+        - /run/printscan/blobs.json
+        - --pappl-url
+        - ipp://127.0.0.1:8002/ipp/system
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: agent-token
+          readOnly: true
+          mountPath: /var/run/printscan
+        - name: run-printscan
+          readOnly: true
+          mountPath: /run/printscan
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 65532
+          runAsGroup: 65532
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: fetch-blobs
+        image: ghcr.io/thephaseless/printscan:0.0.0-test
+        command:
+        - /printscan
+        args:
+        - agent
+        - fetch
+        - --dir
+        - /blobs
+        - --status-out
+        - /run/printscan/blobs.json
+        - --blob
+        - hplip-plugin@3.24.4
+        - --accept
+        - hplip-plugin@3.24.4
+        - --optional
+        - hplip-plugin
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        volumeMounts:
+        - name: blobs
+          mountPath: /blobs
+        - name: run-printscan
+          mountPath: /run/printscan
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 65532
+          runAsGroup: 65532
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      containers:
+      - name: printer-app
+        image: ghcr.io/thephaseless/printscan-driver-hplip:0.0.0-test
+        command:
+        - /usr/local/bin/hplip-printer-app
+        args:
+        - -o
+        - server-port=8002
+        - -o
+        - log-file=-
+        - server
+        resources:
+          limits:
+            cpu: "2"
+            devic.es/printer: "1"
+            memory: 1Gi
+          requests:
+            cpu: 50m
+            devic.es/printer: "1"
+            memory: 64Mi
+        volumeMounts:
+        - name: app-run
+          mountPath: /run
+        - name: run-dbus
+          mountPath: /run/dbus
+        - name: app-state
+          mountPath: /var/lib/hplip-printer-app
+        - name: app-spool
+          mountPath: /var/spool/hplip-printer-app
+        - name: tmp
+          mountPath: /tmp
+        - name: app-ssl
+          mountPath: /etc/cups/ssl
+        - name: app-fontconfig
+          mountPath: /var/cache/fontconfig
+        - name: blobs
+          readOnly: true
+          mountPath: /blobs
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: airsane
+        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        command:
+        - /usr/local/bin/airsaned
+        args:
+        - --listen-port=8090
+        - --hotplug=false
+        - --options-file=/etc/printscan/airsane/options.conf
+        - --ignore-list=/etc/printscan/airsane/ignore.conf
+        - --access-file=/etc/printscan/airsane/access.conf
+        env:
+        - name: SANE_CONFIG_DIR
+          value: "/etc/printscan/sane.d:"
+        resources:
+          limits:
+            cpu: "1"
+            devic.es/printer: "1"
+            memory: 512Mi
+          requests:
+            cpu: 20m
+            devic.es/printer: "1"
+            memory: 32Mi
+        volumeMounts:
+        - name: airsane-conf
+          readOnly: true
+          mountPath: /etc/printscan/airsane
+        - name: sane-conf
+          readOnly: true
+          mountPath: /etc/printscan/sane.d
+        - name: run-dbus
+          mountPath: /run/dbus
+        - name: tmp
+          mountPath: /tmp
+        - name: blobs
+          readOnly: true
+          mountPath: /blobs
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      terminationGracePeriodSeconds: 10
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      hostNetwork: true
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      enableServiceLinks: false
+  strategy:
+    type: Recreate

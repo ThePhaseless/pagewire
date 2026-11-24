@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: printing
+  labels:
+    # The device pod that printscan renders uses hostNetwork (mDNS/DNS-SD and the IPP
+    # and eSCL ports on the node's LAN IP) and mounts the host's /sys, which only the
+    # privileged Pod Security level allows.
+    pod-security.kubernetes.io/enforce: privileged
