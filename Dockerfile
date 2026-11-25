@@ -28,10 +28,11 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
  # go-licenses skips the standard library, which is linked into the binary too.
  && cp "$(go env GOROOT)/LICENSE" /out/licenses/go/LICENSE-go-stdlib
 # Licence texts of the statically linked C libraries. Alpine ships no licence file for musl,
-# libpng or zlib, so libpng's and zlib's come from their headers and musl's from its release tarball.
-ADD --checksum=sha256:d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz /tmp/musl.tar.gz
+# libpng or zlib, so libpng's and zlib's come from their headers. musl's COPYRIGHT is committed
+# (extracted from the checksummed musl-1.2.6 release tarball), so the build does not depend on
+# musl.libc.org being reachable.
 RUN mkdir -p /out/licenses/c/musl /out/licenses/c/libjpeg-turbo /out/licenses/c/libpng /out/licenses/c/zlib /out/data \
- && tar -xzOf /tmp/musl.tar.gz musl-1.2.6/COPYRIGHT > /out/licenses/c/musl/COPYRIGHT \
+ && cp images/licenses/musl-1.2.6-COPYRIGHT /out/licenses/c/musl/COPYRIGHT \
  && cp /usr/share/doc/libjpeg-turbo/LICENSE.md /usr/share/doc/libjpeg-turbo/README.ijg /out/licenses/c/libjpeg-turbo/ \
  && awk '/COPYRIGHT NOTICE, DISCLAIMER, and LICENSE/,/\*\//' /usr/include/libpng16/png.h > /out/licenses/c/libpng/LICENSE \
  && sed -n '1,/\*\//p' /usr/include/zlib.h > /out/licenses/c/zlib/LICENSE \
