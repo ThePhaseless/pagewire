@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { PageHeader } from "./components/ui";
-import { navigate, useDocumentTitle, useNavigationBlocker } from "./router";
+import { navigate, useDocumentTitle, useFocusOnNavigate, useNavigationBlocker } from "./router";
 
 afterEach(cleanup);
 
@@ -99,5 +99,88 @@ describe("navigation blocker", () => {
     view.unmount();
     act(() => navigate("/scan"));
     expect(window.location.pathname).toBe("/scan");
+  });
+});
+
+function FocusHarness() {
+  useFocusOnNavigate();
+  return (
+    <main>
+      <h1>Step</h1>
+      <input aria-label="Name" />
+      <button type="button">Next</button>
+    </main>
+  );
+}
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+
+/** A Tab press that moves focus to `to` (null: off the page), as the browser does it. */
+function tab(to: HTMLElement | null) {
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: "Tab" });
+  if (to) to.focus();
+  else (document.activeElement as HTMLElement | null)?.blur();
+}
+
+describe("focus after navigation", () => {
+  afterEach(() => window.history.replaceState(null, "", "/"));
+
+  test("moves to the page heading", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    getByRole("button").focus();
+    act(() => navigate("#two"));
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("heading"));
+  });
+
+  test("leaves focus the user moved before the frame where it is", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    getByRole("button").focus();
+    act(() => navigate("#two"));
+    // A fast keyboard user (or a test) tabs on before the next frame runs.
+    tab(getByRole("textbox"));
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("textbox"));
+  });
+
+  test("leaves focus that went away and came back to the pressed control", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    getByRole("button").focus();
+    act(() => navigate("#two"));
+    // Tab wraps round the new page to the same Next button, ready for Enter.
+    tab(getByRole("textbox"));
+    tab(getByRole("button"));
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("button"));
+  });
+
+  test("leaves focus that tabbed past the last control on the body", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    getByRole("button").focus();
+    act(() => navigate("#two"));
+    tab(null);
+    await nextFrame();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  test("still moves to the heading when the focused control unmounted", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    const gone = document.createElement("button");
+    document.body.append(gone);
+    gone.focus();
+    act(() => navigate("#two"));
+    gone.remove();
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("heading"));
+  });
+
+  test("still moves to the heading when the app moved focus itself", async () => {
+    const { getByRole } = render(<FocusHarness />);
+    getByRole("button").focus();
+    act(() => navigate("#two"));
+    // A closing dialog hands focus back to the control that opened it.
+    getByRole("textbox").focus();
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("heading"));
   });
 });

@@ -24,7 +24,7 @@ import {
   type Status,
   type USBDevice,
 } from "../gen/api";
-import { navigate } from "../router";
+import { navigate, onNextFrameUnlessUserActs } from "../router";
 import { strings } from "../strings";
 import { setupStrings as s } from "./Setup.strings";
 import "./Setup.css";
@@ -206,7 +206,7 @@ export function Setup({
     if (step === "name" && !(nameOk && locationOk)) {
       setTried(true);
       // After the error messages render, take keyboard users to the first one.
-      requestAnimationFrame(() =>
+      onNextFrameUnlessUserActs(() =>
         document.querySelector<HTMLElement>(".setup-view [aria-invalid='true']")?.focus(),
       );
       return;

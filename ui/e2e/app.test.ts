@@ -396,6 +396,27 @@ for (const vp of viewports) {
         const product = await fixtureProduct("ippusb-mfp");
         await scenario(server, vp, async (s) => {
           const { page } = s;
+          // Late frames, as on a loaded CI runner: a focus move the app defers to the next frame
+          // then lands after the keys below, and must not take focus the keyboard already moved.
+          await page.addInitScript(() => {
+            const raf = window.requestAnimationFrame.bind(window);
+            const caf = window.cancelAnimationFrame.bind(window);
+            const late = new Map<number, number>();
+            window.requestAnimationFrame = (cb) => {
+              const id = raf((t) => {
+                late.set(
+                  id,
+                  window.setTimeout(() => late.delete(id) && cb(t), 50),
+                );
+              });
+              return id;
+            };
+            window.cancelAnimationFrame = (id) => {
+              caf(id);
+              clearTimeout(late.get(id));
+              late.delete(id);
+            };
+          });
           await s.goto("/setup");
           await page.getByText(product).waitFor();
           await tabTo(page, strings.buttons.next);

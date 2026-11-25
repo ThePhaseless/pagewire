@@ -91,11 +91,30 @@ export function useLinkInterception() {
   }, []);
 }
 
+/**
+ * Runs `move` (a focus change) on the next frame, once the new view has rendered, unless the user
+ * pressed a key or the pointer before then: a keyboard user who already tabbed on keeps their
+ * place and their keystrokes, even when Tab has brought them back to the control they pressed.
+ * Focus the app moves itself in between (a closing dialog restoring it) is still overridden.
+ */
+export function onNextFrameUnlessUserActs(move: () => void) {
+  let acted = false;
+  const onInput = () => {
+    acted = true;
+  };
+  for (const type of ["keydown", "pointerdown"]) document.addEventListener(type, onInput, true);
+  requestAnimationFrame(() => {
+    for (const type of ["keydown", "pointerdown"])
+      document.removeEventListener(type, onInput, true);
+    if (!acted) move();
+  });
+}
+
 /** After a navigation (not the first render), moves focus to the page heading and scrolls up. */
 export function useFocusOnNavigate() {
   useEffect(() => {
-    const onNavigate = () => {
-      requestAnimationFrame(() => {
+    const onNavigate = () =>
+      onNextFrameUnlessUserActs(() => {
         const h1 = document.querySelector<HTMLElement>("main h1");
         if (h1) {
           if (!h1.hasAttribute("tabindex")) h1.setAttribute("tabindex", "-1");
@@ -103,7 +122,6 @@ export function useFocusOnNavigate() {
         }
         window.scrollTo({ top: 0 });
       });
-    };
     window.addEventListener(NAVIGATE, onNavigate);
     window.addEventListener("popstate", onNavigate);
     return () => {
