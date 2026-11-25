@@ -92,7 +92,7 @@ export const printStrings = {
     state: {
       pending: "Waiting",
       processing: "Printing",
-      completed: "Printed",
+      completed: "Sent to printer",
       canceled: "Canceled",
       aborted: "Failed",
       held: "Held",

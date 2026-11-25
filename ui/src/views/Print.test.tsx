@@ -474,7 +474,7 @@ describe("Print view", () => {
     };
     jobs = [job, lanJob];
     await renderPrint(ready);
-    await waitFor(() => expect(within(row("lan.ps")).getByText("Printed")).toBeTruthy());
+    await waitFor(() => expect(within(row("lan.ps")).getByText("Sent to printer")).toBeTruthy());
     expect(row("lan.ps").querySelector(".print-subtle")?.textContent).toBe("");
     await waitFor(() => expect(within(row("boarding-pass.pdf")).getByText("Waiting")).toBeTruthy());
 
@@ -484,7 +484,9 @@ describe("Print view", () => {
     expect(calls).toContainEqual({ method: "DELETE", path: "/api/v1/jobs/7" });
 
     emit("job", { ...job, state: "completed" });
-    await waitFor(() => expect(within(row("boarding-pass.pdf")).getByText("Printed")).toBeTruthy());
+    await waitFor(() =>
+      expect(within(row("boarding-pass.pdf")).getByText("Sent to printer")).toBeTruthy(),
+    );
     expect(screen.getAllByText("boarding-pass.pdf").length).toBe(1);
     expect(screen.queryByRole("button", { name: "Cancel boarding-pass.pdf" })).toBeNull();
   });

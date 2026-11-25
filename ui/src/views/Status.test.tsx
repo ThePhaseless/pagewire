@@ -448,7 +448,7 @@ describe("Status view", () => {
     await waitFor(() =>
       expect(
         within(screen.getByText("boarding-pass.pdf").closest("li") as HTMLElement).getByText(
-          "Printed",
+          "Sent to printer",
         ),
       ).toBeTruthy(),
     );
