@@ -39,11 +39,35 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 	}
 
 	var keep *Printer
+	unlisted := lazyUnlisted(ctx, c, want.Driver)
+	// A pinned driver the app does not list is an error; check before deleting
+	// anything, so the queue that still works stays usable.
+	if want.DriverPinned && want.Driver != "auto" && !slices.ContainsFunc(printers, func(p Printer) bool {
+		return p.Name == want.Name && p.DeviceURI == dev.URI && p.Driver == want.Driver
+	}) {
+		missing, err := unlisted()
+		if err != nil {
+			return failed(err.Error())
+		}
+		if missing {
+			r := failed("driver " + want.Driver + " is not listed by the printer application")
+			if p := byName(printers, want.Name); p != nil {
+				r.PrinterURI = p.URI
+			}
+			return r
+		}
+	}
 	for i := range printers {
 		p := &printers[i]
-		if p.Name == want.Name && p.DeviceURI == dev.URI && (want.Driver == "auto" || p.Driver == want.Driver) {
-			keep = p
-			continue
+		if p.Name == want.Name && p.DeviceURI == dev.URI {
+			ok, err := keepDriver(p.Driver, want, unlisted)
+			if err != nil {
+				return failed(err.Error())
+			}
+			if ok {
+				keep = p
+				continue
+			}
 		}
 		if err := c.DeletePrinter(ctx, p.ID); err != nil {
 			return failed(err.Error())
@@ -51,7 +75,7 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 	}
 
 	if keep == nil {
-		if msg := create(ctx, c, want, dev); msg != "" {
+		if msg := create(ctx, c, want, dev, unlisted); msg != "" {
 			return failed(msg)
 		}
 		if printers, err = c.Printers(ctx); err != nil {
@@ -71,16 +95,68 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 			return device.QueueResult{State: device.QueueError, Message: err.Error(), PrinterURI: keep.URI, DeviceURI: dev.URI}
 		}
 	}
-	return device.QueueResult{State: device.QueueOK, PrinterURI: keep.URI, DeviceURI: dev.URI}
+	r := device.QueueResult{State: device.QueueOK, PrinterURI: keep.URI, DeviceURI: dev.URI}
+	if want.Driver != "auto" && keep.Driver != want.Driver {
+		r.Message = "Driver " + want.Driver + " is not in use: the printer application runs its own driver choice."
+	}
+	return r
 }
 
-// create adds the queue, falling back from driver auto to the first
-// Find-Drivers match when the application refuses auto. It returns an error
-// message, or "" on success.
-func create(ctx context.Context, c *Client, want device.QueueSpec, dev Device) string {
-	_, err := c.CreatePrinter(ctx, want.Name, dev.URI, want.Driver, dev.DeviceID)
+// keepDriver reports whether a queue with driver have serves want. An unpinned
+// driver comes from the index, so a queue the app made with driver auto
+// (earlier versions, or the fallback in create) stays, and so does any queue
+// while the app does not list the wanted driver: create would fall back again.
+func keepDriver(have string, want device.QueueSpec, unlisted func() (bool, error)) (bool, error) {
+	switch {
+	case want.Driver == "auto" || have == want.Driver:
+		return true, nil
+	case want.DriverPinned:
+		return false, nil
+	case have == "auto":
+		return true, nil
+	}
+	return unlisted()
+}
+
+// lazyUnlisted reports whether the app does not list driver, asking
+// Find-Drivers at most once and only when called.
+func lazyUnlisted(ctx context.Context, c *Client, driver string) func() (bool, error) {
+	var (
+		done     bool
+		unlisted bool
+		err      error
+	)
+	return func() (bool, error) {
+		if !done {
+			var ds []Driver
+			ds, err = c.FindDrivers(ctx, "")
+			unlisted = !slices.ContainsFunc(ds, func(d Driver) bool { return d.Name == driver })
+			done = true
+		}
+		return unlisted, err
+	}
+}
+
+// create adds the queue. The retrofit apps accept any driver name in
+// Create-Printer, so an unpinned named driver is first checked against
+// Find-Drivers: one the app lacks (the index came from other package versions)
+// falls back to driver auto. Reconcile has already checked a pinned one.
+// Driver auto falls back to the first Find-Drivers match when the application
+// refuses it. It returns an error message, or "" on success.
+func create(ctx context.Context, c *Client, want device.QueueSpec, dev Device, unlisted func() (bool, error)) string {
+	driver := want.Driver
+	if driver != "auto" && !want.DriverPinned {
+		missing, err := unlisted()
+		if err != nil {
+			return err.Error()
+		}
+		if missing {
+			driver = "auto"
+		}
+	}
+	_, err := c.CreatePrinter(ctx, want.Name, dev.URI, driver, dev.DeviceID)
 	var ie *IPPError
-	if err == nil || want.Driver != "auto" || !errors.As(err, &ie) || ie.Status != goipp.StatusErrorAttributesOrValues {
+	if err == nil || driver != "auto" || !errors.As(err, &ie) || ie.Status != goipp.StatusErrorAttributesOrValues {
 		return errText(err)
 	}
 	if dev.DeviceID == "" {

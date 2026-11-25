@@ -96,6 +96,23 @@ function DeviceCard({ device }: { device: StatusDTO["device"] }) {
         <p className="status-message">{device.message}</p>
       )}
       {notFound && <p className="status-message">{strings.plugInHint}</p>}
+      {d?.rule === "none" && (
+        <section className="status-section">
+          <h3>{t.device.noDriver.title}</h3>
+          <p className="status-message">
+            {usb?.deviceId ? (
+              <>
+                {t.device.noDriver.deviceId} <code>{usb.deviceId}</code>
+              </>
+            ) : (
+              t.device.noDriver.noDeviceId
+            )}
+          </p>
+          <div>
+            <LinkButton href="/settings">{t.device.chooseDriver}</LinkButton>
+          </div>
+        </section>
+      )}
       <dl className="status-facts">
         <div>
           <dt>{t.device.deviceLabel}</dt>
@@ -133,11 +150,22 @@ function DeviceCard({ device }: { device: StatusDTO["device"] }) {
             <>
               <div>
                 <dt>{t.device.ruleLabel}</dt>
-                <dd>{d.rule}</dd>
+                <dd>{t.device.rules[d.rule]}</dd>
               </div>
               <div>
                 <dt>{t.device.printerFamilyLabel}</dt>
                 <dd>{d.printer ? family(d.printer) : t.device.noFamily}</dd>
+              </div>
+              <div>
+                <dt>{t.device.driverLabel}</dt>
+                <dd>
+                  {d.driverDescription ||
+                    d.driver ||
+                    // A PAPPL family without a driver name runs its own automatic choice.
+                    (d.printer && d.printer !== "ipp-usb" && d.printer !== "sim"
+                      ? t.device.appDriver
+                      : t.device.noFamily)}
+                </dd>
               </div>
               <div>
                 <dt>{t.device.scannerFamilyLabel}</dt>

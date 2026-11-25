@@ -18,7 +18,9 @@ export const DeviceSchema = z.strictObject({
   mode: z.enum(["usb","simulated"]).optional(),
   /** Optional selector when several USB devices are visible. Only allowed with mode usb. */
   usb: USBSchema.optional(),
-  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript"]).optional(),
+  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript","legacy"]).optional(),
+  /** Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the device degraded. Not allowed with driver ipp-usb or mode simulated. */
+  driverName: z.string().max(255).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
   scanner: z.enum(["auto","ipp-usb","airsane","none"]).optional(),
 });
 export type Device = z.infer<typeof DeviceSchema>;

@@ -4,9 +4,11 @@
 # device image), and with Ubuntu packages for CUPS, its backends, the filters
 # and the drivers. Always build with an explicit target:
 #   docker buildx build -f images/driver/Dockerfile --target ps .
-#   (ps, hplip, gutenprint, ghostscript)
+#   (ps, hplip, gutenprint, ghostscript, legacy)
 #   docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .
-# The sources target lists the packages of the four local targets by default. CI passes
+# The driver-index target builds internal/catalog/drivers.tsv.gz from the five targets' driver lists:
+#   docker buildx build -f images/driver/Dockerfile --target driver-index -o type=local,dest=.cache/idx .
+# The sources target lists the packages of the five local targets by default. CI passes
 # SOURCES_LISTS=pushed and PUSHED_IMAGE=<the image it pushed for this commit>, so the
 # list is the union of that image's amd64 and arm64 package lists instead.
 
@@ -63,7 +65,10 @@ RUN git init -q . \
  # prefix /usr), not from CUPS's /usr/lib/cups/backend. The targets below
  # set BACKEND_DIR and FILTER_DIR, which pappl-retrofit reads at start-up.
  && grep -q '"/usr/lib/%s/backend"' pappl-retrofit/pappl-retrofit.c \
- && grep -q 'getenv("BACKEND_DIR")' pappl-retrofit/pappl-retrofit.c
+ && grep -q 'getenv("BACKEND_DIR")' pappl-retrofit/pappl-retrofit.c \
+ # The legacy target ships legacy-printer-app, which build-app.sh deletes from the others.
+ && grep -q 'PR_COPTIONS_NO_PAPPL_BACKENDS' legacy/legacy-printer-app.c \
+ && grep -q 'PR_COPTIONS_CUPS_BACKENDS' legacy/legacy-printer-app.c
 
 # Each retrofit app at its pinned commit, built as the rock's app part builds it
 # ("make LDFLAGS=-ljpeg", then "make install"), under /usr/local.
@@ -118,6 +123,14 @@ ARG BUILDKIT_SBOM_SCAN_STAGE=true
 ARG GHOSTSCRIPT_PRINTER_APP_COMMIT
 RUN /src/build-app.sh ghostscript-printer-app "${GHOSTSCRIPT_PRINTER_APP_COMMIT}"
 
+# pappl-retrofit's own legacy-printer-app (classic CUPS drivers), already built and
+# installed by pappl-base. Drop the same build-only files and serverbin as build-app.sh.
+FROM pappl-base AS legacy-build
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+RUN cd /usr/local \
+ && rm -rf include lib/pkgconfig lib/*.a lib/*.la bin/pappl-makeresheader lib/legacy-printer-app \
+ && test -x bin/legacy-printer-app && test -s share/legacy-printer-app/testpage.pdf
+
 # Shared runtime: CUPS (for its usb, socket and ipp backends; cupsd is never
 # started) and the libraries PAPPL and pappl-retrofit link against.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS runtime
@@ -130,14 +143,16 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && useradd --uid 10001 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pagewire
+# NO_DRIVERLESS_PPDS: no driverless (ippfind) drivers; IPP printers are ipp-usb's job.
 ENV BACKEND_DIR=/usr/lib/cups/backend \
-    FILTER_DIR=/usr/lib/cups/filter
+    FILTER_DIR=/usr/lib/cups/filter \
+    NO_DRIVERLESS_PPDS=1
 
 FROM runtime AS ps
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=ps-printer-app
 RUN apt-get update \
- && apt-get install -y --no-install-recommends foomatic-db-compressed-ppds ghostscript cups-filters-core-drivers \
+ && apt-get install -y --no-install-recommends foomatic-db-compressed-ppds ghostscript cups-filters-core-drivers printer-driver-min12xxw \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=ps-build /usr/local /usr/local
 COPY --from=ps-build /out/licenses /usr/share/licenses
@@ -155,6 +170,9 @@ RUN ldconfig \
  && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+# The driver list for the index, after the ENV line so it sees the container's
+# PPD_DIRS, BACKEND_DIR and NO_DRIVERLESS_PPDS.
+RUN "/usr/local/bin/${APP}" drivers > /usr/share/pagewire/drivers.txt && test -s /usr/share/pagewire/drivers.txt
 COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
@@ -193,6 +211,9 @@ RUN ldconfig \
  && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+# The driver list for the index, after the ENV line so it sees the container's
+# PPD_DIRS, BACKEND_DIR and NO_DRIVERLESS_PPDS.
+RUN "/usr/local/bin/${APP}" drivers > /usr/share/pagewire/drivers.txt && test -s /usr/share/pagewire/drivers.txt
 COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
@@ -221,6 +242,9 @@ RUN ldconfig \
  && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+# The driver list for the index, after the ENV line so it sees the container's
+# PPD_DIRS, BACKEND_DIR and NO_DRIVERLESS_PPDS.
+RUN "/usr/local/bin/${APP}" drivers > /usr/share/pagewire/drivers.txt && test -s /usr/share/pagewire/drivers.txt
 COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
@@ -236,7 +260,7 @@ FROM runtime AS ghostscript
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=ghostscript-printer-app
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ghostscript foomatic-db-compressed-ppds printer-driver-foo2zjs printer-driver-splix \
+ && apt-get install -y --no-install-recommends ghostscript foomatic-db-compressed-ppds printer-driver-foo2zjs printer-driver-min12xxw \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=ghostscript-build /usr/local /usr/local
 COPY --from=ghostscript-build /out/licenses /usr/share/licenses
@@ -249,6 +273,9 @@ RUN ldconfig \
  && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+# The driver list for the index, after the ENV line so it sees the container's
+# PPD_DIRS, BACKEND_DIR and NO_DRIVERLESS_PPDS.
+RUN "/usr/local/bin/${APP}" drivers > /usr/share/pagewire/drivers.txt && test -s /usr/share/pagewire/drivers.txt
 COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
@@ -260,12 +287,74 @@ LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8004
 CMD ["/usr/local/bin/ghostscript-printer-app", "-o", "server-port=8004", "server"]
 
+FROM runtime AS legacy
+ARG DEBIAN_FRONTEND=noninteractive
+ARG APP=legacy-printer-app
+# Free classic CUPS drivers. Ghostscript for pappl-retrofit's PDF and PostScript conversions.
+ARG LEGACY_DRIVERS="printer-driver-splix printer-driver-brlaser printer-driver-ptouch printer-driver-c2esp printer-driver-sag-gdi printer-driver-escpr"
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ${LEGACY_DRIVERS} ghostscript \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=legacy-build /usr/local /usr/local
+COPY --from=legacy-build /out/licenses /usr/share/licenses
+# The app lists only /usr/share/pagewire/legacy-drivers: links to exactly these packages'
+# .drv and PPD files and driver executables, not cups-filters' generic sample drivers.
+RUN ldconfig \
+ && mkdir -p "/var/lib/${APP}/ppd" "/var/spool/${APP}" \
+ && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
+ && if ldd "/usr/local/bin/${APP}" | grep 'not found'; then exit 1; fi \
+ && mkdir -p /usr/share/pagewire/legacy-drivers \
+ && for p in ${LEGACY_DRIVERS}; do \
+      n=0; \
+      for f in $(dpkg -L "$p" | grep -E '^/usr/share/cups/drv/[^/]+\.drv$|^/usr/share/(ppd|cups/model)/.+\.ppd(\.gz)?$|^/usr/lib/cups/driver/[^/]+$'); do \
+        if [ -f "$f" ]; then ln -s "$f" /usr/share/pagewire/legacy-drivers/ || exit 1; n=$((n + 1)); fi; \
+      done; \
+      if [ "$n" -eq 0 ]; then echo "$p ships no driver files" >&2; exit 1; fi; \
+    done \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
+# legacy-drivers comes first: pappl-retrofit marks every driver in the last directory "user-added".
+ENV TESTPAGE_DIR=/usr/local/share/${APP} \
+    PPD_DIRS=/usr/share/pagewire/legacy-drivers:/var/lib/${APP}/ppd
+# The driver list for the index, after the ENV line so it sees the container's
+# PPD_DIRS, BACKEND_DIR and NO_DRIVERLESS_PPDS.
+RUN "/usr/local/bin/${APP}" drivers > /usr/share/pagewire/drivers.txt && test -s /usr/share/pagewire/drivers.txt
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=pagewire-driver-legacy
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
+EXPOSE 8005
+CMD ["/usr/local/bin/legacy-printer-app", "-o", "server-port=8005", "server"]
+
+# The driver index (internal/catalog/drivers.tsv.gz) from the five targets' driver lists.
+FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS driver-index-build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY tools/driverindex/ tools/driverindex/
+COPY --from=ps /usr/share/pagewire/drivers.txt /in/ps.txt
+COPY --from=hplip /usr/share/pagewire/drivers.txt /in/hplip.txt
+COPY --from=gutenprint /usr/share/pagewire/drivers.txt /in/gutenprint.txt
+COPY --from=ghostscript /usr/share/pagewire/drivers.txt /in/ghostscript.txt
+COPY --from=legacy /usr/share/pagewire/drivers.txt /in/legacy.txt
+RUN mkdir -p /out \
+ && GOTOOLCHAIN=local CGO_ENABLED=0 go run ./tools/driverindex -o /out/drivers.tsv.gz \
+      -in ps=/in/ps.txt -in hplip=/in/hplip.txt -in gutenprint=/in/gutenprint.txt \
+      -in ghostscript=/in/ghostscript.txt -in legacy=/in/legacy.txt
+
+FROM scratch AS driver-index
+COPY --from=driver-index-build /out/ /
+
 # Package lists for the sources target, chosen by SOURCES_LISTS.
 FROM scratch AS lists-local
 COPY --from=ps /usr/share/pagewire/source-packages.txt /lists/ps.txt
 COPY --from=hplip /usr/share/pagewire/source-packages.txt /lists/hplip.txt
 COPY --from=gutenprint /usr/share/pagewire/source-packages.txt /lists/gutenprint.txt
 COPY --from=ghostscript /usr/share/pagewire/source-packages.txt /lists/ghostscript.txt
+COPY --from=legacy /usr/share/pagewire/source-packages.txt /lists/legacy.txt
 
 # The pushed stages only COPY, so the arm64 one needs no emulation.
 FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64

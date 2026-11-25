@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "1234",
+      "productId": "9000",
+      "serial": "FAKE0009",
+      "manufacturer": "Acme",
+      "product": "Acme Laser 9000",
+      "bus": 1,
+      "address": 10,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Acme;CMD:PJL,PCL,PCLXL,POSTSCRIPT;MDL:Acme Laser 9000;CLS:PRINTER;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

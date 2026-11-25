@@ -2,3 +2,5 @@
 
 schema/*.json linguist-generated
 ui/src/gen/* linguist-generated
+internal/catalog/drivers.tsv.gz binary linguist-generated
+internal/catalog/sane-usb.tsv linguist-generated

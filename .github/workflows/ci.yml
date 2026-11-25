@@ -227,8 +227,8 @@ jobs:
           docker volume ls -q --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker volume rm
 
   # The VERSION build arg: the branch or tag name with each run of characters a tag cannot hold
-  # replaced by `-`, as docker/metadata-action does for type=ref tags. A manual run on renovate/foo
-  # then labels its images with the renovate-foo-sources tag the sources job pushes.
+  # replaced by `-`, the shape docker/metadata-action gives type=ref tags. Runs on renovate/**
+  # (dispatched by indexes.yml) build without pushing.
   version:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -241,7 +241,8 @@ jobs:
         run: printf 'version=%s\n' "$(printf '%s' "$REF_NAME" | sed -E 's/[^a-zA-Z0-9._-]+/-/g')" >> "$GITHUB_OUTPUT"
 
   # Docker's reusable workflow: one native runner per platform, a merged multi-platform manifest,
-  # provenance and SBOM attestations signed with the job's OIDC identity. A pull request builds without pushing.
+  # provenance and SBOM attestations signed with the job's OIDC identity. A pull request or a renovate/** run
+  # builds without pushing.
   build:
     needs: [go, ui, e2e, integration, docker-backend, version]
     strategy:
@@ -256,6 +257,7 @@ jobs:
           - {image: pagewire-driver-hplip, file: images/driver/Dockerfile, target: hplip, licenses: NOASSERTION}
           - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint, licenses: NOASSERTION}
           - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript, licenses: NOASSERTION}
+          - {image: pagewire-driver-legacy, file: images/driver/Dockerfile, target: legacy, licenses: NOASSERTION}
     uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
     permissions:
       contents: read
@@ -263,7 +265,7 @@ jobs:
       packages: write
     with:
       output: image
-      push: ${{ github.event_name != 'pull_request' }}
+      push: ${{ github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/heads/renovate/') }}
       file: ${{ matrix.file }}
       target: ${{ matrix.target }}
       platforms: linux/amd64,linux/arm64
@@ -291,12 +293,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
   # Corresponding source for the GPL/LGPL programs in the device and driver images, for every pushed
-  # branch and tag (<image>:<branch or version>-sources). The package lists come from the amd64 and arm64
+  # branch and tag (never pull requests or renovate/** runs, which push no images), as
+  # <image>:<branch or version>-sources. The package lists come from the amd64 and arm64
   # images this run pushed (sha-<commit>), so the sources match them. It runs even when one build leg
   # failed: the other images were pushed and need their sources; the failed image's leg fails at its
   # pushed-* stage, and ci-ok fails.
   sources:
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.build.result != 'skipped' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/heads/renovate/') && needs.build.result != 'skipped' }}
     needs: [build, version]
     strategy:
       fail-fast: false
@@ -307,6 +310,7 @@ jobs:
           - {image: pagewire-driver-hplip, file: images/driver/Dockerfile}
           - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile}
           - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile}
+          - {image: pagewire-driver-legacy, file: images/driver/Dockerfile}
     uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
     permissions:
       contents: read
@@ -342,12 +346,58 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+  # The driver and SANE indexes the dispatcher embeds, generated from the images and compared with the
+  # committed files. Only ci-ok needs this job, never build: an Ubuntu package update can change a dump
+  # with no repo change, and that blocks merges without stopping main or a tag from publishing images.
+  indexes:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Caches are scoped by ref and a run restores its own and the default branch's, so only main
+      # pushes write the indexes-* scopes and every other ref restores main's.
+      - name: Build the driver index
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/driver/Dockerfile
+          target: driver-index
+          platforms: linux/amd64
+          outputs: type=local,dest=out/driver-index
+          cache-from: type=gha,scope=indexes-driver
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=indexes-driver' || '' }}
+      # The integration job writes integration-pagewire-device on every ref.
+      - name: Build the SANE index
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/device/Dockerfile
+          target: sane-index
+          platforms: linux/amd64
+          outputs: type=local,dest=out/sane-index
+          cache-from: |
+            type=gha,scope=indexes-device
+            type=gha,scope=integration-pagewire-device
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=indexes-device' || '' }}
+      # gzip output may change with the Go version, so compare the decompressed content.
+      - name: The committed indexes match the images
+        run: diff <(gzip -dc internal/catalog/drivers.tsv.gz) <(gzip -dc out/driver-index/drivers.tsv.gz) && diff internal/catalog/sane-usb.tsv out/sane-index/sane-usb.tsv
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: indexes
+          path: out/
+          if-no-files-found: ignore
+      - if: failure()
+        run: echo '::error::The committed driver/SANE indexes differ from what the images produce (a changed Dockerfile or an Ubuntu package update). On a renovate/** branch the Indexes workflow regenerates them. Elsewhere, download the indexes artifact or regenerate with the commands in AGENTS.md, and commit internal/catalog/drivers.tsv.gz and internal/catalog/sane-usb.tsv.'
+
   # The one check a ruleset requires: a skipped job would satisfy a required check of its own,
-  # and the build jobs carry runner labels in their names. `sources` runs on every push and is
-  # skipped only on pull requests, which push nothing.
+  # and the build jobs carry runner labels in their names. `sources` is skipped only on pull
+  # requests and renovate/** runs, which push nothing.
   ci-ok:
     if: always()
-    needs: [go, ui, e2e, integration, docker-backend, build, sources]
+    needs: [go, ui, e2e, integration, docker-backend, indexes, build, sources]
     runs-on: ubuntu-26.04
     steps:
       - run: |
@@ -356,9 +406,10 @@ jobs:
           test "${{ needs.e2e.result }}" = success
           test "${{ needs.integration.result }}" = success
           test "${{ needs.docker-backend.result }}" = success
+          test "${{ needs.indexes.result }}" = success
           test "${{ needs.build.result }}" = success
           case "${{ needs.sources.result }}" in
             success) ;;
-            skipped) test "${{ github.event_name }}" = pull_request ;;
+            skipped) test "${{ github.event_name }}" = pull_request || test "${{ startsWith(github.ref, 'refs/heads/renovate/') }}" = true ;;
             *) exit 1 ;;
           esac

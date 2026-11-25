@@ -1,0 +1,82 @@
+name: Indexes
+
+# Regenerates the driver and SANE indexes on Renovate branches, commits them when they changed and
+# starts CI on that commit: pushes made with GITHUB_TOKEN start no workflow, workflow_dispatch excepted,
+# and that is also why this workflow's own push cannot start it again.
+on:
+  push:
+    branches: ["renovate/**"]
+    # The index paths catch Renovate rebases, which drop the regeneration commit.
+    paths:
+      - "images/**"
+      - "tools/**"
+      - "internal/catalog/drivers.tsv.gz"
+      - "internal/catalog/sane-usb.tsv"
+      - ".github/workflows/indexes.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: indexes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    if: startsWith(github.ref, 'refs/heads/renovate/')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Restores this branch's scope and main's (the default-branch fallback); writes this branch's for reruns.
+      - name: Build the driver index
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/driver/Dockerfile
+          target: driver-index
+          platforms: linux/amd64
+          outputs: type=local,dest=out/driver-index
+          cache-from: type=gha,scope=indexes-driver
+          cache-to: type=gha,mode=max,scope=indexes-driver
+      - name: Build the SANE index
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/device/Dockerfile
+          target: sane-index
+          platforms: linux/amd64
+          outputs: type=local,dest=out/sane-index
+          cache-from: type=gha,scope=indexes-device
+          cache-to: type=gha,mode=max,scope=indexes-device
+      # No force push: when Renovate pushed meanwhile, this push fails and Renovate's push starts a fresh run.
+      - name: Commit changed indexes and start CI on them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          changed=false
+          # gzip output may change with the Go version, so compare the decompressed content.
+          if ! cmp -s <(gzip -dc internal/catalog/drivers.tsv.gz) <(gzip -dc out/driver-index/drivers.tsv.gz); then
+            cp out/driver-index/drivers.tsv.gz internal/catalog/drivers.tsv.gz
+            changed=true
+          fi
+          if ! cmp -s internal/catalog/sane-usb.tsv out/sane-index/sane-usb.tsv; then
+            cp out/sane-index/sane-usb.tsv internal/catalog/sane-usb.tsv
+            changed=true
+          fi
+          if [ "$changed" = false ]; then
+            echo "indexes are current"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add internal/catalog/drivers.tsv.gz internal/catalog/sane-usb.tsv
+          git commit -m 'chore(catalog): regenerate driver and SANE indexes'
+          git push origin "HEAD:refs/heads/$REF_NAME"
+          gh workflow run ci.yml --ref "$REF_NAME"

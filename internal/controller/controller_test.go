@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -513,13 +514,13 @@ func TestProbeThenConfigAppliesOnce(t *testing.T) {
 	h.step()
 	h.report(t, "brother-pcl-laser")
 	h.step()
-	if d := h.c.Setup().Decision; d == nil || d.Rule != "pcl" {
+	if d := h.c.Setup().Decision; d == nil || d.Rule != device.RuleModel {
 		t.Fatalf("setup decision %+v", d)
 	}
 	h.c.ConfigApplied(usbConfig("Brother"), "e")
 	h.step()
 	wantApplies(t, h.b, 2)
-	if sp := h.b.last(t); sp.Mode != device.ModeUSB || sp.Printer != "ghostscript" {
+	if sp := h.b.last(t); sp.Mode != device.ModeUSB || sp.Printer != "legacy" {
 		t.Fatalf("spec %+v", sp)
 	}
 	h.report(t, "brother-pcl-laser")
@@ -581,6 +582,89 @@ func TestPodRelevantChange(t *testing.T) {
 	wantApplies(t, h.b, 2)
 }
 
+const hpDriver = "hp--laserjet-professional-m-1132-mfp--requires-proprietary-plugin-en"
+
+func TestQueueDriverName(t *testing.T) {
+	t.Run("legacy model match", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		h.c.ConfigApplied(usbConfig("Samsung"), "e")
+		h.report(t, "samsung-scx4300-mfp")
+		h.step()
+		if sp := h.b.last(t); sp.Printer != "legacy" {
+			t.Fatalf("spec %+v", sp)
+		}
+		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != "samsung--scx-4300--2-0-0-en" || ds.Queue.DriverPinned {
+			t.Fatalf("queue %+v, want the index's driver, not pinned", ds.Queue)
+		}
+	})
+	t.Run("driverName pins the driver", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		cfg := usbConfig("Samsung")
+		cfg.Device.DriverName = "samsung--scx-4300--2-0-0-en"
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, "samsung-scx4300-mfp")
+		h.step()
+		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != cfg.Device.DriverName || !ds.Queue.DriverPinned {
+			t.Fatalf("queue %+v, want the pinned driverName", ds.Queue)
+		}
+	})
+	// A driverName the index no longer lists keeps the config valid: the
+	// automatic choice runs, unpinned, and the device is degraded.
+	t.Run("driverName no app lists", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		cfg := usbConfig("Samsung")
+		cfg.Device.DriverName = "acme--x-en"
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, "samsung-scx4300-mfp")
+		h.b.set(running(device.Endpoints{}))
+		s := h.step()
+		if sp := h.b.last(t); sp.Printer != "legacy" {
+			t.Fatalf("spec %+v", sp)
+		}
+		wantPhase(t, s, "degraded", fmt.Sprintf(msgDriverNotListed, "acme--x-en"))
+		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != "samsung--scx-4300--2-0-0-en" || ds.Queue.DriverPinned {
+			t.Fatalf("queue %+v, want the automatic driver, not pinned", ds.Queue)
+		}
+	})
+	t.Run("family override without a match", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		cfg := usbConfig("P")
+		cfg.Device.Driver = "gutenprint"
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, "unknown-printer")
+		h.step()
+		if sp := h.b.last(t); sp.Printer != "gutenprint" {
+			t.Fatalf("spec %+v", sp)
+		}
+		if ds := h.report(t, "unknown-printer"); ds.Queue == nil || ds.Queue.Driver != config.Auto {
+			t.Fatalf("queue %+v", ds.Queue)
+		}
+	})
+}
+
+func TestNoDriver(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	h.c.ConfigMissing()
+	h.step()
+	h.report(t, "unknown-printer")
+	h.step()
+	if d := h.c.Setup().Decision; d == nil || d.Rule != device.RuleNone || d.Device == nil || d.Device.DeviceID == "" {
+		t.Fatalf("setup decision %+v", d)
+	}
+
+	h.c.ConfigApplied(usbConfig("P"), "e")
+	h.b.set(running(device.Endpoints{}))
+	s := h.step()
+	sp := h.b.last(t)
+	if sp.Mode != device.ModeUSB || sp.Printer != "" || sp.Scanner != "airsane" {
+		t.Fatalf("spec %+v, want the usb spec with the scanner only", sp)
+	}
+	wantPhase(t, s, "degraded", msgNoDriver)
+	if ds := h.report(t, "unknown-printer"); ds.Queue != nil {
+		t.Fatalf("queue %+v, want none", ds.Queue)
+	}
+}
+
 func TestQueueChangesWithoutApply(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
 	h.c.ConfigApplied(usbConfig("HP"), "e1")
@@ -592,7 +676,7 @@ func TestQueueChangesWithoutApply(t *testing.T) {
 		t.Fatalf("desired %+v", ds)
 	}
 	want := device.QueueSpec{
-		Name: "HP", Driver: "auto", Schemes: []string{"hp", "usb"},
+		Name: "HP", Driver: hpDriver, Schemes: []string{"hp", "usb"},
 		Media: "iso_a4_210x297mm", Sides: "one-sided", ColorMode: "auto", Quality: "normal",
 	}
 	if !reflect.DeepEqual(*ds.Queue, want) {
@@ -670,9 +754,13 @@ func TestApplyFailureRetried(t *testing.T) {
 }
 
 func TestOptionalBlob(t *testing.T) {
+	// The P2055dn's hplip driver needs no plug-in, so the family's optional EULA applies.
+	p2055 := func(r *device.AgentReport) {
+		r.Inventory.Devices[0].DeviceID = "MFG:Hewlett-Packard;CMD:PJL,PCL,POSTSCRIPT;MDL:HP LaserJet P2055dn;CLS:PRINTER;"
+	}
 	h := newHarness(t, Options{USBAvailable: true})
 	h.c.ConfigApplied(usbConfig("HP"), "e1")
-	h.report(t, "hp-legacy-mfp")
+	h.report(t, "hp-legacy-mfp", p2055)
 	h.step()
 	if sp := h.b.last(t); len(sp.Blobs) != 0 {
 		t.Fatalf("blobs %+v without an accepted EULA", sp.Blobs)
@@ -698,7 +786,7 @@ func TestOptionalBlob(t *testing.T) {
 		t.Fatal("a new accepted text sha did not change the spec hash")
 	}
 	h.b.set(running(device.Endpoints{}))
-	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
+	h.report(t, "hp-legacy-mfp", p2055, func(r *device.AgentReport) {
 		r.Blobs = []device.BlobStatus{{ID: "hplip-plugin", Version: "3.24.4", State: "failed", Message: "download failed"}}
 	})
 	s := h.step()
@@ -716,6 +804,19 @@ func TestQueueError(t *testing.T) {
 		r.Queue = &device.QueueResult{State: device.QueueError, Message: "agent has no --pappl-url"}
 	})
 	wantPhase(t, h.step(), "error", "agent has no --pappl-url")
+}
+
+// A queue that runs the app's own driver choice instead of the decided one
+// (the app lacks the index's driver) leaves the device degraded.
+func TestQueueDriverFallbackDegraded(t *testing.T) {
+	h := newHarness(t, Options{BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigApplied(usbConfig("x"), "e1")
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	msg := "Driver x is not in use: the printer application runs its own driver choice."
+	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
+		r.Queue = &device.QueueResult{State: device.QueueOK, Message: msg, PrinterURI: "ipp://127.0.0.1:8002/ipp/print/x"}
+	})
+	wantPhase(t, h.step(), "degraded", msg)
 }
 
 func TestInvalidConfig(t *testing.T) {
@@ -786,7 +887,7 @@ func TestPrinterURIK8sPAPPL(t *testing.T) {
 	h := newHarness(t, Options{BackendName: BackendK8s, USBAvailable: true})
 	h.c.ConfigApplied(usbConfig("x"), "e")
 	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
-	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
+	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
 		r.Queue = &device.QueueResult{State: device.QueueOK, PrinterURI: "ipp://127.0.0.1:8002/ipp/print/x"}
 	})
 	s := h.step()
@@ -809,12 +910,12 @@ func TestPrinterURISimPAPPL(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
 	h.c.ConfigApplied(usbConfig("Printer"), "e")
 	h.b.set(running(device.Endpoints{PrinterURI: "", ScannerURL: "http://127.0.0.1:41234/eSCL"}))
-	h.report(t, "hp-legacy-mfp")
+	h.report(t, "samsung-scx4300-mfp")
 	s := h.step()
 	if s.Printer.Available || s.Printer.State != "unknown" || s.Printer.URI != "" {
 		t.Fatalf("printer before QueueResult %+v", s.Printer)
 	}
-	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
+	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
 		r.Queue = &device.QueueResult{State: device.QueueOK, PrinterURI: "ipp://127.0.0.1:39001/ipp/print/Printer"}
 	})
 	s = h.step()
@@ -951,10 +1052,10 @@ func TestSetup(t *testing.T) {
 		if !s.Required || s.Backend != "k8s" || !s.USBResourceConfigured || s.Inventory == nil {
 			t.Fatalf("setup %+v", s)
 		}
-		if s.Decision == nil || s.Decision.Rule != "hp" {
+		if s.Decision == nil || s.Decision.Rule != device.RuleModel {
 			t.Fatalf("decision %+v", s.Decision)
 		}
-		if len(s.EULAs) != 1 || s.EULAs[0].ID != "hplip-plugin" || s.EULAs[0].Required || s.EULAs[0].Version != "3.24.4" || s.EULAs[0].Title == "" {
+		if len(s.EULAs) != 1 || s.EULAs[0].ID != "hplip-plugin" || !s.EULAs[0].Required || s.EULAs[0].Version != "3.24.4" || s.EULAs[0].Title == "" {
 			t.Fatalf("eulas %+v", s.EULAs)
 		}
 		want := config.Default("HP LaserJet Professional M1132 MFP")
@@ -1142,12 +1243,9 @@ func TestRunReactsToInputsAndStops(t *testing.T) {
 	}
 }
 
+// TestRequiredEULA: hplip's plug-in drivers need the plug-in, so the M1132 needs it out of the box.
 func TestRequiredEULA(t *testing.T) {
-	cat := *catalog.Default()
-	cat.Rules = slices.Clone(cat.Rules)
-	i := slices.IndexFunc(cat.Rules, func(r catalog.Rule) bool { return r.Name == "hp" })
-	cat.Rules[i].RequiredEULAs, cat.Rules[i].OptionalEULAs = []string{"hplip-plugin"}, nil
-	h := newHarness(t, Options{Catalog: &cat, USBAvailable: true})
+	h := newHarness(t, Options{USBAvailable: true})
 	h.report(t, "hp-legacy-mfp")
 	if e := h.c.Setup().EULAs; len(e) != 1 || !e[0].Required {
 		t.Fatalf("eulas %+v", e)

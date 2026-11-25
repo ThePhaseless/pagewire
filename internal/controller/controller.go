@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"reflect"
@@ -31,6 +32,15 @@ const (
 	queryTimeout = 5 * time.Second
 	applyTimeout = time.Minute
 )
+
+// msgNoDriver is the degraded message while no printer driver matches the device (rule none).
+const msgNoDriver = "No printer driver matches this device. Choose a driver in Settings."
+
+// msgDriverNotListed is the degraded message while device.driverName names a
+// driver the driver index does not list for the chosen family (an image update
+// dropped it, a typo, or a driver that needs hpijs). With a family override,
+// pagewire's own choice is that family's match.
+const msgDriverNotListed = "Driver %s is not in pagewire's driver index for this printer application, so pagewire's own choice is used. Choose another driver in Settings."
 
 // PrinterObserver reads a printer's state (printing.Client implements it).
 type PrinterObserver interface {
@@ -227,9 +237,10 @@ func (c *Controller) AgentReport(_ context.Context, r device.AgentReport) (devic
 	if cfg != nil {
 		sel, acc = cfg.Device, cfg.Licenses.AcceptedEULAs
 	}
+	dec := decisionFor(c.cat, sel, &inv)
 	ds := device.DesiredState{
-		Hash: device.SpecHash(c.spec), Queue: c.queueFor(c.spec, cfg), Browse: slices.Clone(device.BrowseTypes),
-		StageEULAs: stageEULAs(c.cat, decisionFor(c.cat, sel, &inv), acc),
+		Hash: device.SpecHash(c.spec), Queue: c.queueFor(c.spec, cfg, dec), Browse: slices.Clone(device.BrowseTypes),
+		StageEULAs: stageEULAs(c.cat, dec, acc),
 	}
 	c.mu.Unlock()
 	c.poke()
@@ -266,8 +277,9 @@ func (c *Controller) EULA(id string) (apitypes.EULA, bool) {
 	return eulaDTO(e, c.eulaTexts), true
 }
 
-// queueFor is the desired PAPPL queue: nil unless the spec's printer family is a PAPPL app.
-func (c *Controller) queueFor(spec *device.Spec, cfg *config.Config) *device.QueueSpec {
+// queueFor is the desired PAPPL queue: nil unless the spec's printer family is a
+// PAPPL app. Its driver is the decision's when that is for the spec's family, else auto.
+func (c *Controller) queueFor(spec *device.Spec, cfg *config.Config, dec *device.Decision) *device.QueueSpec {
 	if spec == nil || cfg == nil {
 		return nil
 	}
@@ -275,9 +287,14 @@ func (c *Controller) queueFor(spec *device.Spec, cfg *config.Config) *device.Que
 	if !ok || fam.App == "" {
 		return nil
 	}
+	driver := config.Auto
+	if dec != nil && dec.Printer == spec.Printer && dec.Driver != "" {
+		driver = dec.Driver
+	}
 	d := cfg.Print.Defaults
 	return &device.QueueSpec{
-		Name: cfg.Name, Location: cfg.Location, Driver: config.Auto, Schemes: slices.Clone(fam.DeviceSchemes),
+		Name: cfg.Name, Location: cfg.Location, Schemes: slices.Clone(fam.DeviceSchemes),
+		Driver: driver, DriverPinned: driver == cfg.Device.DriverName,
 		Media: d.Media, Sides: d.Sides, ColorMode: d.ColorMode, Quality: d.Quality,
 	}
 }
@@ -443,7 +460,14 @@ func (c *Controller) decide(in snapshot, obs device.Observation, obsErr error) d
 	if err != nil {
 		return desired{spec: in.spec, phase: apitypes.PhaseError, message: err.Error()}
 	}
-	return c.deviceSpec(device.ModeUSB, dec, cfg)
+	d := c.deviceSpec(device.ModeUSB, dec, cfg)
+	switch {
+	case dec.Rule == device.RuleNone:
+		d.phase, d.message = apitypes.PhaseDegraded, msgNoDriver // the scanner still runs
+	case cfg.Device.DriverName != "" && dec.Driver != cfg.Device.DriverName:
+		d.phase, d.message = apitypes.PhaseDegraded, fmt.Sprintf(msgDriverNotListed, cfg.Device.DriverName)
+	}
+	return d
 }
 
 // due is the Apply rule: the hash differs from the last successful Apply, or
@@ -623,6 +647,8 @@ func phase(in snapshot, d desired, obs device.Observation, obsErr error, applyEr
 		return d.phase, d.message
 	case degraded != "":
 		return apitypes.PhaseDegraded, degraded
+	case r != nil && r.Queue != nil && r.Queue.State == device.QueueOK && r.Queue.Message != "":
+		return apitypes.PhaseDegraded, r.Queue.Message // the queue runs the app's own driver choice
 	case spec.Mode == device.ModeProbe:
 		return apitypes.PhaseProbing, ""
 	case obs.Phase != device.PhaseRunning:

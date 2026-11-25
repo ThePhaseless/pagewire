@@ -1,6 +1,7 @@
-# pagewire device catalog: data only. The dispatcher (dispatch.go) evaluates
-# rules top to bottom and the first match wins. catalog_test.go checks that
-# every reference resolves.
+# pagewire device catalog: data only. The dispatcher (dispatch.go) derives each
+# device's driver from the generated driver index (drivers.tsv.gz) and its SANE
+# backends from the generated SANE index (sane-usb.tsv); this file holds no
+# vendor rules. catalog_test.go checks that every reference resolves.
 apiVersion: pagewire.catalog/v1
 
 printers:
@@ -8,9 +9,10 @@ printers:
   # deviceSchemes become QueueSpec.Schemes: the preferred CUPS backend when one
   # device is listed by several (hplip: hp: before usb:).
   - {id: ps, image: pagewire-driver-ps, app: ps-printer-app, port: 8001, deviceSchemes: [usb]}
-  - {id: hplip, image: pagewire-driver-hplip, app: hplip-printer-app, port: 8002, deviceSchemes: [hp, usb]}
+  - {id: hplip, image: pagewire-driver-hplip, app: hplip-printer-app, port: 8002, deviceSchemes: [hp, usb], optionalEulas: [hplip-plugin]}
   - {id: gutenprint, image: pagewire-driver-gutenprint, app: gutenprint-printer-app, port: 8003, deviceSchemes: [usb]}
   - {id: ghostscript, image: pagewire-driver-ghostscript, app: ghostscript-printer-app, port: 8004, deviceSchemes: [usb]}
+  - {id: legacy, image: pagewire-driver-legacy, app: legacy-printer-app, port: 8005, deviceSchemes: [usb]}     # classic CUPS drivers
   - {id: sim, role: ippeveprinter, port: 8631}                          # simulated mode only
 
 # airsane and sim are the same AirSane daemon in different modes, so they share
@@ -51,19 +53,27 @@ blobs:
     format: hplip-plugin
     maxBytes: 52428800
 
-# Used when a rule's saneBackends is empty. Ubuntu 26.04's libsane1 ships every
-# backend here except hpaio, which libsane-hpaio ships; the device image installs
-# both. Never add net, escl or airscan: AirSane would re-export network scanners.
+# Used when the SANE index has no entry for the device. Ubuntu 26.04's libsane1
+# ships every backend here except hpaio, which libsane-hpaio ships; the device
+# image installs both. Never add net, escl or airscan: AirSane would re-export
+# network scanners.
 defaultSaneBackends: [hpaio, epson2, epsonds, pixma, genesys, plustek, fujitsu, canon_dr, xerox_mfp, kodakaio]
 
-# A match is the AND of the keys present. interface: any interface of a device
-# that has a printer-class (7) interface. command: any IEEE-1284 CMD token,
-# case-insensitive. The last rule is the catch-all.
-rules:
-  - {name: ipp-over-usb, match: {interface: {class: 7, subClass: 1, protocol: 4}}, printer: ipp-usb, scanner: ipp-usb}
-  - {name: hp, match: {vendorId: "03f0"}, printer: hplip, scanner: airsane, saneBackends: [hpaio], optionalEulas: [hplip-plugin]}
-  - {name: postscript, match: {command: [POSTSCRIPT, "POSTSCRIPT LEVEL 2", "POSTSCRIPT LEVEL 3", BRSCRIPT]}, printer: ps, scanner: airsane}
-  - {name: epson, match: {vendorId: "04b8"}, printer: gutenprint, scanner: airsane, saneBackends: [epson2, epsonds]}
-  - {name: canon, match: {vendorId: "04a9"}, printer: gutenprint, scanner: airsane, saneBackends: [pixma]}
-  - {name: pcl, match: {command: [PCL, PCLXL, PCL5, PCL5E, PCL5C, PCL6]}, printer: ghostscript, scanner: airsane}
-  - {name: fallback, match: {}, printer: ghostscript, scanner: airsane}
+# When several families list a device's model, the one listed first wins; within
+# a family a recommended driver wins, then the name. Every PAPPL family appears
+# exactly once.
+driverPriority: [hplip, legacy, ps, gutenprint, ghostscript]
+
+# Generic drivers for a device no family lists by model. The first entry with a
+# token in the device's IEEE-1284 CMD (exact, case-insensitive) and a matching
+# index row wins; mfg and mdl name the generic driver's model in the index.
+commandSets:
+  - {commands: [POSTSCRIPT, "POSTSCRIPT LEVEL 2", "POSTSCRIPT LEVEL 3", BRSCRIPT, PS], mfg: Generic, mdl: PostScript Printer}
+  - {commands: [PCLXL, "PCL XL", PCL6], mfg: Generic, mdl: PCL 6/PCL XL Printer}
+  - {commands: [PCL5C], mfg: Generic, mdl: PCL 5c Printer}
+  - {commands: [PCL5E, PCL5, PCL], mfg: Generic, mdl: PCL 5e Printer}
+
+# EULAs a family's drivers need, by driver name. hplip-printer-app names every
+# driver that needs HP's plug-in "...requires-proprietary-plugin...".
+driverEulas:
+  - {family: hplip, nameContains: requires-proprietary-plugin, requiredEulas: [hplip-plugin]}

@@ -1,0 +1,10 @@
+; external backend, not installed (test fixture)
+:backend "utsushi"
+:devicetype :scanner
+
+:mfg "Epson"
+
+:model "ET-2720 Series"
+:interface "USB"
+:usbid "0x04b8" "0x1129"
+:status :good

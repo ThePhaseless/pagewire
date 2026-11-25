@@ -37,9 +37,12 @@ func TestIntegrity(t *testing.T) {
 			seen[id] = true
 		}
 	}
-	var printers, scanners, eulas, blobs, rules []string
+	var printers, pappl, scanners, eulas, blobs []string
 	for _, p := range c.Printers {
 		printers = append(printers, p.ID)
+		if p.App != "" {
+			pappl = append(pappl, p.ID)
+		}
 		if p.App != "" && len(p.DeviceSchemes) == 0 {
 			t.Errorf("PAPPL printer %s has no deviceSchemes", p.ID)
 		}
@@ -96,30 +99,49 @@ func TestIntegrity(t *testing.T) {
 	ids("scanners", scanners)
 	ids("eulas", eulas)
 	ids("blobs", blobs)
-	for i, r := range c.Rules {
-		rules = append(rules, r.Name)
-		if !slices.Contains(printers, r.Printer) {
-			t.Errorf("rule %q: unknown printer %q", r.Name, r.Printer)
-		}
-		if !slices.Contains(scanners, r.Scanner) {
-			t.Errorf("rule %q: unknown scanner %q", r.Name, r.Scanner)
-		}
-		for _, e := range slices.Concat(r.RequiredEULAs, r.OptionalEULAs) {
+	for _, p := range c.Printers {
+		for _, e := range slices.Concat(p.RequiredEULAs, p.OptionalEULAs) {
 			if !slices.Contains(eulas, e) {
-				t.Errorf("rule %q: unknown EULA %q", r.Name, e)
+				t.Errorf("printer %s: unknown EULA %q", p.ID, e)
 			}
-		}
-		for _, sb := range r.SaneBackends {
-			if !slices.Contains(c.DefaultSaneBackends, sb) {
-				t.Errorf("rule %q: SANE backend %q is not in defaultSaneBackends (the device image installs only those)", r.Name, sb)
-			}
-		}
-		catchAll := reflect.DeepEqual(r.Match, Match{})
-		if last := i == len(c.Rules)-1; catchAll != last {
-			t.Errorf("rule %q: catch-all %v, last %v", r.Name, catchAll, last)
 		}
 	}
-	ids("rules", rules)
+	if got, want := slices.Sorted(slices.Values(c.DriverPriority)), slices.Sorted(slices.Values(pappl)); !slices.Equal(got, want) {
+		t.Errorf("driverPriority %v must hold each PAPPL family %v exactly once", c.DriverPriority, pappl)
+	}
+	if got, want := c.Drivers.families(), slices.Sorted(slices.Values(pappl)); !slices.Equal(got, want) {
+		t.Errorf("driver index families %v, want the PAPPL families %v, each with rows", got, want)
+	}
+	for _, cs := range c.CommandSets {
+		if len(cs.Commands) == 0 {
+			t.Errorf("commandSet %s/%s has no commands", cs.MFG, cs.MDL)
+		}
+		if _, ok := c.Drivers.Match(cs.MFG, cs.MDL, c.DriverPriority, ""); !ok {
+			t.Errorf("commandSet %s/%s: no index row has that model", cs.MFG, cs.MDL)
+		}
+	}
+	for _, de := range c.DriverEULAs {
+		if !slices.Contains(pappl, de.Family) {
+			t.Errorf("driverEulas %s: unknown PAPPL family", de.Family)
+		}
+		for _, e := range slices.Concat(de.RequiredEULAs, de.OptionalEULAs) {
+			if !slices.Contains(eulas, e) {
+				t.Errorf("driverEulas %s/%s: unknown EULA %q", de.Family, de.NameContains, e)
+			}
+		}
+		if de.NameContains == "" || !slices.ContainsFunc(c.Drivers.rows, func(d Driver) bool {
+			return d.Family == de.Family && strings.Contains(d.Name, de.NameContains)
+		}) {
+			t.Errorf("driverEulas %s/%q matches no index row", de.Family, de.NameContains)
+		}
+	}
+	for id, backends := range c.Sane {
+		for _, banned := range []string{"net", "escl", "airscan", "test", "dll"} {
+			if slices.Contains(backends, banned) {
+				t.Errorf("SANE index %s holds %s", id, banned)
+			}
+		}
+	}
 	for _, banned := range []string{"net", "escl", "airscan"} {
 		if slices.Contains(c.DefaultSaneBackends, banned) {
 			t.Errorf("defaultSaneBackends contains %s", banned)
@@ -190,7 +212,7 @@ func TestKnown(t *testing.T) {
 	if !slices.Contains(k.EULAs, config.EULARef{ID: "hplip-plugin", Version: "3.24.4"}) {
 		t.Errorf("Known().EULAs = %v", k.EULAs)
 	}
-	for _, p := range []string{"ipp-usb", "ps", "hplip", "gutenprint", "ghostscript", "sim"} {
+	for _, p := range []string{"ipp-usb", "ps", "hplip", "gutenprint", "ghostscript", "legacy", "sim"} {
 		if !slices.Contains(k.Printers, p) {
 			t.Errorf("Known().Printers lacks %s: %v", p, k.Printers)
 		}
@@ -253,6 +275,7 @@ func TestBlobKeyRefusals(t *testing.T) {
 var fixtureNames = []string{
 	"ippusb-mfp", "hp-legacy-mfp", "generic-postscript", "brother-pcl-laser",
 	"epson-inkjet-mfp", "canon-pixma-mfp", "unknown-printer", "no-printer",
+	"samsung-scx4300-mfp", "postscript-unlisted", "epson-stylus-photo",
 }
 
 func TestFixturesStrict(t *testing.T) {

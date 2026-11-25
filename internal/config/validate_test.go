@@ -11,7 +11,7 @@ var testSHA = strings.Repeat("a", 64)
 
 var testKnown = Known{
 	EULAs:    []EULARef{{ID: "hplip-plugin", Version: "3.24.4"}},
-	Printers: []string{"ipp-usb", "ps", "hplip", "gutenprint", "ghostscript", "sim"},
+	Printers: []string{"ipp-usb", "ps", "hplip", "gutenprint", "ghostscript", "legacy", "sim"},
 }
 
 func TestValidate(t *testing.T) {
@@ -95,6 +95,42 @@ func TestValidate(t *testing.T) {
 		{
 			name:   "known driver",
 			change: func(c *Config) { c.Device.Driver = "hplip" },
+		},
+		{
+			name:   "driverName with driver auto",
+			change: func(c *Config) { c.Device.DriverName = "samsung--scx-4300--2-0-0-en" },
+		},
+		{
+			name: "driverName its family lists",
+			change: func(c *Config) {
+				c.Device.Driver, c.Device.DriverName = "ps", "generic--postscript-printer--en"
+			},
+		},
+		// The index follows image updates, so a name no app lists only degrades
+		// the device (the controller reports it); the config stays valid.
+		{
+			name:   "driverName nobody lists",
+			change: func(c *Config) { c.Device.DriverName = "acme--x-en" },
+		},
+		{
+			name: "driverName another family lists",
+			change: func(c *Config) {
+				c.Device.Driver, c.Device.DriverName = "gutenprint", "samsung--scx-4300--2-0-0-en"
+			},
+		},
+		{
+			name: "driverName with driver ipp-usb",
+			change: func(c *Config) {
+				c.Device.Driver, c.Device.DriverName = "ipp-usb", "samsung--scx-4300--2-0-0-en"
+			},
+			path: "/device/driverName", msg: "ipp-usb",
+		},
+		{
+			name: "driverName with mode simulated",
+			change: func(c *Config) {
+				c.Device.Mode, c.Device.DriverName = ModeSimulated, "samsung--scx-4300--2-0-0-en"
+			},
+			path: "/device/driverName", msg: "simulated",
 		},
 	}
 	for _, tt := range tests {

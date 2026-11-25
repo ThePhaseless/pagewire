@@ -244,6 +244,16 @@ func TestParseErrors(t *testing.T) {
 			path: "/device/usb/serial", line: 7, column: 13, msg: "control",
 		},
 		{
+			name: "driverName too long",
+			src:  minimalYAML + "device:\n  driverName: " + strings.Repeat("x", 256) + "\n",
+			path: "/device/driverName", line: 4, column: 15, msg: "255",
+		},
+		{
+			name: "driverName with a control character",
+			src:  minimalYAML + "device:\n  driverName: \"a\\tb\"\n",
+			path: "/device/driverName", line: 4, column: 15, msg: "control",
+		},
+		{
 			name: "missing name",
 			src:  "apiVersion: pagewire/v1\nlocation: x\n",
 			path: "/name", line: 1, column: 1, msg: "required",
@@ -326,6 +336,7 @@ func TestEnumsAccepted(t *testing.T) {
 		"device:\n  mode: simulated\n", "device:\n  mode: usb\n",
 		"device:\n  driver: auto\n", "device:\n  driver: ipp-usb\n", "device:\n  driver: ps\n",
 		"device:\n  driver: hplip\n", "device:\n  driver: gutenprint\n", "device:\n  driver: ghostscript\n",
+		"device:\n  driver: legacy\n", "device:\n  driverName: samsung--scx-4300--2-0-0-en\n",
 		"device:\n  scanner: auto\n", "device:\n  scanner: ipp-usb\n", "device:\n  scanner: airsane\n", "device:\n  scanner: none\n",
 		"print:\n  defaults:\n    sides: one-sided\n", "print:\n  defaults:\n    sides: two-sided-long-edge\n", "print:\n  defaults:\n    sides: two-sided-short-edge\n",
 		"print:\n  defaults:\n    colorMode: auto\n", "print:\n  defaults:\n    colorMode: color\n", "print:\n  defaults:\n    colorMode: monochrome\n",

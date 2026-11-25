@@ -465,8 +465,10 @@ function Device({
         value={dev.mode}
         onChange={(v) => {
           const mode = S.device.shape.mode.parse(v);
-          // A USB selector is only allowed with mode usb.
-          setDevice(mode === "simulated" ? { mode, usb: undefined } : { mode });
+          // A USB selector and a driver name are only allowed with mode usb.
+          setDevice(
+            mode === "simulated" ? { mode, usb: undefined, driverName: undefined } : { mode },
+          );
         }}
         {...at("/device/mode")}
       />
@@ -474,9 +476,24 @@ function Device({
         label={f.driver}
         options={familyOptions(S.device.shape.driver.options)}
         value={dev.driver}
-        onChange={(k) => k != null && setDevice({ driver: S.device.shape.driver.parse(k) })}
+        onChange={(k) => {
+          if (k == null) return;
+          const driver = S.device.shape.driver.parse(k);
+          // ipp-usb needs no driver, so a driver name is not allowed with it.
+          setDevice(driver === "ipp-usb" ? { driver, driverName: undefined } : { driver });
+        }}
         {...at("/device/driver")}
       />
+      {dev.mode === "usb" && dev.driver !== "ipp-usb" && (
+        <TextField
+          label={f.driverName}
+          description={f.driverNameHint}
+          value={dev.driverName ?? ""}
+          // Empty removes the key, so the file goes back to automatic choice.
+          onChange={(v) => setDevice({ driverName: v || undefined })}
+          {...at("/device/driverName")}
+        />
+      )}
       <Select
         label={f.scanner}
         options={familyOptions(S.device.shape.scanner.options)}

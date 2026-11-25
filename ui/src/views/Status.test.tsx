@@ -66,6 +66,8 @@ const simulatedReady: StatusDTO = {
     mode: "simulated",
     decision: {
       printer: "sim",
+      driver: "",
+      driverDescription: "",
       scanner: "sim",
       saneBackends: [],
       requiredEulas: [],
@@ -161,10 +163,10 @@ describe("Status view", () => {
     expect(titles.slice(0, 3)).toEqual(["Printer", "Scanner", "Recent print jobs"]);
     const details = screen.getByRole("button", { name: "Technical details" });
     expect(details.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeTruthy();
+    expect(screen.getByText("Chosen by").closest("[hidden]")).toBeTruthy();
     act(() => details.click());
     expect(details.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeNull();
+    expect(screen.getByText("Chosen by").closest("[hidden]")).toBeNull();
   });
 
   test("a configured device that finds no printer says so and how to fix it", async () => {
@@ -221,6 +223,8 @@ describe("Status view", () => {
         inventory: { devices: [usb], probedAt: "2026-11-24T12:00:00Z", simulated: true },
         decision: {
           printer: "ipp-usb",
+          driver: "",
+          driverDescription: "",
           scanner: "ipp-usb",
           saneBackends: [],
           requiredEulas: [],
@@ -231,6 +235,9 @@ describe("Status view", () => {
       },
     });
     expect(screen.getByText("HP OfficeJet Pro (simulated)")).toBeTruthy();
+    // Driverless printing has no driver to name.
+    const driver = screen.getByText("Driver").closest("div") as HTMLElement;
+    expect(within(driver).getByText("None")).toBeTruthy();
   });
 
   test("shows a device error prominently", async () => {
@@ -301,11 +308,13 @@ describe("Status view", () => {
         message: "HP plug-in: download failed",
         decision: {
           printer: "hplip",
+          driver: "hp--laserjet-1020--en",
+          driverDescription: "HP LaserJet 1020, hpcups 3.24.4 (en)",
           scanner: "airsane",
           saneBackends: ["hpaio"],
           requiredEulas: [],
           optionalEulas: ["hplip-plugin"],
-          rule: "hp",
+          rule: "model",
           device: {
             vendorId: "03f0",
             productId: "2b17",
@@ -336,6 +345,8 @@ describe("Status view", () => {
     expect(screen.getByText(/USB 03f0:2b17/)).toBeTruthy();
     expect(screen.getByText("HP plug-in: download failed")).toBeTruthy();
     expect(screen.getByText("HP (HPLIP)")).toBeTruthy();
+    expect(screen.getByText("Printer model")).toBeTruthy();
+    expect(screen.getByText("HP LaserJet 1020, hpcups 3.24.4 (en)")).toBeTruthy();
     const blob = screen.getByText(/hplip-plugin 3\.24\.4/).closest("li") as HTMLElement;
     expect(within(blob).getByText("Failed")).toBeTruthy();
     expect(within(blob).getByText("bad signature")).toBeTruthy();
@@ -347,6 +358,76 @@ describe("Status view", () => {
     );
     expect(screen.getByText("apply failed: forbidden")).toBeTruthy();
     expect(screen.queryByText("data-dir")).toBeNull();
+  });
+
+  const scx4300 = {
+    vendorId: "04e8",
+    productId: "342e",
+    serial: "FAKE0008",
+    manufacturer: "Samsung Electronics Co., Ltd.",
+    product: "SCX-4300 Series",
+    bus: 1,
+    address: 6,
+    interfaces: [{ class: 7, subClass: 1, protocol: 2 }],
+    deviceId: "MFG:Samsung;CMD:GDI;MDL:SCX-4300 Series;CLS:PRINTER;MODE:PCL;STATUS:IDLE;",
+  };
+  type Decision = NonNullable<StatusDTO["device"]["decision"]>;
+  const usbDevice = (decision: Decision, phase: StatusDTO["device"]["phase"] = "ready") => ({
+    ...initialStatus,
+    config: { ...initialStatus.config, state: "applied" as const, etag: "e1", appliedEtag: "e1" },
+    device: { ...initialStatus.device, phase, mode: "usb" as const, decision },
+  });
+  const noDriver: Decision = {
+    printer: "",
+    driver: "",
+    driverDescription: "",
+    scanner: "airsane",
+    saneBackends: [],
+    requiredEulas: [],
+    optionalEulas: [],
+    rule: "none",
+    device: scx4300,
+  };
+
+  test("a classic CUPS driver shows its family, driver and how it was chosen", async () => {
+    await renderWith(
+      usbDevice({
+        ...noDriver,
+        printer: "legacy",
+        driver: "samsung--scx-4300--2-0-0-en",
+        saneBackends: ["xerox_mfp"],
+        rule: "model",
+      }),
+    );
+    expect(screen.getByText("Classic CUPS drivers")).toBeTruthy();
+    // Without a description the driver name stands in.
+    expect(screen.getByText("samsung--scx-4300--2-0-0-en")).toBeTruthy();
+    expect(screen.getByText("Printer model")).toBeTruthy();
+    expect(screen.queryByText("No printer driver matches this printer")).toBeNull();
+  });
+
+  test("a family chosen in Settings without a driver name leaves the choice to the app", async () => {
+    await renderWith(usbDevice({ ...noDriver, printer: "gutenprint", rule: "override" }));
+    expect(screen.getByText("Your settings")).toBeTruthy();
+    expect(screen.getByText("Picked by the printer application")).toBeTruthy();
+    expect(screen.queryByText("No printer driver matches this printer")).toBeNull();
+  });
+
+  test("no matching driver shows the device ID and a way to choose one in Settings", async () => {
+    await renderWith(usbDevice(noDriver, "degraded"));
+    expect(screen.getByText("Needs attention")).toBeTruthy();
+    expect(screen.getByText("No printer driver matches this printer")).toBeTruthy();
+    expect(screen.getByText(scx4300.deviceId).tagName).toBe("CODE");
+    expect(
+      screen.getByRole("link", { name: "Choose a driver in Settings" }).getAttribute("href"),
+    ).toBe("/settings");
+    expect(screen.getByText("No match")).toBeTruthy();
+  });
+
+  test("no matching driver without a device ID says the printer reported none", async () => {
+    await renderWith(usbDevice({ ...noDriver, device: { ...scx4300, deviceId: "" } }, "degraded"));
+    expect(screen.getByText("No printer driver matches this printer")).toBeTruthy();
+    expect(screen.getByText("The printer did not report a device ID.")).toBeTruthy();
   });
 
   test("a job row moves from pending to completed after a job event", async () => {

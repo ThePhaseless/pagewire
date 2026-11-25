@@ -27,11 +27,11 @@ func TestImageTag(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	got, err := ParseOverrides(" device=reg/dev@sha256:1 ,pagewire=reg/ps:1, driver-hplip=reg/h:2 ")
+	got, err := ParseOverrides(" device=reg/dev@sha256:1 ,pagewire=reg/ps:1, driver-hplip=reg/h:2,driver-legacy=reg/l:3 ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"device": "reg/dev@sha256:1", "pagewire": "reg/ps:1", "driver-hplip": "reg/h:2"}
+	want := map[string]string{"device": "reg/dev@sha256:1", "pagewire": "reg/ps:1", "driver-hplip": "reg/h:2", "driver-legacy": "reg/l:3"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

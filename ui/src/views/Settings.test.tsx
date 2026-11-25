@@ -267,6 +267,86 @@ describe("Settings form", () => {
     expect(summary.textContent).toContain("/nonsense: something else");
   });
 
+  const SCX = "samsung--scx-4300--2-0-0-en";
+  const withDriverName = () =>
+    config({ device: { ...config().device, driver: "legacy", driverName: SCX } });
+
+  test("a driver name is sent with the device, and the classic CUPS family is offered", async () => {
+    await mount();
+    const name = await screen.findByRole("textbox", { name: "Driver name" });
+    expect(name.closest(".ui-field")?.textContent).toContain("leave empty to choose automatically");
+    await press(button(/Printer driver/));
+    expect(await screen.findByRole("option", { name: "Classic CUPS drivers" })).toBeTruthy();
+    await press(screen.getByRole("option", { name: "Classic CUPS drivers" }));
+    await type("Driver name", SCX);
+    writes.push(() => json(applied("e2", withDriverName())));
+    await press(button("Save"));
+    expect(writesOf("PATCH")[0]?.body).toEqual({ device: { driver: "legacy", driverName: SCX } });
+  });
+
+  test("clearing the driver name removes it from the file", async () => {
+    getConfig = () => json(applied("e1", withDriverName()));
+    await mount();
+    expect(
+      (await screen.findByRole("textbox", { name: "Driver name" })) as HTMLInputElement,
+    ).toHaveProperty("value", SCX);
+    await type("Driver name", "");
+    writes.push(() => json(applied("e2")));
+    await press(button("Save"));
+    expect(writesOf("PATCH")[0]?.body).toEqual({ device: { driverName: null } });
+  });
+
+  test("switching to the simulated device drops the driver name", async () => {
+    getConfig = () => json(applied("e1", withDriverName()));
+    await mount();
+    await screen.findByRole("textbox", { name: "Driver name" });
+    act(() => {
+      fireEvent.click(screen.getByRole("radio", { name: "Simulated printer and scanner" }));
+    });
+    expect(screen.queryByRole("textbox", { name: "Driver name" })).toBeNull();
+    writes.push(() => json(applied("e2")));
+    await press(button("Save"));
+    expect(writesOf("PATCH")[0]?.body).toEqual({
+      device: { mode: "simulated", usb: null, driverName: null },
+    });
+  });
+
+  test("choosing the driverless driver hides and drops the driver name", async () => {
+    getConfig = () => json(applied("e1", withDriverName()));
+    await mount();
+    await screen.findByRole("textbox", { name: "Driver name" });
+    await press(button(/Printer driver/));
+    await press(await screen.findByRole("option", { name: "Driverless (IPP over USB)" }));
+    expect(screen.queryByRole("textbox", { name: "Driver name" })).toBeNull();
+    writes.push(() => json(applied("e2")));
+    await press(button("Save"));
+    expect(writesOf("PATCH")[0]?.body).toEqual({
+      device: { driver: "ipp-usb", driverName: null },
+    });
+  });
+
+  test("a rejected driver name shows its error on the field", async () => {
+    await mount();
+    await type("Driver name", "nope");
+    writes.push(() =>
+      problem(422, "about:blank", [
+        {
+          path: "/device/driverName",
+          line: 6,
+          column: 15,
+          message: "is not allowed with driver: ipp-usb, which needs no driver",
+        },
+      ]),
+    );
+    await press(button("Save"));
+    const name = field("Driver name");
+    await waitFor(() => expect(name.getAttribute("aria-invalid")).toBe("true"));
+    expect(document.body.textContent).toContain(
+      "is not allowed with driver: ipp-usb, which needs no driver",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   test("Reset discards edits", async () => {
     await mount();
     await type("Name", "Office");

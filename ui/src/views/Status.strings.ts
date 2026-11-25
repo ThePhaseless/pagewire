@@ -1,4 +1,5 @@
 // Copy for the Status view. Shared words (Copy, Copied, the page title) come from ../strings.
+import { setupStrings } from "./Setup.strings";
 
 export const statusStrings = {
   description: "What the printer and scanner are doing, and how to reach them from other devices.",
@@ -29,8 +30,13 @@ export const statusStrings = {
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
     unnamedDevice: "Unnamed USB device",
-    ruleLabel: "Matched rule",
+    ruleLabel: "Chosen by",
+    rules: setupStrings.rules,
     printerFamilyLabel: "Printer driver",
+    driverLabel: "Driver",
+    appDriver: "Picked by the printer application",
+    noDriver: setupStrings.noDriver,
+    chooseDriver: "Choose a driver in Settings",
     scannerFamilyLabel: "Scanner driver",
     noFamily: "None",
     families: {
@@ -39,6 +45,7 @@ export const statusStrings = {
       hplip: "HP (HPLIP)",
       gutenprint: "Gutenprint",
       ghostscript: "Ghostscript",
+      legacy: "Classic CUPS drivers",
       airsane: "SANE",
       sim: "Simulated",
     } as Record<string, string>,

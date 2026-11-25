@@ -356,6 +356,30 @@ func TestArgs(t *testing.T) {
 	}
 }
 
+func TestLegacyPrinterApp(t *testing.T) {
+	spec := withHash(&device.Spec{Mode: device.ModeUSB, Printer: "legacy", Scanner: "airsane", SaneBackends: []string{"xerox_mfp"}})
+	d, _ := render(t, spec, goldenParams())
+	var drivers []corev1.Container
+	for _, c := range allContainers(d) {
+		if strings.Contains(c.Image, "pagewire-driver-") {
+			drivers = append(drivers, c)
+		}
+	}
+	if len(drivers) != 1 || drivers[0].Name != "printer-app" {
+		t.Fatalf("driver containers %+v, want printer-app alone", drivers)
+	}
+	c := drivers[0]
+	if c.Image != "ghcr.io/thephaseless/pagewire-driver-legacy:0.0.0-test" {
+		t.Errorf("image %s", c.Image)
+	}
+	if !slices.Equal(c.Command, []string{"/usr/local/bin/legacy-printer-app"}) || !slices.Contains(c.Args, "server-port=8005") {
+		t.Errorf("command %v args %v", c.Command, c.Args)
+	}
+	if a := find(t, d, "agent"); !slices.Contains(a.Args, "ipp://127.0.0.1:8005/ipp/system") {
+		t.Errorf("agent args %v", a.Args)
+	}
+}
+
 func TestPullPolicies(t *testing.T) {
 	selfNames := map[string]bool{"probe": true, "agent": true, "fetch-blobs": true}
 	policies := func(p Params) (self, other map[corev1.PullPolicy]bool, images map[string]string) {

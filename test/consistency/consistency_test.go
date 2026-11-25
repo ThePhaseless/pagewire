@@ -118,6 +118,7 @@ func TestToolchainPins(t *testing.T) {
 	goVersion, bunVersion := miseTool(t, "go"), miseTool(t, "bun")
 	check("Dockerfile", "golang", goVersion)
 	check("images/device/Dockerfile", "golang", goVersion)
+	check("images/driver/Dockerfile", "golang", goVersion)
 	check("Dockerfile", "oven/bun", bunVersion)
 }
 
@@ -304,7 +305,7 @@ func TestCITargets(t *testing.T) {
 			t.Errorf("build matrix entry %v: %s ends with a sources stage, so it needs an explicit non-sources target", e, file)
 		}
 	}
-	for _, job := range []string{"integration", "docker-backend"} {
+	for _, job := range []string{"integration", "docker-backend", "indexes"} {
 		n := 0
 		for _, step := range list(get(ci, "jobs", job, "steps")) {
 			file := str(get(step, "with", "file"))
@@ -395,7 +396,7 @@ func TestSourcesRunForEveryPush(t *testing.T) {
 	if got, want := str(get(ci, "concurrency", "cancel-in-progress")), "${{ github.event_name == 'pull_request' }}"; got != want {
 		t.Errorf("concurrency.cancel-in-progress = %q, want %q", got, want)
 	}
-	if got, want := expr(str(get(ci, "jobs", "sources", "if"))), "!cancelled() && github.event_name != 'pull_request' && needs.build.result != 'skipped'"; got != want {
+	if got, want := expr(str(get(ci, "jobs", "sources", "if"))), "!cancelled() && github.event_name != 'pull_request' && "+renovateRef+" && needs.build.result != 'skipped'"; got != want {
 		t.Errorf("sources if = %q, want %q", got, want)
 	}
 	tags := lines(str(get(ci, "jobs", "sources", "with", "meta-tags")))
@@ -429,7 +430,9 @@ func TestSourcesRunForEveryPush(t *testing.T) {
 	}
 }
 
-// ci-ok accepts a skipped sources job only on a pull request, which pushes nothing.
+// ci-ok accepts a skipped sources job only on a pull request or a renovate/** run, which push nothing.
+const ciOkSkipped = `skipped) test "${{ github.event_name }}" = pull_request || test "${{ startsWith(github.ref, 'refs/heads/renovate/') }}" = true ;;`
+
 func TestCIOkSources(t *testing.T) {
 	steps := list(get(loadCI(t), "jobs", "ci-ok", "steps"))
 	var run []string
@@ -439,7 +442,7 @@ func TestCIOkSources(t *testing.T) {
 	for _, want := range []string{
 		`case "${{ needs.sources.result }}" in`,
 		"success) ;;",
-		`skipped) test "${{ github.event_name }}" = pull_request ;;`,
+		ciOkSkipped,
 		"*) exit 1 ;;",
 	} {
 		if !slices.Contains(run, want) {
@@ -447,7 +450,7 @@ func TestCIOkSources(t *testing.T) {
 		}
 	}
 	for _, l := range run {
-		if strings.HasPrefix(l, "skipped)") && l != `skipped) test "${{ github.event_name }}" = pull_request ;;` {
+		if strings.HasPrefix(l, "skipped)") && l != ciOkSkipped {
 			t.Errorf("ci-ok accepts a skipped sources job with %q", l)
 		}
 	}
@@ -574,8 +577,190 @@ func TestSourcesReference(t *testing.T) {
 			t.Errorf("%s stage %s: no RUN writing \"${SOURCES_REF}\" to /usr/share/pagewire/SOURCES", file, target)
 		}
 	}
-	if n != 5 {
-		t.Errorf("%d build matrix entries with a sources stage, want 5 (device and four drivers)", n)
+	if n != 6 {
+		t.Errorf("%d build matrix entries with a sources stage, want 6 (device and five drivers)", n)
+	}
+}
+
+// renovateRef keeps ci.yml runs on renovate/** branches (dispatched by indexes.yml) from publishing.
+const renovateRef = "!startsWith(github.ref, 'refs/heads/renovate/')"
+
+// Runs on renovate/** build and test everything but push no images and no sources.
+func TestRenovateRunsDoNotPush(t *testing.T) {
+	ci := loadCI(t)
+	if got, want := expr(str(get(ci, "jobs", "build", "with", "push"))), "github.event_name != 'pull_request' && "+renovateRef; got != want {
+		t.Errorf("build push = %q, want %q", got, want)
+	}
+	if got, want := expr(str(get(ci, "jobs", "sources", "if"))), "!cancelled() && github.event_name != 'pull_request' && "+renovateRef+" && needs.build.result != 'skipped'"; got != want {
+		t.Errorf("sources if = %q, want %q", got, want)
+	}
+	// indexes.yml dispatches ci.yml; the key's value is null, so check the key.
+	if on, _ := get(ci, "on").(map[string]any); on == nil {
+		t.Error("ci.yml has no on map")
+	} else if _, ok := on["workflow_dispatch"]; !ok {
+		t.Error("ci.yml on lacks workflow_dispatch, which indexes.yml uses to start CI on its commit")
+	}
+}
+
+func stepsBuilding(steps []any, file, target string) int {
+	n := 0
+	for _, s := range steps {
+		if str(get(s, "with", "file")) == file && str(get(s, "with", "target")) == target {
+			n++
+		}
+	}
+	return n
+}
+
+// The driver and SANE indexes are generated from the images: CI checks them, and indexes.yml
+// regenerates them on Renovate branches.
+func TestIndexJob(t *testing.T) {
+	ci := loadCI(t)
+	steps := list(get(ci, "jobs", "indexes", "steps"))
+	if stepsBuilding(steps, "images/driver/Dockerfile", "driver-index") != 1 || stepsBuilding(steps, "images/device/Dockerfile", "sane-index") != 1 {
+		t.Error("ci.yml indexes job does not build driver-index from images/driver/Dockerfile and sane-index from images/device/Dockerfile")
+	}
+	// Drift from an Ubuntu package update blocks merges, never image publishing.
+	if !slices.Contains(list(get(ci, "jobs", "ci-ok", "needs")), any("indexes")) {
+		t.Error("ci-ok needs lacks indexes")
+	}
+	if slices.Contains(list(get(ci, "jobs", "build", "needs")), any("indexes")) {
+		t.Error("build needs indexes; drift must not stop main or a tag from publishing")
+	}
+	var okRun []string
+	for _, s := range list(get(ci, "jobs", "ci-ok", "steps")) {
+		okRun = append(okRun, lines(str(get(s, "run")))...)
+	}
+	if !slices.Contains(okRun, `test "${{ needs.indexes.result }}" = success`) {
+		t.Error("ci-ok does not test needs.indexes.result")
+	}
+	// Caches are scoped by ref: only main writes, every other ref restores main's.
+	n := 0
+	for _, s := range steps {
+		with, _ := get(s, "with").(map[string]any)
+		if to, ok := with["cache-to"]; ok {
+			n++
+			if !strings.Contains(str(to), "refs/heads/main") {
+				t.Errorf("indexes step %q writes its cache from any ref: %q", str(get(s, "name")), str(to))
+			}
+		}
+	}
+	if n == 0 {
+		t.Error("indexes job has no cache-to")
+	}
+
+	for file, target := range map[string]string{"images/driver/Dockerfile": "driver-index", "images/device/Dockerfile": "sane-index"} {
+		stages := parseDockerfile(t, file)
+		if findStage(stages, target) == nil {
+			t.Errorf("%s: no stage %s", file, target)
+		}
+		if last := stages[len(stages)-1].name; last != "sources" {
+			t.Errorf("%s: last stage %q, want sources (the default target)", file, last)
+		}
+	}
+
+	// Each driver image dumps its list with the container's PPD_DIRS, so the dump follows that ENV line.
+	driver := parseDockerfile(t, "images/driver/Dockerfile")
+	targets := 0
+	for _, e := range list(get(ci, "jobs", "build", "strategy", "matrix", "include")) {
+		if str(get(e, "file")) != "images/driver/Dockerfile" {
+			continue
+		}
+		targets++
+		target := str(get(e, "target"))
+		s := findStage(driver, target)
+		if s == nil {
+			t.Errorf("images/driver/Dockerfile: no stage %s", target)
+			continue
+		}
+		env := slices.IndexFunc(s.lines, func(l string) bool {
+			l = strings.TrimSpace(l)
+			return strings.HasPrefix(l, "ENV ") && strings.Contains(l, "PPD_DIRS=")
+		})
+		dump := slices.IndexFunc(s.lines, func(l string) bool {
+			l = strings.TrimSpace(l)
+			return strings.HasPrefix(l, "RUN ") && strings.Contains(l, "drivers > /usr/share/pagewire/drivers.txt")
+		})
+		switch {
+		case env < 0 || dump < 0:
+			t.Errorf("images/driver/Dockerfile stage %s: needs an ENV ... PPD_DIRS= line and a RUN dumping drivers to /usr/share/pagewire/drivers.txt", target)
+		case dump < env:
+			t.Errorf("images/driver/Dockerfile stage %s: the drivers.txt dump runs before the ENV ... PPD_DIRS= line", target)
+		}
+	}
+	if targets != 5 {
+		t.Errorf("%d driver build matrix entries, want 5", targets)
+	}
+
+	var wf map[string]any
+	if err := yaml.Unmarshal([]byte(read(t, ".github/workflows/indexes.yml")), &wf); err != nil {
+		t.Fatal(err)
+	}
+	branches := list(get(wf, "on", "push", "branches"))
+	if !slices.Contains(branches, any("renovate/**")) {
+		t.Errorf("indexes.yml push branches %v lack renovate/**", branches)
+	}
+	// The index paths catch Renovate rebases, which drop the regeneration commit. The generators use
+	// only the standard library, so go.mod and go.sum cannot change an index.
+	paths := list(get(wf, "on", "push", "paths"))
+	for _, want := range []string{"images/**", "tools/**", "internal/catalog/drivers.tsv.gz", "internal/catalog/sane-usb.tsv"} {
+		if !slices.Contains(paths, any(want)) {
+			t.Errorf("indexes.yml push paths lack %s", want)
+		}
+	}
+	for _, bad := range []string{"go.mod", "go.sum"} {
+		if slices.Contains(paths, any(bad)) {
+			t.Errorf("indexes.yml push paths list %s", bad)
+		}
+	}
+	if on, _ := get(wf, "on").(map[string]any); on == nil {
+		t.Error("indexes.yml has no on map")
+	} else if _, ok := on["workflow_dispatch"]; !ok {
+		t.Error("indexes.yml on lacks workflow_dispatch")
+	}
+	if p, _ := get(wf, "permissions").(map[string]any); len(p) != 1 || str(p["contents"]) != "read" {
+		t.Errorf("indexes.yml workflow permissions %v, want contents: read", p)
+	}
+	jobs, _ := get(wf, "jobs").(map[string]any)
+	if len(jobs) != 1 {
+		t.Fatalf("indexes.yml has %d jobs, want 1", len(jobs))
+	}
+	for name, job := range jobs {
+		if p, _ := get(job, "permissions").(map[string]any); len(p) != 2 || str(p["contents"]) != "write" || str(p["actions"]) != "write" {
+			t.Errorf("indexes.yml job %s permissions %v, want exactly contents: write and actions: write", name, p)
+		}
+		if !strings.Contains(str(get(job, "if")), "refs/heads/renovate/") {
+			t.Errorf("indexes.yml job %s if %q does not limit it to renovate/** branches", name, str(get(job, "if")))
+		}
+		var cfg struct {
+			GitIgnoredAuthors []string `json:"gitIgnoredAuthors"`
+		}
+		if err := json.Unmarshal([]byte(read(t, "renovate.json")), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		dispatch := false
+		for _, s := range list(get(job, "steps")) {
+			run := str(get(s, "run"))
+			for _, l := range lines(run) {
+				if strings.Contains(l, "git push") && (strings.Contains(l, "--force") || strings.Contains(l+" ", " -f ")) {
+					t.Errorf("indexes.yml force-pushes: %q", l)
+				}
+			}
+			if !strings.Contains(run, "gh workflow run ci.yml --ref") {
+				continue
+			}
+			dispatch = true
+			// Renovate keeps rebasing a branch whose extra commits come from ignored authors.
+			m := regexp.MustCompile(`user\.email\s+['"]?([^'"\s]+)`).FindStringSubmatch(run)
+			if m == nil {
+				t.Error("indexes.yml commit step sets no git user.email")
+			} else if !slices.Contains(cfg.GitIgnoredAuthors, m[1]) {
+				t.Errorf("indexes.yml commits as %s, which renovate.json gitIgnoredAuthors %v lacks", m[1], cfg.GitIgnoredAuthors)
+			}
+		}
+		if !dispatch {
+			t.Error("indexes.yml has no step running gh workflow run ci.yml --ref")
+		}
 	}
 }
 

@@ -17,7 +17,8 @@ device:
     vendorId: "03f0"              # 4 lowercase hex digits
     productId: "2754"             # 4 lowercase hex digits (03f0:2754 is the sim's default device)
     serial: ""                    # optional
-  driver: auto                    # auto | ipp-usb | ps | hplip | gutenprint | ghostscript
+  driver: auto                    # auto | ipp-usb | ps | hplip | gutenprint | ghostscript | legacy
+  # driverName: samsung--scx-4300--2-0-0-en  # optional exact driver name from the printer application (default: chosen automatically)
   scanner: auto                   # auto | ipp-usb | airsane | none
 
 print:

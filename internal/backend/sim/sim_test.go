@@ -20,6 +20,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/blobs"
 	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
 	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
@@ -359,6 +360,30 @@ func TestPAPPLPath(t *testing.T) {
 	})
 	if e := rep.EULAs[0]; e.Text != blobtest.License || e.TextSHA256 != spec.AcceptedEULAs[0].TextSHA256 {
 		t.Errorf("EULAs = %+v", rep.EULAs)
+	}
+}
+
+// TestPAPPLIndexDriver: the fake app offers the driver name the dispatcher
+// takes from the index, so a queue created with it comes up.
+func TestPAPPLIndexDriver(t *testing.T) {
+	dec, err := catalog.Decide(catalog.Fixture("samsung-scx4300-mfp"), config.Device{Mode: config.ModeUSB, Driver: config.Auto})
+	if err != nil || dec.Printer != "legacy" || dec.Driver == "" {
+		t.Fatalf("Decide = %+v, %v; want a legacy driver", dec, err)
+	}
+	spec := &device.Spec{Mode: device.ModeUSB, Printer: dec.Printer}
+	spec.Hash = device.SpecHash(spec)
+	r := &reporter{desired: device.DesiredState{
+		Hash:   spec.Hash,
+		Queue:  &device.QueueSpec{Name: "Printer", Driver: dec.Driver, Schemes: []string{"usb"}, Media: "iso_a4_210x297mm"},
+		Browse: device.BrowseTypes,
+	}}
+	b, _ := newSim(t, "samsung-scx4300-mfp", r)
+	if err := b.Apply(ctx(t), spec); err != nil {
+		t.Fatal(err)
+	}
+	rep := r.wait(t, "queue ok", func(rep device.AgentReport) bool { return rep.Queue != nil && rep.Queue.State == device.QueueOK })
+	if !strings.HasPrefix(rep.Queue.DeviceURI, "cups:usb:") {
+		t.Errorf("QueueResult = %+v, want a cups:usb: device", rep.Queue)
 	}
 }
 

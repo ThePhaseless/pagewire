@@ -1,10 +1,11 @@
 // Package catalog holds the embedded device catalog (printer families,
-// scanners, EULAs, vendor blobs and dispatch rules), the shared device
-// fixtures, and the dispatcher Decide.
+// scanners, EULAs, vendor blobs and dispatch data), the generated driver and
+// SANE indexes, the shared device fixtures, and the dispatcher Decide.
 package catalog
 
 import (
 	"bytes"
+	"compress/gzip"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -17,18 +18,38 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
-//go:embed catalog.yaml all:keys fixtures/*.json
+//go:embed catalog.yaml drivers.tsv.gz sane-usb.tsv all:keys fixtures/*.json
 var files embed.FS
 
 // Catalog is catalog.yaml.
 type Catalog struct {
-	APIVersion          string     `yaml:"apiVersion"`
-	Printers            []Printer  `yaml:"printers"`
-	Scanners            []Scanner  `yaml:"scanners"`
-	EULAs               []EULAInfo `yaml:"eulas"`
-	Blobs               []Blob     `yaml:"blobs"`
-	DefaultSaneBackends []string   `yaml:"defaultSaneBackends"`
-	Rules               []Rule     `yaml:"rules"`
+	APIVersion          string       `yaml:"apiVersion"`
+	Printers            []Printer    `yaml:"printers"`
+	Scanners            []Scanner    `yaml:"scanners"`
+	EULAs               []EULAInfo   `yaml:"eulas"`
+	Blobs               []Blob       `yaml:"blobs"`
+	DefaultSaneBackends []string     `yaml:"defaultSaneBackends"` // when the SANE index has no entry
+	DriverPriority      []string     `yaml:"driverPriority"`
+	CommandSets         []CommandSet `yaml:"commandSets"`
+	DriverEULAs         []DriverEULA `yaml:"driverEulas"`
+
+	Drivers *DriverIndex `yaml:"-"` // drivers.tsv.gz
+	Sane    SaneIndex    `yaml:"-"` // sane-usb.tsv
+}
+
+// CommandSet maps IEEE-1284 CMD tokens to a generic driver's model.
+type CommandSet struct {
+	Commands []string `yaml:"commands"`
+	MFG      string   `yaml:"mfg"`
+	MDL      string   `yaml:"mdl"`
+}
+
+// DriverEULA gives the EULAs of a family's drivers whose name contains NameContains.
+type DriverEULA struct {
+	Family        string   `yaml:"family"`
+	NameContains  string   `yaml:"nameContains"`
+	RequiredEULAs []string `yaml:"requiredEulas"`
+	OptionalEULAs []string `yaml:"optionalEulas"`
 }
 
 // Printer is a printer family. PAPPL families have an App.
@@ -39,6 +60,8 @@ type Printer struct {
 	App           string   `yaml:"app"`   // PAPPL printer application
 	Port          int      `yaml:"port"`
 	DeviceSchemes []string `yaml:"deviceSchemes"` // QueueSpec.Schemes, PAPPL families only
+	RequiredEULAs []string `yaml:"requiredEulas"` // EULAs of every driver of the family
+	OptionalEULAs []string `yaml:"optionalEulas"`
 }
 
 // Scanner is a scanner family.
@@ -83,32 +106,8 @@ type Verify struct {
 	SHA256          string `yaml:"sha256"`
 }
 
-// Rule maps a matching device to printer and scanner families.
-type Rule struct {
-	Name          string   `yaml:"name"`
-	Match         Match    `yaml:"match"`
-	Printer       string   `yaml:"printer"`
-	Scanner       string   `yaml:"scanner"`
-	SaneBackends  []string `yaml:"saneBackends"` // empty: DefaultSaneBackends
-	RequiredEULAs []string `yaml:"requiredEulas"`
-	OptionalEULAs []string `yaml:"optionalEulas"`
-}
-
-// Match is the AND of the keys present; an empty Match matches every device.
-type Match struct {
-	VendorID  string     `yaml:"vendorId"`
-	Interface *Interface `yaml:"interface"`
-	Command   []string   `yaml:"command"`
-}
-
-// Interface is a USB interface class triple.
-type Interface struct {
-	Class    uint8 `yaml:"class"`
-	SubClass uint8 `yaml:"subClass"`
-	Protocol uint8 `yaml:"protocol"`
-}
-
-// Load parses the embedded catalog.yaml. It never reads key files.
+// Load parses the embedded catalog.yaml, drivers.tsv.gz and sane-usb.tsv. It
+// never reads key files.
 func Load() (*Catalog, error) {
 	b, err := files.ReadFile("catalog.yaml")
 	if err != nil {
@@ -117,6 +116,24 @@ func Load() (*Catalog, error) {
 	var c Catalog
 	if err := yaml.UnmarshalWithOptions(b, &c, yaml.Strict()); err != nil {
 		return nil, fmt.Errorf("catalog.yaml: %w", err)
+	}
+	gz, err := files.ReadFile("drivers.tsv.gz")
+	if err != nil {
+		return nil, err
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		return nil, fmt.Errorf("drivers.tsv.gz: %w", err)
+	}
+	if c.Drivers, err = ParseDriverIndex(zr); err != nil {
+		return nil, err
+	}
+	sane, err := files.ReadFile("sane-usb.tsv")
+	if err != nil {
+		return nil, err
+	}
+	if c.Sane, err = ParseSaneIndex(bytes.NewReader(sane)); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }
@@ -131,7 +148,8 @@ var current = sync.OnceValue(func() *Catalog {
 	return c
 })
 
-// Known lists the EULA versions and printer ids that config.Validate accepts.
+// Known lists the EULA versions, printer ids and driver names that
+// config.Validate accepts.
 func Known() config.Known {
 	c := current()
 	k := config.Known{EULAs: []config.EULARef{}, Printers: []string{}}

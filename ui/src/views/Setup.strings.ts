@@ -1,4 +1,5 @@
 // Copy for the setup wizard. Shared words (Back, Next, Loading) come from ../strings.
+import type { Decision } from "../gen/api";
 import { strings } from "../strings";
 
 const stepOf = (n: number, total: number) => `Step ${n} of ${total}`;
@@ -28,10 +29,26 @@ export const setupStrings = {
     hplip: "HP (HPLIP)",
     gutenprint: "Gutenprint",
     ghostscript: "Ghostscript",
+    legacy: "Classic CUPS drivers",
     airsane: "SANE",
     sim: "Simulated",
     none: "No scanner",
   } as Record<string, string>,
+  /** How the dispatcher chose the printer driver (Decision.rule). */
+  rules: {
+    "ipp-over-usb": "Driverless printing (IPP over USB)",
+    model: "Printer model",
+    "command-set": "Printer language",
+    override: "Your settings",
+    none: "No match",
+    simulated: "Simulated mode",
+  } satisfies Record<Decision["rule"], string>,
+  /** The no-driver state: the dispatcher found no driver for the printer. */
+  noDriver: {
+    title: "No printer driver matches this printer",
+    deviceId: "Device ID:",
+    noDeviceId: "The printer did not report a device ID.",
+  },
   detect: {
     description: "pagewire looks for a printer on USB and picks a driver for it.",
     searchingTitle: "Looking for the printer",
@@ -46,8 +63,9 @@ export const setupStrings = {
     serial: (serial: string) => `serial ${serial}`,
     simulatedName: (name: string) => `${name} (simulated)`,
     choiceTitle: "pagewire will use",
-    ruleLabel: "Matched rule",
+    ruleLabel: "Chosen by",
     printerLabel: "Printer driver",
+    noPrinterDriver: "None found",
     scannerLabel: "Scanner driver",
     noUsbTitle: "No USB printer available",
     k8sIntro: "This server cannot reach a USB printer yet. On Kubernetes pagewire needs:",
@@ -84,6 +102,9 @@ export const setupStrings = {
     scannerLabel: "Scanner driver",
     automatic: (family: string) => `Automatic: ${family}`,
     automaticUnknown: "Automatic",
+    automaticNone: "Automatic: no driver matches",
+    noDriverHint:
+      "Pick a driver family below, or finish setup and enter an exact driver name in Settings.",
     licencesTitle: "Vendor licences",
     noLicences: "This printer needs no vendor files.",
   },
@@ -132,6 +153,7 @@ export const setupStrings = {
     simulatedDevice: "Simulated printer and scanner",
     driver: "Printer driver",
     scanner: "Scanner driver",
+    noDriverHint: "After setup, choose a driver in Settings.",
     licences: "Accepted licences",
     noLicences: "None",
     printDefaults: "Print defaults",

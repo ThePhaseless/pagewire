@@ -61,6 +61,8 @@ const simulatedDecision = {
   requiredEulas: [],
   optionalEulas: [],
   rule: "simulated",
+  driver: "",
+  driverDescription: "",
   device: null,
 };
 

@@ -32,10 +32,12 @@ type Config struct {
 
 // Device selects the device and its drivers.
 type Device struct {
-	Mode    string `yaml:"mode" json:"mode" validate:"oneof=usb simulated" jsonschema:"enum=usb,enum=simulated,default=usb" jsonschema_description:"usb, or simulated (test printer and SANE test scanner, no USB resource)."`
-	USB     *USB   `yaml:"usb,omitempty" json:"usb,omitempty" jsonschema_description:"Optional selector when several USB devices are visible. Only allowed with mode usb."`
-	Driver  string `yaml:"driver" json:"driver" validate:"oneof=auto ipp-usb ps hplip gutenprint ghostscript" jsonschema:"enum=auto,enum=ipp-usb,enum=ps,enum=hplip,enum=gutenprint,enum=ghostscript,default=auto"`
-	Scanner string `yaml:"scanner" json:"scanner" validate:"oneof=auto ipp-usb airsane none" jsonschema:"enum=auto,enum=ipp-usb,enum=airsane,enum=none,default=auto"`
+	Mode   string `yaml:"mode" json:"mode" validate:"oneof=usb simulated" jsonschema:"enum=usb,enum=simulated,default=usb" jsonschema_description:"usb, or simulated (test printer and SANE test scanner, no USB resource)."`
+	USB    *USB   `yaml:"usb,omitempty" json:"usb,omitempty" jsonschema_description:"Optional selector when several USB devices are visible. Only allowed with mode usb."`
+	Driver string `yaml:"driver" json:"driver" validate:"oneof=auto ipp-usb ps hplip gutenprint ghostscript legacy" jsonschema:"enum=auto,enum=ipp-usb,enum=ps,enum=hplip,enum=gutenprint,enum=ghostscript,enum=legacy,default=auto"`
+	// DriverName pins the PAPPL driver; "" lets the dispatcher choose.
+	DriverName string `yaml:"driverName,omitempty" json:"driverName,omitempty" validate:"max=255,nocontrol" jsonschema:"maxLength=255,pattern=^[^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the device degraded. Not allowed with driver ipp-usb or mode simulated."`
+	Scanner    string `yaml:"scanner" json:"scanner" validate:"oneof=auto ipp-usb airsane none" jsonschema:"enum=auto,enum=ipp-usb,enum=airsane,enum=none,default=auto"`
 }
 
 // USB selects one device by its descriptors.

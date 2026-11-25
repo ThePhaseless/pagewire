@@ -2,7 +2,7 @@
 
 pagewire's own code is licensed under Apache-2.0 (`LICENSE`, `NOTICE`). The container images also contain third-party software, listed here per image: what it is, its licence, how it gets into the image, where its source is, and whether pagewire changes it.
 
-Versions were read from images built from this repository on 2026-11-24 (linux/arm64). Ubuntu and Debian package versions move with security updates, because every image build runs `apt-get upgrade`. For a given image the authoritative lists are inside it and attached to it:
+Versions were read from images built from this repository on 2026-11-24 (linux/arm64); those of `pagewire-driver-legacy` and of the driver packages added to or moved between driver images since then, on 2026-11-25. Ubuntu and Debian package versions move with security updates, because every image build runs `apt-get upgrade`. For a given image the authoritative lists are inside it and attached to it:
 
 - the SBOM attestation published with every image (Go modules, npm packages, Alpine, Debian and Ubuntu packages);
 - `/licenses` in the control-plane image (`go/` for Go modules and the Go standard library, `c/` for the statically linked C libraries, `pagewire/` for this project's `LICENSE`, `NOTICE` and this file);
@@ -16,6 +16,8 @@ Licence cells give the licence of the component's own files. Debian packaging fi
 ## Control-plane image (`pagewire`)
 
 A single statically linked Go binary with the web UI embedded, on Google's distroless base.
+
+The binary also embeds two indexes that the build generates from the device and driver images: `internal/catalog/drivers.tsv.gz` holds the name, description and IEEE-1284 device ID of every driver the printer applications list, as they print them, and `internal/catalog/sane-usb.tsv` maps USB vendor and product IDs to SANE backend names, read from the device image's `/etc/sane.d` and from sane-backends' `.desc` files. Both are lists of model names and IDs; the software they describe is listed in the sections below.
 
 ### Go modules (linked)
 
@@ -194,11 +196,11 @@ The image's 139 source packages at the time of writing include the `ubuntu:26.04
 
 The HP plug-in paths (`/usr/share/hplip/{prnt,scan,fax}/plugins`, `/usr/share/hplip/data/firmware`, `/var/lib/hp/hplip.state`) are symlinks into the vendor-file volume. The image contains no plug-in files.
 
-## Driver images (`pagewire-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`)
+## Driver images (`pagewire-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`, `-legacy`)
 
-Each image holds one PAPPL retrofit printer application, on `ubuntu:26.04`, built the way the upstream rock recipes build it, plus CUPS (for its `usb`, `socket` and `ipp` backends; `cupsd` is never started) and that family's Ubuntu driver packages.
+Each image holds one PAPPL retrofit printer application on `ubuntu:26.04`, built the way the upstream rock recipes build it (`-legacy`: pappl-retrofit's own `legacy-printer-app`, for classic CUPS drivers, as pappl-retrofit's `make install` builds it), plus CUPS (for its `usb`, `socket` and `ipp` backends; `cupsd` is never started) and that family's Ubuntu driver packages.
 
-Built from upstream source (identical in all four images, except the application):
+Built from upstream source (identical in all five images, except the application):
 
 | Component | Version | Licence | How included | Modifications | Source |
 |---|---|---|---|---|---|
@@ -208,6 +210,7 @@ Built from upstream source (identical in all four images, except the application
 | hplip-printer-app | commit 90478d9edd063df2756e1a1045aaf1bc4012e3f5 | Apache-2.0 | Separate program, `pagewire-driver-hplip` only | None | https://github.com/OpenPrinting/hplip-printer-app |
 | gutenprint-printer-app | commit fbfce9086b3e612447eec729240ab68986608857 | Apache-2.0 | Separate program, `pagewire-driver-gutenprint` only | None | https://github.com/OpenPrinting/gutenprint-printer-app |
 | ghostscript-printer-app | commit acf18a476bee525b88526ff8e0154f004b361914 | Apache-2.0 | Separate program, `pagewire-driver-ghostscript` only | None | https://github.com/OpenPrinting/ghostscript-printer-app |
+| legacy-printer-app (part of pappl-retrofit) | 1.0b3 | Apache-2.0 (with the CUPS exceptions) | Separate program, `pagewire-driver-legacy` only; its licence is pappl-retrofit's | None | https://github.com/OpenPrinting/pappl-retrofit/tree/1.0b3/legacy |
 
 Their LICENSE and NOTICE files are in `/usr/share/licenses/<component>/`. The patch carries PAPPL's licence; it ships in `/usr/share/licenses/pappl/pappl-max-vendor.patch` and in the `-sources` images.
 
@@ -222,7 +225,7 @@ The main Ubuntu packages (all unmodified):
 | libavahi-client3 (avahi) | 0.8-18ubuntu1.1 | LGPL-2.1-or-later | all | Library |
 | libgnutls30t64 (gnutls28) | 3.8.12-2ubuntu1.1 | LGPL-2.1-or-later (its bundled libunistring code: LGPL-3.0-or-later OR GPL-2.0-or-later) | all | Library |
 | libusb-1.0-0 (libusb-1.0) | 2:1.0.29-2build1 | LGPL-2.1-or-later | all | Library |
-| ghostscript (ghostscript) | 10.06.0~dfsg-3ubuntu1.2 | AGPL-3.0-or-later | all four (a dependency in hplip and gutenprint) | Separate program, run by the filters |
+| ghostscript (ghostscript) | 10.06.0~dfsg-3ubuntu1.2 | AGPL-3.0-or-later | all five (a dependency in hplip and gutenprint) | Separate program, run by the filters and, in legacy, by pappl-retrofit's PDF and PostScript conversions |
 | foomatic-db-compressed-ppds (foomatic-db) | 20250819-1build1 | GPL-2.0-only AND GPL-2.0-or-later AND MIT | ps, ghostscript | PPD data files |
 | hplip, printer-driver-hpcups, hplip-data (hplip) | 3.24.4+dfsg0-0ubuntu8.4 | GPL-2.0-or-later AND BSD-3-Clause AND MIT | hplip | Separate programs (the `hp` backend and `hpcups` filter) and data |
 | libcurl3t64-gnutls (curl) | 8.18.0-1ubuntu2.8 | curl | all | Library, a dependency of poppler and libproxy |
@@ -230,9 +233,17 @@ The main Ubuntu packages (all unmodified):
 | libssl3t64 (openssl) | 3.5.5-1ubuntu3.7 | Apache-2.0 | all | Library |
 | printer-driver-gutenprint, libgutenprint9 (gutenprint) | 5.3.4.20220624T01008808d602-4ubuntu2 | GPL-2.0-or-later | gutenprint | Separate program (filter) and its library |
 | printer-driver-foo2zjs (foo2zjs) | 20200505dfsg0-3ubuntu1 | GPL-2.0-or-later | ghostscript | Separate programs (filters) |
-| printer-driver-splix (splix) | 2.0.1-2 | GPL-2.0-only | ghostscript | Separate program (filter) |
+| printer-driver-min12xxw (min12xxw) | 0.0.9-11build4 | GPL-2.0-or-later | ps, ghostscript | Separate program (filter for the foomatic min12xxw drivers both images list) |
+| printer-driver-splix (splix) | 2.0.1-2 | GPL-2.0-only | legacy | Separate programs (filters) and `.drv` driver files |
+| printer-driver-brlaser (brlaser) | 6.2.8-1 | GPL-2.0-or-later | legacy | Separate program (filter) and a `.drv` driver file |
+| printer-driver-escpr (epson-inkjet-printer-escpr) | 1.8.7-1 | GPL-2.0-or-later | legacy | Separate programs (filters and a driver program that lists the PPDs) |
+| printer-driver-ptouch (ptouch-driver) | 1.7.1-1build1 | GPL-2.0-or-later | legacy | Separate programs (filter and a driver program that lists the PPDs) |
+| printer-driver-c2esp (c2esp) | 27-11ubuntu8 | GPL-2.0-or-later | legacy | Separate programs (filters) and `.drv` driver files |
+| printer-driver-sag-gdi (rastertosag-gdi) | 0.1-8build1 | GPL (its copyright file names no version) | legacy | Separate program (filter) and a `.drv` driver file |
 
-The number of source packages per image at the time of writing: ps 151, hplip 182, gutenprint 146, ghostscript 154, including the `ubuntu:26.04` base.
+In `pagewire-driver-legacy`, `/usr/share/pagewire/legacy-drivers` holds links to exactly these six packages' driver files, so the application lists no other drivers.
+
+The number of source packages per image at the time of writing: ps 152, hplip 182, gutenprint 146, ghostscript 154, legacy 156, including the `ubuntu:26.04` base.
 
 In `pagewire-driver-hplip` the HP plug-in paths are symlinks into the vendor-file volume, as in the device image.
 
@@ -242,8 +253,8 @@ For every published image tag, CI publishes a matching `-sources` image for the 
 
 Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
 
-- `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt`, fetched with `apt-get source`. In CI the list is the union of the amd64 and arm64 lists read from the images that the same run pushed (`sha-<commit>`), so it matches the published binaries. A local build of the `sources` target uses the lists of the targets it builds, the union of all four for the driver Dockerfile;
-- `upstream/`: `git archive` tarballs of everything built from source, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit and the four applications);
+- `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt`, fetched with `apt-get source`. In CI the list is the union of the amd64 and arm64 lists read from the images that the same run pushed (`sha-<commit>`), so it matches the published binaries. A local build of the `sources` target uses the lists of the targets it builds, the union of all five for the driver Dockerfile;
+- `upstream/`: `git archive` tarballs of everything built from source, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit, which also holds legacy-printer-app, and the four other applications);
 - `patches/` (driver images): the PAPPL patch;
 - `build/`: the Dockerfile and, for the device image, its config files.
 
@@ -258,7 +269,7 @@ These are never in an image, in this repository or in CI:
 - HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files) and its licence text: pagewire downloads the archive at runtime on your cluster, from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`. The device pod's agent downloads it into the vendor-file volume before acceptance, checks it against HP's detached OpenPGP signature (key in `internal/catalog/keys/hplip.asc`) and the sha256 pinned in the catalog, and reads HP's licence text from inside it, so the wizard and Settings can show that text. The `agent fetch` step in the `fetch-blobs` init container installs the plug-in only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin`, the matching version and the sha256 of the text shown), and only if the text in the archive still has that sha256. It unpacks the plug-in into the vendor-file volume.
 - hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. pagewire never opens that page. Its plug-in paths lead into `/blobs`. The driver container mounts the vendor-file volume there only after you accepted HP's licence, and then read-only; before that, `/blobs` does not exist on the read-only root file system. So hplip-printer-app could install the plug-in itself only into a mounted `/blobs`, which happens after acceptance, and the read-only mount stops even that.
 - foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and pagewire adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
-- Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript, foo2zjs, SpliX, HPLIP's free parts) and the SANE backends Ubuntu ships.
+- Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript and foomatic, foo2zjs, min12xxw, SpliX, brlaser, Epson's GPL ESC/P-R driver, ptouch, c2esp, SAG-GDI, HPLIP's free parts) and the SANE backends Ubuntu ships.
 - socket-proxy (`ghcr.io/wollomatic/socket-proxy`, MIT AND Apache-2.0): `compose.docker-proxy.yaml` names its image by digest, and Docker pulls it from its publisher. pagewire does not ship or rebuild it; its licence and source are at https://github.com/wollomatic/socket-proxy
 - The Mopria eSCL specification: pagewire's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.
 

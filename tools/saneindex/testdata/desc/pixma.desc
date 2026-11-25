@@ -1,0 +1,36 @@
+; SANE Backend specification file (test fixture)
+;
+:backend "pixma"
+:version "0.28.6"
+:manpage "sane-pixma"
+:devicetype :scanner
+
+:mfg "Canon"
+:url "http://www.canon.com/"
+
+:model "PIXMA MG3600 Series"
+:interface "USB WiFi"
+:usbid "0x04a9" "0x176e"
+:status :complete
+:comment "a comment; with a semicolon"
+
+  :model "PIXMA MG3650"
+	:usbid	"0x04A9"	"0x176E"	; the same ID again
+	:status    :good
+
+:model "PIXMA Unsupported"
+:usbid "0x04a9" "0x1700"
+:status :unsupported                  ; status comes after the ID
+
+:model "PIXMA Network Only"
+:interface "Ethernet"
+:usbid "ignore"
+:status :good
+
+:model "PIXMA Stray Quote"
+:usbid "0x04a9" "0x1701""
+:status :good
+
+:model "PIXMA Unquoted"
+:usbid 0x04a9 0x1702
+:status :untested

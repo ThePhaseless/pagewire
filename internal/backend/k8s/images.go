@@ -30,7 +30,7 @@ func ImageTag(version string) string {
 
 var overrideKeys = map[string]bool{
 	"device": true, "driver-ps": true, "driver-hplip": true,
-	"driver-gutenprint": true, "driver-ghostscript": true, "pagewire": true,
+	"driver-gutenprint": true, "driver-ghostscript": true, "driver-legacy": true, "pagewire": true,
 }
 
 // ParseOverrides parses PAGEWIRE_IMAGE_OVERRIDES ("device=ref,driver-ps=ref,...").

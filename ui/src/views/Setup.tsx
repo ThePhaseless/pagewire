@@ -22,6 +22,7 @@ import {
   DeviceSchema,
   type Setup as SetupDTO,
   type Status,
+  type USBDevice,
 } from "../gen/api";
 import { navigate } from "../router";
 import { strings } from "../strings";
@@ -454,14 +455,15 @@ function Detect({
         <Card title={s.detect.choiceTitle}>
           <dl className="setup-facts">
             <dt>{s.detect.printerLabel}</dt>
-            <dd>{family(d.printer)}</dd>
+            <dd>{d.printer ? family(d.printer) : s.detect.noPrinterDriver}</dd>
             <dt>{s.detect.scannerLabel}</dt>
             <dd>{family(d.scanner || "none")}</dd>
           </dl>
+          {d.rule === "none" && <NoDriver device={d.device} />}
           <Disclosure title={strings.technicalDetails}>
             <dl className="setup-facts">
               <dt>{s.detect.ruleLabel}</dt>
-              <dd>{d.rule}</dd>
+              <dd>{s.rules[d.rule]}</dd>
             </dl>
           </Disclosure>
         </Card>
@@ -496,12 +498,21 @@ function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; upda
           <p>{s.driver.simulated}</p>
         ) : (
           <>
-            {d && <p>{s.driver.explained(family(d.printer), family(d.scanner || "none"))}</p>}
+            {d?.rule === "none" ? (
+              <NoDriver device={d.device} hint={s.driver.noDriverHint} />
+            ) : (
+              d && <p>{s.driver.explained(family(d.printer), family(d.scanner || "none"))}</p>
+            )}
             <Select
               label={s.driver.driverLabel}
               options={DeviceSchema.shape.driver.options.map((id) => ({
                 id,
-                label: id === "auto" ? auto(d?.printer) : family(id),
+                label:
+                  id !== "auto"
+                    ? family(id)
+                    : d?.rule === "none"
+                      ? s.driver.automaticNone
+                      : auto(d?.printer),
               }))}
               value={draft.device.driver}
               onChange={(k) =>
@@ -653,7 +664,29 @@ function Review({ setup, draft }: { setup: SetupDTO; draft: Config }) {
           ].join(", ")}
         </dd>
       </dl>
+      {!simulated && draft.device.driver === "auto" && setup.decision?.rule === "none" && (
+        <NoDriver device={setup.decision.device} hint={s.review.noDriverHint} />
+      )}
     </Card>
+  );
+}
+
+/** The no-driver state: what the printer reported, so the user can look up a driver for it. */
+function NoDriver({ device, hint }: { device: USBDevice | null; hint?: string }) {
+  return (
+    <div>
+      <p>{s.noDriver.title}</p>
+      <p>
+        {device?.deviceId ? (
+          <>
+            {s.noDriver.deviceId} <code>{device.deviceId}</code>
+          </>
+        ) : (
+          s.noDriver.noDeviceId
+        )}
+      </p>
+      {hint && <p>{hint}</p>}
+    </div>
   );
 }
 

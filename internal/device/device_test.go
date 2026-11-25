@@ -196,7 +196,8 @@ func TestJSONNames(t *testing.T) {
 	if got := mustJSON(DNSSDService{}); !strings.Contains(got, `"txt"`) {
 		t.Errorf("DNSSDService JSON: %s", got)
 	}
-	if got := mustJSON(Decision{}); !strings.Contains(got, `"requiredEulas"`) || !strings.Contains(got, `"optionalEulas"`) {
+	if got := mustJSON(Decision{}); !strings.Contains(got, `"requiredEulas"`) || !strings.Contains(got, `"optionalEulas"`) ||
+		!strings.Contains(got, `"driver":""`) || !strings.Contains(got, `"driverDescription":""`) {
 		t.Errorf("Decision JSON: %s", got)
 	}
 }

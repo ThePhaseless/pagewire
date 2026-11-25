@@ -270,7 +270,7 @@ func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 		})
 		_, _ = fmt.Fprintln(fl.Output(), "environment only:\n"+
 			"  PAGEWIRE_PROXY_SECRET\tproxy secret (see --proxy-secret-file)\n"+
-			"  PAGEWIRE_IMAGE_OVERRIDES\tper-image references, e.g. device=<ref>,driver-ps=<ref>; keys: pagewire, device, driver-ps, driver-hplip, driver-gutenprint, driver-ghostscript")
+			"  PAGEWIRE_IMAGE_OVERRIDES\tper-image references, e.g. device=<ref>,driver-ps=<ref>; keys: pagewire, device, driver-ps, driver-hplip, driver-gutenprint, driver-ghostscript, driver-legacy")
 	}
 	return fl
 }

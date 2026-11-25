@@ -43,6 +43,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/blobs"
 	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
 	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/pappl/papplfake"
 )
@@ -250,7 +251,8 @@ func (b *Backend) serve(ctx context.Context, handler func(addr string) http.Hand
 }
 
 // papplOptions lists every printer-class fixture device the way the retrofit
-// apps' CUPS backends would, with one driver matching its manufacturer.
+// apps' CUPS backends would, with one driver matching its manufacturer and
+// the index driver the dispatcher picks for it in fam.
 func (b *Backend) papplOptions(fam catalog.Printer, out string) papplfake.Options {
 	o := papplfake.Options{OutputDir: out}
 	for _, d := range b.inv.Devices {
@@ -271,6 +273,10 @@ func (b *Backend) papplOptions(fam catalog.Printer, out string) papplfake.Option
 		o.Drivers = append(o.Drivers, papplfake.Driver{
 			Name: fam.ID + "_" + strings.ToLower(strings.ReplaceAll(mfg, " ", "_")), Description: mfg + " (" + fam.App + ", simulated)", MatchMFG: mfg,
 		})
+		inv := device.Inventory{Devices: []device.USBDevice{d}}
+		if dec, err := catalog.Default().Decide(inv, config.Device{Mode: config.ModeUSB, Driver: fam.ID}); err == nil && dec.Driver != "" {
+			o.Drivers = append(o.Drivers, papplfake.Driver{Name: dec.Driver, Description: dec.DriverDescription, MatchMFG: mfg})
+		}
 	}
 	return o
 }

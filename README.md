@@ -8,7 +8,7 @@ Clients see an IPP printer that driverless (IPP Everywhere) clients can use, and
 
 pagewire has no release yet. It has been tested with the simulated backend and, in CI, against real daemons with no printer attached: Avahi, the PostScript PAPPL printer application, AirSane with the SANE `test` backend, and `ippeveprinter`. It has not yet been run with a physical printer, so expect rough edges on real hardware, and please report what you find.
 
-The catalog targets USB printers and multifunction devices of these kinds: anything that speaks IPP over USB, HP devices supported by HPLIP, PostScript printers, Epson and Canon devices supported by Gutenprint, and PCL printers through Ghostscript. Scanners work through ipp-usb or through AirSane and the SANE backends Ubuntu ships.
+pagewire supports USB printers and multifunction devices that speak IPP over USB, and those that a free driver in its images lists by model: HPLIP, the classic CUPS drivers (SpliX, brlaser, Epson ESC/P-R, ptouch, c2esp, SAG-GDI), the PostScript and Ghostscript (foomatic) drivers, and Gutenprint. Printers that no driver lists by model but that report PostScript or PCL get a generic driver. Scanners work through ipp-usb or through AirSane and the SANE backends Ubuntu ships.
 
 ## How it works
 
@@ -22,13 +22,16 @@ The catalog targets USB printers and multifunction devices of these kinds: anyth
 
 pagewire never runs commands itself: it talks IPP, eSCL, D-Bus and the Kubernetes API or the Docker Engine API.
 
-Driver choice is data in `internal/catalog/catalog.yaml`. The first matching rule wins:
+pagewire picks the driver by itself, from the printer's IEEE-1284 device ID and an index of every driver the printer applications list. The index is generated from the driver images at build time (`internal/catalog/drivers.tsv.gz`), so it holds no hand-written vendor rules. It leaves out drivers that need `hpijs`, which the images do not ship:
 
 1. A printer that speaks IPP over USB gets ipp-usb, which also handles its scanner. No driver is needed.
-2. HP devices get the HPLIP printer application and AirSane with the `hpaio` SANE backend.
-3. PostScript printers get the PostScript printer application, Epson and Canon get Gutenprint, PCL printers get the Ghostscript application, and anything else falls back to Ghostscript. Scanners go through AirSane and SANE.
+2. Otherwise pagewire looks the printer's maker and model up in the index. When several driver families list it, the order in `driverPriority` in `internal/catalog/catalog.yaml` decides: HPLIP, the classic CUPS drivers, PostScript, Gutenprint, then Ghostscript. Within a family a driver the family recommends wins.
+3. Otherwise a printer whose device ID lists PostScript or PCL gets the matching generic driver.
+4. Otherwise no driver matches. The scanner still runs, the wizard and Status show the device ID the printer reported, and a configured device stays degraded with "No printer driver matches this device. Choose a driver in Settings."
 
-You can override the printer driver and the scanner in the config.
+Scanners go through AirSane, which loads the SANE backends listed for the device's USB IDs in a second generated index (`internal/catalog/sane-usb.tsv`), or a default set when the device is not listed. Status shows which step chose the driver, and its name.
+
+You can override all of this in the config: `device.driver` picks the family (`ps`, `hplip`, `gutenprint`, `ghostscript`, `legacy` or `ipp-usb`), `device.driverName` the exact driver name a printer application lists, and `device.scanner` the scanner. A family without a `driverName` gets its best match for the printer, else its generic driver, else the application's own automatic choice. A `driverName` with `driver: auto` goes to the first family in `driverPriority` that lists it. pagewire rejects a `driverName` with `driver: ipp-usb` or in simulated mode. A `driverName` the chosen family does not list, such as a typo or a driver an image update dropped, leaves pagewire's own choice running (within the chosen family, if you set one) and the device degraded until you change it. If a printer application lacks the driver the index picked, because the image and the index come from different package versions, the queue falls back to the application's own automatic choice and the device shows as degraded. A `driverName` you set never falls back: the queue reports the error instead. To find a name, read the list each driver image carries, for example `docker run --rm ghcr.io/thephaseless/pagewire-driver-legacy:main cat /usr/share/pagewire/drivers.txt`; each line starts with the name. Lines whose device ID has `DRV:Dhpijs` are drivers that need `hpijs`; they are not in the index and cannot be chosen.
 
 ## Requirements
 
@@ -89,7 +92,7 @@ Requirements:
 - Docker Engine 20.10 or newer, or rootful Podman 4 or newer with its API socket enabled.
 - Docker Compose 2.24.4 or newer (`compose.docker-proxy.yaml` needs it).
 - No avahi-daemon on the host answering on port 5353. Two mDNS responders on one host make discovery unreliable.
-- Free host ports: 8080 and 8081 (bound to 127.0.0.1 by default), and for the device 8001 to 8004, 8090, 8631 and 60000 to 60009, as on Kubernetes.
+- Free host ports: 8080 and 8081 (bound to 127.0.0.1 by default), and for the device 8001 to 8005, 8090, 8631 and 60000 to 60009, as on Kubernetes.
 
 Start it from a checkout of this repository:
 
@@ -180,6 +183,7 @@ What happens when a value changes:
 | `scan.retentionDays` | Applies on the next hourly cleanup; `0` keeps scans forever |
 | `name` with a PAPPL driver | The queue is deleted and recreated under the new name, which drops jobs still waiting in it |
 | `device.mode`, `device.driver`, `device.scanner`, `device.usb`, accepted EULAs; `name` and `location` in simulated mode | The device pod rolls once if the change alters what runs in it |
+| `device.driverName` | Within the same driver family, the queue is deleted and recreated with the new driver on the agent's next cycle, which drops jobs still waiting in it. When the name belongs to another family, the device pod rolls as for `device.driver` |
 
 The control plane itself never restarts for a config change. An invalid file keeps the last valid config running. The UI shows each error with its line and column and offers to restore the last working settings. While the file is invalid, the upload limit and scan retention follow the last valid config. While it is missing, they follow the defaults.
 
@@ -239,7 +243,7 @@ If the text in the archive ever changes, pagewire does not install or use the pl
 
 Without internet access from the cluster, the download fails, the licence shows as failed, and the plug-in cannot be accepted. The same happens when pagewire runs without a vendor-file volume (`--blob-pvc=`, see `docs/kubernetes.md`). Status and Settings show each file's state: installed, missing, failed or not available.
 
-For the HP rule the plug-in is optional, and an optional file never blocks the device pod: if the download fails, the pod starts without it and Status reports the failure. A required file that keeps failing would hold the pod in its init phase; no catalog entry is required today.
+When HPLIP's driver for the printer needs the plug-in (its name contains `requires-proprietary-plugin`), the plug-in is required: the device stays degraded until you accept HP's licence, and a download that keeps failing holds the device pod in its init phase. For any other device that HPLIP drives, the plug-in is optional, and an optional file never blocks the device pod: if the download fails, the pod starts without it and Status reports the failure. When you override the driver, the plug-in is required only if the driver you chose needs it. Otherwise it stays optional and is still offered for the scanner and firmware.
 
 ## Printing from the web page
 
@@ -282,7 +286,7 @@ Report vulnerabilities as described in `SECURITY.md`.
 |---|---|
 | `ghcr.io/thephaseless/pagewire` | The static Go binary with the UI, on distroless. Control plane and agent |
 | `ghcr.io/thephaseless/pagewire-device` | dbus, Avahi, ipp-usb, AirSane, the SANE backends, `ippeveprinter` |
-| `ghcr.io/thephaseless/pagewire-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript` | PAPPL with one retrofit printer application and its Ubuntu driver packages |
+| `ghcr.io/thephaseless/pagewire-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`, `-legacy` | PAPPL with one retrofit printer application and its Ubuntu driver packages. `-legacy` runs pappl-retrofit's `legacy-printer-app` with free classic CUPS drivers (SpliX, brlaser, Epson ESC/P-R, ptouch, c2esp, SAG-GDI) |
 
 All images are built for linux/amd64 and linux/arm64, with SBOM and provenance attestations. Tags:
 
@@ -295,7 +299,7 @@ The control plane picks the device and driver image tags from its own version: a
 
 The device pod's `probe`, `agent` and `fetch-blobs` containers run exactly the image of the container named `pagewire` in the control plane's Deployment, digest included. Only when no container has that name do they fall back to `<registry>/pagewire:<tag>`.
 
-To pin digests, set `PAGEWIRE_IMAGE_OVERRIDES` to a comma-separated list of `key=image` pairs. Keys: `device`, `driver-ps`, `driver-hplip`, `driver-gutenprint`, `driver-ghostscript`, and `pagewire` (used only when the Deployment has no `pagewire` container). An unknown key stops the server at startup.
+To pin digests, set `PAGEWIRE_IMAGE_OVERRIDES` to a comma-separated list of `key=image` pairs. Keys: `device`, `driver-ps`, `driver-hplip`, `driver-gutenprint`, `driver-ghostscript`, `driver-legacy`, and `pagewire` (used only when the Deployment has no `pagewire` container). An unknown key stops the server at startup.
 
 ```sh
 PAGEWIRE_IMAGE_OVERRIDES=device=ghcr.io/thephaseless/pagewire-device:1.2.3@sha256:...,driver-hplip=ghcr.io/thephaseless/pagewire-driver-hplip:1.2.3@sha256:...
@@ -344,8 +348,10 @@ Images: the device and driver Dockerfiles end with a `sources` stage, so always 
 ```sh
 docker buildx build --load -t pagewire:dev .
 docker buildx build --load -f images/device/Dockerfile --target device -t pagewire-device:dev .
-docker buildx build --load -f images/driver/Dockerfile --target ps -t pagewire-driver-ps:dev .   # or hplip, gutenprint, ghostscript
+docker buildx build --load -f images/driver/Dockerfile --target ps -t pagewire-driver-ps:dev .   # or hplip, gutenprint, ghostscript, legacy
 ```
+
+The driver and SANE indexes are generated from these images and committed. After a change to the images, regenerate them as `CONTRIBUTING.md` describes; CI fails while they differ.
 
 `test/integration/README.md` covers the real-daemon integration test. `CONTRIBUTING.md` explains how to send a change, and `AGENTS.md` lists the project's conventions.
 
@@ -353,6 +359,8 @@ docker buildx build --load -f images/driver/Dockerfile --target ps -t pagewire-d
 
 - A release is a `v*.*.*` tag on `main`, for example `v1.2.3`. CI then publishes every image as `1.2.3`, `1.2`, `1` and `latest`, plus `sha-<commit>`. Every push to `main` publishes `main` and `sha-<commit>`.
 - For every pushed branch and tag, CI also publishes `-sources` images of the device and driver images (`main-sources`, `1.2.3-sources`, `1.2-sources`, `1-sources`). Their package lists come from the amd64 and arm64 images that the same run pushed. The source for `latest` is the newest `<version>-sources`.
+- Runs on `renovate/**` branches build and test every image but push neither images nor `-sources` images, also when started by hand.
+- The committed driver and SANE indexes must match what the images produce. The `indexes` CI job checks this; a mismatch fails `ci-ok` and blocks merging, but never stops `main` or a tag from publishing images. On Renovate branches the Indexes workflow regenerates them. An Ubuntu package update can cause a mismatch on any branch with no change in the repository; `CONTRIBUTING.md` describes the fix.
 - Runs triggered by a push are never cancelled, so a run cannot stop between pushing images and pushing their sources. Only pull request runs cancel older runs. If one image fails to build, the other images still get their `-sources` image, and the run fails (`ci-ok`).
 - CI cannot hold `latest` back until the sources job has finished. A failed sources job fails `ci-ok`; fix it and re-run before announcing the release.
 - `sha-<commit>` tags are tags, not digests. Pin digests for exact images.

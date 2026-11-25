@@ -1,0 +1,5 @@
+lexmark--ms-610-dn--en "Lexmark MS610dn (en)" "MFG:Lexmark;MDL:MS610dn;CMD:PCLXL,POSTSCRIPT;DRV:Dps,R0,M0;"
+generic--postscript-printer--recommended-en "Generic PostScript Printer (recommended) (en)" "MFG:Generic;MDL:PostScript Printer;DRV:Dps,R1,M0;"
+lexmark--e-230--en "Lexmark E230 (en)" "MANUFACTURER:Lexmark International;MODEL:Lexmark E230;COMMAND SET:PCL 6 Emulation, PJL;DRV:Dpxlmono,R1,M0,TG;"
+generic--pcl-printer--en "Generic PCL	Printer (en)" "MFG:Generic;CMD:PCL;"
+generic--pcl-5-e-printer--recommended-en "Generic PCL 5e Printer (recommended) (en)" "MFG:Generic;MDL:PCL 5e Printer;DRV:Dhpijs-pcl5e,R1,M0,Sv,TI,X600,Y600,C0,t100,l100,g100,p100,s70;"

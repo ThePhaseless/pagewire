@@ -17,9 +17,11 @@ type Known struct {
 
 // Validate runs the semantic checks a parsed config needs: accepted EULAs
 // exist in the catalog (matched on id and version), appear once and carry a
-// text sha256, the driver is a catalog family or auto, and
-// device.usb is only set with mode usb. Errors are an *ErrorList without
-// positions; Check adds them.
+// text sha256, the driver is a catalog family or auto, device.usb is only set
+// with mode usb, and device.driverName is not set where no PAPPL driver runs.
+// Whether an app lists driverName is not checked here: the driver index follows
+// image updates, so a name it drops degrades the device instead of invalidating
+// the config. Errors are an *ErrorList without positions; Check adds them.
 func Validate(c *Config, k Known) error {
 	el := &ErrorList{}
 	add := func(path, format string, args ...any) {
@@ -30,6 +32,14 @@ func Validate(c *Config, k Known) error {
 	}
 	if c.Device.Driver != Auto && !slices.Contains(k.Printers, c.Device.Driver) {
 		add("/device/driver", "driver %s is not in the catalog", c.Device.Driver)
+	}
+	if c.Device.DriverName != "" {
+		switch {
+		case c.Device.Mode == ModeSimulated:
+			add("/device/driverName", "is not allowed with mode: simulated")
+		case c.Device.Driver == "ipp-usb":
+			add("/device/driverName", "is not allowed with driver: ipp-usb, which needs no driver")
+		}
 	}
 	for i, e := range c.Licenses.AcceptedEULAs {
 		at := fmt.Sprintf("/licenses/acceptedEulas/%d", i)

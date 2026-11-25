@@ -43,7 +43,9 @@ The contracts are code, and the generated files follow them:
 | Config file `pagewire/v1` | `internal/config/config.go` | `schema/config.schema.json`, `ui/src/gen/config.ts` |
 | REST DTOs | `internal/apitypes/apitypes.go` | `schema/api.schema.json`, `ui/src/gen/api.ts` |
 | Device, Backend, agent protocol | `internal/device/*.go` | none |
-| Printer families, rules, EULAs, blobs | `internal/catalog/catalog.yaml` | none |
+| Printer families, driver priority, command sets, EULAs, blobs | `internal/catalog/catalog.yaml` | none |
+| Driver index (every driver the printer applications list) | the driver images' `drivers` lists (`images/driver/Dockerfile`), `tools/driverindex` | `internal/catalog/drivers.tsv.gz` |
+| SANE USB index (USB ID to SANE backends) | the device image's `sane.d` and backends, sane-backends `.desc` files (`images/device/Dockerfile`), `tools/saneindex` | `internal/catalog/sane-usb.tsv` |
 
 A contract change lands as one commit holding the Go types, the regenerated schemas and the regenerated Zod source:
 
@@ -53,6 +55,22 @@ cd ui && mise x -- bun run gen
 ```
 
 Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) change in their own commit.
+
+### Driver and SANE indexes
+
+The dispatcher (`internal/catalog/dispatch.go`) has no vendor rules: it matches the device's IEEE-1284 MFG and MDL against the driver index, ranks families by `driverPriority`, falls back to `commandSets`, and takes SANE backends from the SANE index. Never hand-edit either index, and never add a per-vendor rule to `catalog.yaml`. Regenerate both whenever `images/` or `tools/` change:
+
+```sh
+docker buildx build -f images/driver/Dockerfile --target driver-index -o type=local,dest=.cache/idx/driver-index .
+docker buildx build -f images/device/Dockerfile --target sane-index -o type=local,dest=.cache/idx/sane-index .
+cp .cache/idx/driver-index/drivers.tsv.gz .cache/idx/sane-index/sane-usb.tsv internal/catalog/
+```
+
+- Each driver image's final stage writes its list to `/usr/share/pagewire/drivers.txt` in a `RUN` directly after its `ENV ... PPD_DIRS=...` line, so the list sees the container's environment.
+- CI's `indexes` job builds both targets for linux/amd64 and diffs the decompressed content against the committed files. It is in `ci-ok.needs` and never in `build.needs`: a mismatch blocks merges but never stops `main` or a tag from publishing.
+- `.github/workflows/indexes.yml` regenerates the indexes on `renovate/**` pushes, commits them as `github-actions[bot]` (listed in `renovate.json` `gitIgnoredAuthors`, so Renovate keeps rebasing), pushes without force and dispatches `ci.yml` on the branch, because pushes made with `GITHUB_TOKEN` start no workflow. Its `paths` include both index files: a Renovate rebase drops the bot commit, so the index files are what that push changes.
+- ci.yml runs on `refs/heads/renovate/**` never push images or `-sources` images: `build.with.push`, `sources.if` and the `skipped)` line of `ci-ok` carry the same `startsWith(github.ref, 'refs/heads/renovate/')` condition, and `test/consistency` pins all three.
+- Ubuntu package drift: the images install unpinned Ubuntu packages, so an update can change a list with no repository change, and the `indexes` job then fails on every branch. Fix it on any branch: run the commands above (or take the failed run's `indexes` artifact), commit both files in a pull request.
 
 ### JSON shapes
 
@@ -85,12 +103,12 @@ Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) chan
 
 ## Images and CI
 
-- The device and driver Dockerfiles end with a `sources` stage, so every build names its target: `--target device`, or `ps`, `hplip`, `gutenprint`, `ghostscript`. CI matrix entries do too.
+- The device and driver Dockerfiles end with a `sources` stage, so every build names its target: `--target device`, or `ps`, `hplip`, `gutenprint`, `ghostscript`, `legacy`, or the index targets `driver-index` (driver Dockerfile) and `sane-index` (device Dockerfile). CI matrix entries and the `indexes` job do too. New stages go before `lists-local`, so `sources` stays last.
 - Every `FROM` naming an external image is `tag@sha256:<multi-arch index digest>` (from `docker buildx imagetools inspect`). Only `FROM scratch`, earlier stage names, `${PUSHED_IMAGE}` in the `pushed-amd64`/`pushed-arm64` stages and `lists-${SOURCES_LISTS}` go without.
 - Upstream sources built in the Dockerfiles are pinned by commit: `ARG X=<40-hex sha> # renovate: datasource=github-tags depName=<owner/repo> currentValue=<tag>`. Renovate's regex manager reads that comment, so keep its shape.
 - Each device and driver final stage writes `ghcr.io/thephaseless/<its image>:${VERSION#v}-sources` to `/usr/share/pagewire/SOURCES` and to the `io.github.thephaseless.pagewire.sources` label, and copies `NOTICE` and `THIRD_PARTY_NOTICES.md` beside it.
 - The control-plane `Dockerfile` links cgo statically through `/usr/local/bin/pkg-config-static` (`exec pkgconf --static "$@"`) with `ENV PKG_CONFIG` pointing at it: cmd/go reads only the first word of `$PKG_CONFIG`, so `--static` cannot go into the variable.
-- The `sources` CI job runs for every push (branch or tag), reads the package lists from the images the same run pushed (`SOURCES_LISTS=pushed`, `PUSHED_IMAGE=...:sha-<commit>`), and sets `meta-flavor: latest=false`; only the image build moves `latest`. `concurrency.cancel-in-progress` is true only for pull requests, so a pushing run never stops between images and their sources. `test/consistency` asserts these CI and Dockerfile rules; change the test with the rule.
+- The `sources` CI job runs for every push (branch or tag) except on `renovate/**` branches, reads the package lists from the images the same run pushed (`SOURCES_LISTS=pushed`, `PUSHED_IMAGE=...:sha-<commit>`), and sets `meta-flavor: latest=false`; only the image build moves `latest`. `concurrency.cancel-in-progress` is true only for pull requests, so a pushing run never stops between images and their sources. `test/consistency` asserts these CI and Dockerfile rules; change the test with the rule.
 - `ui/dist/.keep` stays committed so Go builds without a UI build; `bun run build` keeps it.
 
 ## Docs

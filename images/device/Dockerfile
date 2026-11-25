@@ -2,6 +2,8 @@
 # ippeveprinter. Always build with an explicit target:
 #   docker buildx build -f images/device/Dockerfile --target device .
 #   docker buildx build -f images/device/Dockerfile --target sources -o type=local,dest=out .
+# The sane-index target builds internal/catalog/sane-usb.tsv from the device stage's backends:
+#   docker buildx build -f images/device/Dockerfile --target sane-index -o type=local,dest=.cache/idx .
 # The sources target lists the packages of the local device stage by default. CI passes
 # SOURCES_LISTS=pushed and PUSHED_IMAGE=<the image it pushed for this commit>, so the
 # list is the union of that image's amd64 and arm64 package lists instead.
@@ -111,6 +113,40 @@ LABEL io.github.thephaseless.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
       io.github.thephaseless.pagewire.uid.avahi="${AVAHI_UID}" \
       io.github.thephaseless.pagewire.uid.nonroot="${NONROOT_UID}"
 EXPOSE 8090 8631 60000-60009
+
+# The sane-backends .desc files of the installed version: pixma, epson2 and others
+# hard-code their USB IDs, which only these files list (the image has no /usr/share/doc).
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sane-desc
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends bzip2 xz-utils
+COPY --from=device /usr/share/pagewire/source-packages.txt /src/source-packages.txt
+WORKDIR /src
+RUN pkg="$(grep '^sane-backends=' source-packages.txt)" \
+ && test -n "${pkg}" \
+ && chown _apt /src \
+ && apt-get update \
+ && apt-get source --only-source --download-only "${pkg}" \
+ && mkdir -p /out \
+ && tar -xf "$(ls sane-backends_*.orig.tar.* | grep -v '\.asc$')" -C /out --strip-components=2 \
+      --wildcards '*/doc/descriptions/*.desc' '*/doc/descriptions-external/*.desc' \
+ && ls /out/descriptions/*.desc /out/descriptions-external/*.desc > /dev/null
+
+# The SANE USB index (internal/catalog/sane-usb.tsv) from the device stage's backends.
+FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS sane-index-build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY tools/saneindex/ tools/saneindex/
+COPY --from=device /etc/sane.d/ /in/sane.d/
+COPY --from=device /usr/lib/*-linux-gnu/sane/ /in/libs/
+COPY --from=sane-desc /out/ /in/desc/
+RUN mkdir /out \
+ && GOTOOLCHAIN=local CGO_ENABLED=0 go run ./tools/saneindex -o /out/sane-usb.tsv \
+      -conf /in/sane.d -dll /in/sane.d/dll.conf -libs /in/libs \
+      -desc /in/desc/descriptions -desc /in/desc/descriptions-external
+
+FROM scratch AS sane-index
+COPY --from=sane-index-build /out/ /
 
 # Package lists for the sources target, chosen by SOURCES_LISTS.
 FROM scratch AS lists-local

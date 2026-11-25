@@ -68,8 +68,11 @@ async function waitForStatus(server: Server, ok: (s: StatusJSON) => boolean, tim
   throw new Error(`Status did not reach the expected state: ${JSON.stringify(last?.device)}`);
 }
 
-/** Creates the config from setup.suggested through the API, skipping the wizard. */
-async function seedConfig(server: Server) {
+/**
+ * Creates the config from setup.suggested through the API, skipping the wizard, and waits for
+ * `phase`: a device whose required licence is not accepted yet stays degraded.
+ */
+async function seedConfig(server: Server, phase: StatusJSON["device"]["phase"] = "ready") {
   const setup = (await (await fetch(`${server.url}/api/v1/setup`)).json()) as {
     suggested: unknown;
   };
@@ -79,7 +82,7 @@ async function seedConfig(server: Server) {
     body: JSON.stringify(setup.suggested),
   });
   if (r.status !== 201) throw new Error(`seeding the config: ${r.status} ${await r.text()}`);
-  await waitForStatus(server, (s) => s.device.phase === "ready");
+  await waitForStatus(server, (s) => s.device.phase === phase);
 }
 
 const nav = (page: Page, label: string) =>
@@ -423,7 +426,8 @@ for (const vp of viewports) {
     test(`7. EULA flow: accepting in Settings shows the blob installed (${vp.name})`, async () => {
       const server = await startServer(`hp-${vp.width}`, "hp-legacy-mfp");
       try {
-        await seedConfig(server);
+        // hplip marks this model's driver as needing the plug-in, so the device waits for it.
+        await seedConfig(server, "degraded");
         const setup = (await (await fetch(`${server.url}/api/v1/setup`)).json()) as {
           eulas: { id: string; title: string; version: string; textSha256: string | null }[];
         };

@@ -364,6 +364,102 @@ func TestDifferentExplicitDriverRecreated(t *testing.T) {
 	}
 }
 
+// An index driver the running app does not list (image drift) falls back to
+// the app's own choice, and the fallback queue is kept on later runs.
+func TestUnlistedIndexDriverFallsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		noAuto     bool
+		wantDriver string
+	}{
+		{"to auto", false, "auto"},
+		{"to Find-Drivers", true, "hp_laserjet_1020"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers, NoAutoDriver: tc.noAuto})
+			w := want("P")
+			w.Driver = "hp--laserjet-1020--en" // not listed by this app
+			r := pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+			mustOK(t, r)
+			mustFallback(t, r, w.Driver)
+			first := onlyPrinter(t, fake)
+			if first.Driver != tc.wantDriver {
+				t.Fatalf("driver = %q, want %q", first.Driver, tc.wantDriver)
+			}
+			r = pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+			mustOK(t, r)
+			mustFallback(t, r, w.Driver)
+			if p := onlyPrinter(t, fake); p.ID != first.ID {
+				t.Errorf("fallback queue recreated: id %d -> %d", first.ID, p.ID)
+			}
+		})
+	}
+}
+
+// A driver the user pinned (device.driverName) never falls back.
+func TestPinnedUnlistedDriverIsError(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	w := want("P")
+	w.Driver, w.DriverPinned = "hp--laserjet-1020--en", true
+	r := pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+	if r.State != device.QueueError || !strings.Contains(r.Message, "hp--laserjet-1020--en") {
+		t.Errorf("result = %+v", r)
+	}
+	if len(fake.Printers()) != 0 {
+		t.Errorf("printers = %+v", fake.Printers())
+	}
+}
+
+// A pinned driver the app does not list keeps the queue that still works and
+// reports the error, instead of deleting the queue first.
+func TestPinnedUnlistedDriverKeepsQueue(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	w := want("P")
+	w.Driver = "hp_laserjet_1020"
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	old := onlyPrinter(t, fake)
+	w.Driver, w.DriverPinned = "hp--laserjet-1020--en", true
+	r := pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+	if r.State != device.QueueError || !strings.Contains(r.Message, "hp--laserjet-1020--en") || r.PrinterURI == "" {
+		t.Errorf("result = %+v", r)
+	}
+	if p := onlyPrinter(t, fake); p.ID != old.ID || p.Driver != "hp_laserjet_1020" {
+		t.Errorf("printer = %+v, want the queue %d kept", p, old.ID)
+	}
+}
+
+func mustFallback(t *testing.T, r device.QueueResult, driver string) {
+	t.Helper()
+	if !strings.Contains(r.Message, driver) {
+		t.Errorf("message = %q, want the fallback from %s", r.Message, driver)
+	}
+}
+
+// A queue made with driver auto (by an earlier version) is kept for an index
+// driver, so an upgrade does not recreate it; a pinned driver replaces it.
+func TestAutoQueueKeptUnlessPinned(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	mustOK(t, pappl.Reconcile(ctx(t), c, want("P"), inv("ABC123", hpID)))
+	old := onlyPrinter(t, fake)
+	w := want("P")
+	w.Driver = "hp_laserjet_1020"
+	r := pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+	mustOK(t, r)
+	mustFallback(t, r, w.Driver)
+	if p := onlyPrinter(t, fake); p.ID != old.ID || p.Driver != "auto" {
+		t.Errorf("printer = %+v, want the auto queue %d kept", p, old.ID)
+	}
+	w.DriverPinned = true
+	r = pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+	mustOK(t, r)
+	if r.Message != "" {
+		t.Errorf("message = %q, want none for the driver in use", r.Message)
+	}
+	if p := onlyPrinter(t, fake); p.ID == old.ID || p.Driver != "hp_laserjet_1020" {
+		t.Errorf("printer = %+v, want a new queue with the pinned driver", p)
+	}
+}
+
 // Names with spaces, non-ASCII and '%' must survive the URI round trip.
 func TestOddQueueNamePrints(t *testing.T) {
 	out := t.TempDir()

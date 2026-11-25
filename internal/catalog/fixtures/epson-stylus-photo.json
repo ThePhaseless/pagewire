@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "04b8",
+      "productId": "0806",
+      "serial": "FAKE0010",
+      "manufacturer": "EPSON",
+      "product": "Stylus Photo R300",
+      "bus": 1,
+      "address": 11,
+      "interfaces": [
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:EPSON;CMD:ESCPL2,BDC,D4;MDL:Stylus Photo R300;CLS:PRINTER;DES:EPSON Stylus Photo R300;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

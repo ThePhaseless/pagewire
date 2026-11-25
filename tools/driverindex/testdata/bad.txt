@@ -1,0 +1,2 @@
+samsung--scx-4300--2-0-0-en "Samsung SCX-4300, 2.0.0 (en)" "MFG:Samsung;MDL:SCX-4300;"
+total 8

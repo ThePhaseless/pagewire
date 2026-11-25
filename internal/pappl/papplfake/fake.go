@@ -3,8 +3,8 @@
 // PAPPL 1.4.12 behaviour pagewire depends on: system operations at
 // /ipp/system (Get-Printers, Find-Devices, Find-Drivers, Create-Printer,
 // Delete-Printer), queues at /ipp/print/<name>, device schemes limited to
-// what the retrofit apps register ("cups" by default), and driver "auto"
-// stored as "auto". Jobs are completed as soon as their document arrives.
+// what the retrofit apps register ("cups" by default), any named driver
+// accepted by Create-Printer, and driver "auto" stored as "auto". Jobs are completed as soon as their document arrives.
 package papplfake
 
 import (
@@ -237,9 +237,10 @@ func (s *System) createPrinter(req, rsp *goipp.Message, fail failFunc) *goipp.Me
 			}
 		}
 	}
-	ok := false
+	// The retrofit apps accept any named driver, listed or not (pappl-retrofit 1.0b3).
+	ok := driver != "auto"
 	for _, d := range s.opts.Drivers {
-		if (driver == "auto" && !s.opts.NoAutoDriver && deviceID != "" && matches(d, deviceID)) || d.Name == driver {
+		if driver == "auto" && !s.opts.NoAutoDriver && deviceID != "" && matches(d, deviceID) {
 			ok = true
 		}
 	}

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createEventStore, type EventStore, EventsContext } from "../api/events";
 import { EulaAccept } from "../components/EulaAccept";
-import type { Config, EULA, Setup as SetupDTO, SetupEULA, Status } from "../gen/api";
+import type { Config, Decision, EULA, Setup as SetupDTO, SetupEULA, Status } from "../gen/api";
 import { mediaForLanguage, Setup } from "./Setup";
 
 // The Status the controller returns before any input: no config, no device, nothing reconciled.
@@ -57,17 +57,21 @@ const hpInventory = {
   probedAt: "2026-11-24T12:00:00+01:00",
   simulated: false,
 };
-const hpDecision = {
+const hpDecision: Decision = {
   printer: "hplip",
+  driver: "hp--laserjet-professional-m-1132-mfp--requires-proprietary-plugin-en",
+  driverDescription: "HP LaserJet Professional M1132 MFP, hpcups (en)",
   scanner: "airsane",
   saneBackends: ["hpaio"],
   requiredEulas: [],
   optionalEulas: ["hplip-plugin"],
-  rule: "hp",
+  rule: "model",
   device: hpDevice,
 };
-const simulatedDecision = {
+const simulatedDecision: Decision = {
   printer: "sim",
+  driver: "",
+  driverDescription: "",
   scanner: "sim",
   saneBackends: [],
   requiredEulas: [],
@@ -362,11 +366,12 @@ describe("Setup wizard", () => {
     expect(await screen.findByText("HP LaserJet Professional M1132 MFP")).toBeTruthy();
     expect(document.body.textContent).toContain("USB 03f0:042a");
     expect(document.body.textContent).toContain("HP (HPLIP)");
-    // The matched rule is jargon: it sits in a closed disclosure.
+    // How the driver was chosen is jargon: it sits in a closed disclosure.
     expect(
       screen.getByRole("button", { name: "Technical details" }).getAttribute("aria-expanded"),
     ).toBe("false");
-    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeTruthy();
+    expect(screen.getByText("Chosen by").closest("[hidden]")).toBeTruthy();
+    expect(screen.getByText("Printer model").closest("[hidden]")).toBeTruthy();
     expect(screen.getByRole("list", { name: "Setup steps" })).toBeTruthy();
     expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(
       "Find the printer",
@@ -632,6 +637,74 @@ describe("Setup wizard", () => {
     press("Finish setup");
     expect((await screen.findByRole("alert")).textContent).toContain("/name: too long");
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Review and finish");
+  });
+
+  test("a printer no driver matches: the device ID on Detect, Driver and Review", async () => {
+    const deviceId = "MFG:Zebra;CMD:ZPL;MDL:GK420d;CLS:PRINTER;";
+    const device = { ...hpDevice, manufacturer: "Zebra", product: "GK420d", deviceId };
+    mockServer(() => ({
+      ...hpSetup,
+      inventory: { ...hpInventory, devices: [device] },
+      decision: {
+        ...hpDecision,
+        printer: "",
+        driver: "",
+        driverDescription: "",
+        saneBackends: [],
+        optionalEulas: [],
+        rule: "none",
+        device,
+      },
+      eulas: [],
+      suggested: suggested("GK420d", "usb"),
+    }));
+    mount();
+    await heading("Find the printer");
+    expect(await screen.findByText("None found")).toBeTruthy();
+    expect(screen.getByText("No match").closest("[hidden]")).toBeTruthy();
+    expect(screen.getByText(deviceId).tagName).toBe("CODE");
+    press("Next");
+    await heading("Name and location");
+    press("Next");
+    await heading("Driver and licences");
+    expect(screen.getByText("No printer driver matches this printer")).toBeTruthy();
+    expect(screen.getByText(deviceId)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Printer driver/ }).textContent).toContain(
+      "Automatic: no driver matches",
+    );
+    press("Next");
+    await heading("Defaults");
+    press("Next");
+    await heading("Review and finish");
+    expect(screen.getByText("No printer driver matches this printer")).toBeTruthy();
+    expect(screen.getByText(deviceId)).toBeTruthy();
+    expect(document.body.textContent).toContain("After setup, choose a driver in Settings.");
+  });
+
+  test("a printer no driver matches and without a device ID says so", async () => {
+    const device = { ...hpDevice, deviceId: "" };
+    mockServer(() => ({
+      ...hpSetup,
+      inventory: { ...hpInventory, devices: [device] },
+      decision: {
+        ...hpDecision,
+        printer: "",
+        driver: "",
+        driverDescription: "",
+        rule: "none",
+        device,
+      },
+    }));
+    mount();
+    await heading("Find the printer");
+    expect(await screen.findByText("The printer did not report a device ID.")).toBeTruthy();
+  });
+
+  test("the classic CUPS family has a label", async () => {
+    mockServer(() => ({ ...hpSetup, decision: { ...hpDecision, printer: "legacy" } }));
+    mount();
+    await heading("Find the printer");
+    expect(await screen.findByText("Classic CUPS drivers")).toBeTruthy();
   });
 
   test("a simulated inventory is labelled simulated", async () => {

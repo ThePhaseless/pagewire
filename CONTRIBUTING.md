@@ -47,6 +47,20 @@ mise x -- kube-linter lint deploy/base internal/backend/k8s/testdata
 mise x -- actionlint
 ```
 
+The driver index (`internal/catalog/drivers.tsv.gz`) and the SANE index (`internal/catalog/sane-usb.tsv`) are generated from the driver and device images and committed; the dispatcher embeds them. Regenerate both after you change `images/` or `tools/driverindex`/`tools/saneindex`:
+
+```sh
+docker buildx build -f images/driver/Dockerfile --target driver-index -o type=local,dest=.cache/idx/driver-index .
+docker buildx build -f images/device/Dockerfile --target sane-index -o type=local,dest=.cache/idx/sane-index .
+cp .cache/idx/driver-index/drivers.tsv.gz .cache/idx/sane-index/sane-usb.tsv internal/catalog/
+```
+
+This builds every driver image and the device image, so the first run takes a while. CI's `indexes` job builds the same targets for linux/amd64 and compares the content (the gzip bytes may differ). Generate on amd64 when you can; if your arm64 build and CI disagree, use CI's files.
+
+The images install Ubuntu packages without pinning them, so an Ubuntu update to a driver or SANE package can make the `indexes` job fail on any branch, `main` included, without a change in the repository. The job's error says so. To fix it, download the `indexes` artifact from the failed run (or run the commands above), copy `driver-index/drivers.tsv.gz` and `sane-index/sane-usb.tsv` into `internal/catalog/`, and open a pull request with both files, for example as `chore(catalog): regenerate driver and SANE indexes`. Until it merges, pull requests cannot pass `ci-ok`; images from `main` and tags still publish.
+
+On `renovate/**` branches you do not need to do this: the Indexes workflow (`.github/workflows/indexes.yml`) regenerates both files, commits them as `github-actions[bot]` and starts CI on that commit. When Renovate rebases the branch, the rebase drops that commit, and the push starts the workflow again. CI runs on `renovate/**` branches never push images or `-sources` images.
+
 If you change a type in `internal/config` or `internal/apitypes`, regenerate the schemas and the UI's Zod code in the same commit:
 
 ```sh

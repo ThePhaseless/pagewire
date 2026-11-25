@@ -69,6 +69,10 @@ type QueueSpec struct {
 	Name     string `json:"name"`
 	Location string `json:"location"`
 	Driver   string `json:"driver"` // PAPPL driver name, or "auto" (needs a device ID from Find-Devices)
+	// DriverPinned means the user chose Driver (device.driverName). An unpinned
+	// name comes from the driver index, which can list a driver the running app
+	// lacks, so the agent then falls back to the app's own choice.
+	DriverPinned bool `json:"driverPinned"`
 	// DeviceURI is an optional full PAPPL device URI as the app lists it, e.g.
 	// "cups:ipp://127.0.0.1:18631/ipp/print"; when set the agent skips
 	// Find-Devices (used by the integration test).

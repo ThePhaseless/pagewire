@@ -1,0 +1,20 @@
+{
+  "devices": [
+    {
+      "vendorId": "04e8",
+      "productId": "342e",
+      "serial": "FAKE0008",
+      "manufacturer": "Samsung Electronics Co., Ltd.",
+      "product": "SCX-4300 Series",
+      "bus": 1,
+      "address": 9,
+      "interfaces": [
+        {"class": 255, "subClass": 255, "protocol": 255},
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Samsung;CMD:GDI;MDL:SCX-4300 Series;CLS:PRINTER;MODE:PCL;STATUS:IDLE;"
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

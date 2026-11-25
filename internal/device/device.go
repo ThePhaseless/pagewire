@@ -100,15 +100,27 @@ func ParseDeviceID(s string) map[string]string {
 	return out
 }
 
+// Decision rules: how the dispatcher chose the printer (Decision.Rule).
+const (
+	RuleIPPOverUSB = "ipp-over-usb" // the device has an IPP-over-USB interface (7/1/4)
+	RuleModel      = "model"        // the driver index lists the device's model
+	RuleCommandSet = "command-set"  // a generic driver for a language in the device's CMD
+	RuleOverride   = "override"     // device.driver or device.driverName in the config
+	RuleNone       = "none"         // no driver matches; no printer runs
+	RuleSimulated  = "simulated"
+)
+
 // Decision is the dispatcher's choice for the selected device.
 type Decision struct {
-	Printer       string     `json:"printer"` // catalog printer family id, "" none
-	Scanner       string     `json:"scanner"` // "ipp-usb" | "airsane" | "sim" | ""
-	SaneBackends  []string   `json:"saneBackends"`
-	RequiredEULAs []string   `json:"requiredEulas"`                // catalog EULA ids
-	OptionalEULAs []string   `json:"optionalEulas"`                // catalog EULA ids
-	Rule          string     `json:"rule"`                         // name of the matching rule (shown in UI)
-	Device        *USBDevice `json:"device" jsonschema:"nullable"` // matched device; nil in simulated mode
+	Printer           string     `json:"printer"`           // catalog printer family id, "" none
+	Driver            string     `json:"driver"`            // PAPPL driver name, "" none (the queue then uses auto)
+	DriverDescription string     `json:"driverDescription"` // the driver's description from the index, "" none
+	Scanner           string     `json:"scanner"`           // "ipp-usb" | "airsane" | "sim" | ""
+	SaneBackends      []string   `json:"saneBackends"`
+	RequiredEULAs     []string   `json:"requiredEulas"` // catalog EULA ids
+	OptionalEULAs     []string   `json:"optionalEulas"` // catalog EULA ids
+	Rule              string     `json:"rule" jsonschema:"enum=ipp-over-usb,enum=model,enum=command-set,enum=override,enum=none,enum=simulated"`
+	Device            *USBDevice `json:"device" jsonschema:"nullable"` // matched device; nil in simulated mode
 }
 
 // BlobStatus is the install state of one vendor blob.

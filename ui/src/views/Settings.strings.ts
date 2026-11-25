@@ -31,6 +31,9 @@ export const settingsStrings = {
       string
     >,
     driver: "Printer driver",
+    driverName: "Driver name",
+    driverNameHint:
+      "Exact driver name from the printer application; leave empty to choose automatically.",
     scanner: "Scanner driver",
     automatic: "Automatic",
     families: setupStrings.families,
@@ -72,6 +75,7 @@ export const settingsStrings = {
     "/location": "Location",
     "/device/mode": "Device",
     "/device/driver": "Printer driver",
+    "/device/driverName": "Driver name",
     "/device/scanner": "Scanner driver",
     "/device/usb": "USB device",
     "/device/usb/vendorId": "USB vendor ID",
