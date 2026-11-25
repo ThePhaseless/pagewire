@@ -16,7 +16,7 @@ services:
   dbus:
     <<: *hardened
     image: pagewire-device:dev
-    user: "101:101" # messagebus (LABEL dev.pagewire.uid.messagebus)
+    user: "101:101" # messagebus (LABEL io.github.thephaseless.pagewire.uid.messagebus)
     entrypoint: ["/usr/bin/dbus-daemon"]
     command: ["--config-file=/etc/pagewire/dbus.conf", "--nofork", "--nopidfile"]
     volumes:
@@ -25,7 +25,7 @@ services:
   avahi:
     <<: *hardened
     image: pagewire-device:dev
-    user: "102:102" # avahi (LABEL dev.pagewire.uid.avahi)
+    user: "102:102" # avahi (LABEL io.github.thephaseless.pagewire.uid.avahi)
     entrypoint: ["/usr/sbin/avahi-daemon"]
     command: ["--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/pagewire/avahi-daemon.conf"]
     volumes:

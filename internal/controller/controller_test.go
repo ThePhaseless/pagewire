@@ -84,6 +84,24 @@ func (r *restartBackend) RestartPod(context.Context) error {
 	return nil
 }
 
+// deviceBackend records SetUSBDevice calls, and whether each came before an Apply.
+type deviceBackend struct {
+	*fakeBackend
+	devs    []*device.USBDevice
+	staged  []bool
+	applies []int // len(devs) at each Apply
+}
+
+func (d *deviceBackend) SetUSBDevice(dev *device.USBDevice, beforeApply bool) {
+	d.devs = append(d.devs, dev)
+	d.staged = append(d.staged, beforeApply)
+}
+
+func (d *deviceBackend) Apply(ctx context.Context, s *device.Spec) error {
+	d.applies = append(d.applies, len(d.devs))
+	return d.fakeBackend.Apply(ctx, s)
+}
+
 type fakePrinter struct{ err error }
 
 func (p fakePrinter) Attributes(context.Context) (printing.Attributes, error) {
@@ -1214,5 +1232,33 @@ func TestConvertedFormats(t *testing.T) {
 	}
 	if got := h.c.Current().Printer.ConvertedFormats; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Current convertedFormats %v", got)
+	}
+}
+
+func TestUSBDevicePassedBeforeApply(t *testing.T) {
+	db := &deviceBackend{fakeBackend: &fakeBackend{obs: device.Observation{Phase: device.PhaseRunning}}}
+	h := newHarness(t, Options{Backend: db, BackendName: BackendDocker, USBAvailable: true})
+	h.c.ConfigApplied(usbConfig("P"), "e")
+	h.step() // no inventory yet: wait, no Apply and no device
+	if len(db.devs) != 0 {
+		t.Fatalf("device set while waiting: %v", db.devs)
+	}
+	h.report(t, "ippusb-mfp")
+	h.step()
+	want := catalog.Fixture("ippusb-mfp").Devices[0]
+	if len(db.devs) != 1 || db.devs[0] == nil || db.devs[0].Bus != want.Bus || db.devs[0].Address != want.Address {
+		t.Fatalf("devices %+v, want %+v", db.devs, want)
+	}
+	if !slices.Equal(db.applies, []int{1}) {
+		t.Fatalf("Apply after %v SetUSBDevice calls, want [1]", db.applies)
+	}
+	h.step() // same spec, no Apply: the device is taken at once
+	if !slices.Equal(db.staged, []bool{true, false}) || !slices.Equal(db.applies, []int{1}) {
+		t.Fatalf("staged %v, applies %v: want [true false], [1]", db.staged, db.applies)
+	}
+	h.c.ConfigApplied(simConfig("P"), "e2")
+	h.step()
+	if last := db.devs[len(db.devs)-1]; last != nil {
+		t.Fatalf("simulated mode device %+v, want nil", last)
 	}
 }

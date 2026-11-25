@@ -17,7 +17,11 @@ services:
       PAGEWIRE_HOST_IP: ${PAGEWIRE_HOST_IP:-}
       # Empty: localhost, 127.0.0.1, [::1] and the host IP.
       PAGEWIRE_ALLOWED_HOSTS: ${PAGEWIRE_ALLOWED_HOSTS:-}
-      # Inside the container; a socket proxy sets tcp://127.0.0.1:2375 here.
+      # Empty: no proxy secret. A secret file must be mounted; the path is inside the container.
+      PAGEWIRE_PROXY_SECRET: ${PAGEWIRE_PROXY_SECRET:-}
+      PAGEWIRE_PROXY_SECRET_FILE: ${PAGEWIRE_PROXY_SECRET_FILE:-}
+      PAGEWIRE_PROXY_SECRET_HEADER: ${PAGEWIRE_PROXY_SECRET_HEADER:-}
+      # Inside the container. compose.docker-proxy.yaml points it at the socket proxy.
       DOCKER_HOST: ${PAGEWIRE_DOCKER_HOST:-unix:///var/run/docker.sock}
     # The Engine socket is root:docker (Docker) or root:root (Podman) 0660.
     group_add: ["${DOCKER_GID:?set DOCKER_GID to the socket's group: stat -c %g /var/run/docker.sock}"]

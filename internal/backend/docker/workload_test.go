@@ -58,6 +58,10 @@ func goldenSpecs() map[string]*device.Spec {
 	}
 }
 
+// testNode is the usbfs node of the printer in sysfs(t, true).
+const testNode = "/dev/bus/usb/001/007"
+
+// planned translates s as it runs with the printer at testNode.
 func planned(t *testing.T, s *device.Spec) ([]plannedContainer, k8s.Pod) {
 	t.Helper()
 	pod, err := k8s.Plan(s, goldenParams(s))
@@ -68,7 +72,7 @@ func planned(t *testing.T, s *device.Spec) ([]plannedContainer, k8s.Pod) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cs, pod
+	return withDevice(cs, testNode), pod
 }
 
 func allPlanned(t *testing.T) map[string][]plannedContainer {
@@ -166,7 +170,12 @@ func TestUIDRule(t *testing.T) {
 	}
 }
 
+// TestUSBContainers: the probe reads the whole bus through a read-only bind
+// and a cgroup rule without mknod; each LAN-facing USB daemon gets only the
+// matched printer's node; nothing else touches USB.
 func TestUSBContainers(t *testing.T) {
+	wantDev := []container.DeviceMapping{{PathOnHost: testNode, PathInContainer: testNode, CgroupPermissions: "rw"}}
+	daemons := 0
 	for spec, s := range goldenSpecs() {
 		cs, pod := planned(t, s)
 		usb := map[string]bool{}
@@ -175,21 +184,63 @@ func TestUSBContainers(t *testing.T) {
 		}
 		for _, c := range cs {
 			hc := c.Opts.HostConfig
+			id := spec + "/" + c.Name
 			hasBind := slices.ContainsFunc(hc.Mounts, func(m mount.Mount) bool {
-				return m.Type == mount.TypeBind && m.Source == "/dev/bus/usb" && m.Target == "/dev/bus/usb" && !m.ReadOnly
+				return m.Type == mount.TypeBind && m.Source == "/dev/bus/usb" && m.Target == "/dev/bus/usb" && m.ReadOnly
 			})
-			hasRule := slices.Equal(hc.DeviceCgroupRules, []string{"c 189:* rwm"})
-			if hasBind != usb[c.Name] || hasRule != usb[c.Name] {
-				t.Errorf("%s/%s: usb %v, bind %v, cgroup rule %v", spec, c.Name, usb[c.Name], hasBind, hasRule)
+			hasRule := slices.Equal(hc.DeviceCgroupRules, []string{"c 189:* rw"})
+			hasDev := slices.Equal(hc.Devices, wantDev) && c.Opts.Config.Labels[LabelUSBDevice] == testNode
+			probe := usb[c.Name] && c.RunOnce
+			daemon := usb[c.Name] && !c.RunOnce
+			if daemon {
+				daemons++
 			}
-			if len(hc.Devices) > 0 || hc.Privileged {
-				t.Errorf("%s/%s: static devices or privileged", spec, c.Name)
+			if hasBind != probe || hasRule != probe || hasDev != daemon || hc.Privileged {
+				t.Errorf("%s: usb %v, bind %v, cgroup rule %v, devices %+v, privileged %v", id, usb[c.Name], hasBind, hasRule, hc.Devices, hc.Privileged)
 			}
+			if !daemon && (len(hc.Devices) > 0 || c.Opts.Config.Labels[LabelUSBDevice] != "") {
+				t.Errorf("%s: devices %+v", id, hc.Devices)
+			}
+		}
+	}
+	if daemons != 3 { // ippusb: ipp-usb; hplip-airsane-blob: printer-app, airsane
+		t.Errorf("%d USB daemons, want 3", daemons)
+	}
+}
+
+// TestNoDeviceLeavesDaemonsOut: without the printer's node the USB daemons are
+// not planned at all, never given the whole bus; the plan itself is unchanged.
+func TestNoDeviceLeavesDaemonsOut(t *testing.T) {
+	s := goldenSpecs()["hplip-airsane-blob"]
+	pod, err := k8s.Plan(s, goldenParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := translate(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range withDevice(cs, "") {
+		names = append(names, c.Name)
+	}
+	if want := []string{"probe", "dbus", "avahi", "agent", "fetch-blobs"}; !slices.Equal(names, want) {
+		t.Errorf("containers %v, want %v", names, want)
+	}
+	withDevice(cs, testNode)
+	for _, c := range cs {
+		if len(c.Opts.HostConfig.Devices) > 0 || c.Opts.Config.Labels[LabelUSBDevice] != "" {
+			t.Errorf("%s: withDevice changed its input", c.Name)
 		}
 	}
 }
 
 func TestHardening(t *testing.T) {
+	// The seed never runs and uses no host namespace, so it keeps the daemon's
+	// user namespace; host networking needs the host one under userns-remap.
+	if seed := seedContainer(goldenSelf).HostConfig; seed.UsernsMode != "" || seed.NetworkMode != "none" {
+		t.Errorf("seed: userns %q, network %q", seed.UsernsMode, seed.NetworkMode)
+	}
 	for spec, cs := range allPlanned(t) {
 		for _, c := range cs {
 			cfg, hc := c.Opts.Config, c.Opts.HostConfig

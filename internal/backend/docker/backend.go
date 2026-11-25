@@ -9,8 +9,9 @@
 // workload instead of tearing it down.
 //
 // Ownership: the backend only stops or removes containers and volumes that
-// carry dev.pagewire.managed-by=pagewire. A foreign container or volume
-// holding one of its names fails the rollout and is left alone.
+// carry io.github.thephaseless.pagewire.managed-by=pagewire and, for
+// containers, whose names start with pagewire-device-. A foreign container or
+// volume holding one of its names fails the rollout and is left alone.
 package docker
 
 import (
@@ -24,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +61,7 @@ const (
 	maxRetryWait      = 5 * time.Minute
 	defaultHealthWait = 60 * time.Second
 	msgNoPrinter      = "no USB printer on this host"
+	msgNoDevice       = "waiting for the matched printer's USB device node"
 	printerClass      = 7
 )
 
@@ -66,6 +69,7 @@ var (
 	_ device.Backend          = (*Backend)(nil)
 	_ device.PodRestarter     = (*Backend)(nil)
 	_ device.AgentTokenSource = (*Backend)(nil)
+	_ device.USBDeviceSetter  = (*Backend)(nil)
 )
 
 // routeIP returns the source address of the default route. Dialing UDP sends
@@ -109,10 +113,14 @@ type Backend struct {
 	applied bool    // a successful Apply recorded want
 	want    *wanted // nil: no workload
 	restart bool
-	gated   bool   // usb or probe spec and no printer on the host
-	done    string // workload hash of the last finished rollout or adoption
-	busy    string // current rollout step
-	err     string // last rollout error
+	gated   bool              // usb or probe spec and no printer on the host
+	usbDev  *device.USBDevice // the controller's matched printer
+	nextDev *device.USBDevice // usbDev once the next Apply succeeds, if staged
+	staged  bool              // nextDev waits for the next Apply
+	noDev   bool              // the USB daemons are left out: usbDev is not attached
+	done    string            // workload hash of the last finished rollout or adoption
+	busy    string            // current rollout step
+	err     string            // last rollout error
 	cancel  context.CancelFunc
 	logged  string // last error logged, so a stuck rollout logs once
 	fails   int    // consecutive failed converges since the last success or new want
@@ -160,6 +168,7 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	if spec == nil {
 		b.mu.Lock()
 		b.applied, b.want, b.fails = true, nil, 0
+		b.takeStaged()
 		if b.cancel != nil {
 			b.cancel()
 		}
@@ -206,6 +215,7 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	sc := *spec // the worker reads it later
 	b.want = &wanted{spec: &sc, hash: wh, containers: cs, config: pod.Config, selfImage: self, token: tok}
 	b.applied = true
+	b.takeStaged()
 	b.mu.Unlock()
 	b.poke()
 	return nil
@@ -286,6 +296,38 @@ func (b *Backend) AgentToken(context.Context) (string, error) {
 	}
 	b.tok = tok
 	return tok, nil
+}
+
+// SetUSBDevice records the controller's matched printer, whose usbfs node the
+// USB daemons get, and wakes the worker when it changed. With beforeApply it
+// only stages d for the next successful Apply.
+func (b *Backend) SetUSBDevice(d *device.USBDevice, beforeApply bool) {
+	var dc *device.USBDevice
+	if d != nil {
+		c := *d
+		c.Interfaces = slices.Clone(d.Interfaces)
+		dc = &c
+	}
+	b.mu.Lock()
+	if beforeApply {
+		b.nextDev, b.staged = dc, true
+		b.mu.Unlock()
+		return
+	}
+	b.nextDev, b.staged = nil, false
+	same := reflect.DeepEqual(b.usbDev, dc)
+	b.usbDev = dc
+	b.mu.Unlock()
+	if !same {
+		b.poke()
+	}
+}
+
+// takeStaged commits a staged device; b.mu is held.
+func (b *Backend) takeStaged() {
+	if b.staged {
+		b.usbDev, b.nextDev, b.staged = b.nextDev, nil, false
+	}
 }
 
 // RestartPod makes the worker roll the workload out again, probe included.
@@ -369,7 +411,39 @@ func (b *Backend) list(ctx context.Context) ([]container.Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.Items, nil
+	// The label alone is not enough to stop or remove a container.
+	return slices.DeleteFunc(r.Items, func(c container.Summary) bool {
+		return !strings.HasPrefix(containerName(c), Prefix)
+	}), nil
+}
+
+// deviceNode returns the usbfs node of d as it is attached now: the same
+// vendor, product and serial, at its recorded address first. A replugged
+// printer has a new address; it is taken only when it is the one such device,
+// so two identical printers wait for the controller's next match. "" when d is
+// nil, not attached or ambiguous. With sysfs unreadable it trusts the recorded
+// address.
+func (b *Backend) deviceNode(d *device.USBDevice) string {
+	if d == nil {
+		return ""
+	}
+	node := func(x device.USBDevice) string { return fmt.Sprintf("%s/%03d/%03d", usbDevDir, x.Bus, x.Address) }
+	devs, err := usb.Enumerate(b.p.SysRoot)
+	if err != nil {
+		return node(*d)
+	}
+	same := func(x device.USBDevice) bool {
+		return x.VendorID == d.VendorID && x.ProductID == d.ProductID && x.Serial == d.Serial
+	}
+	i := slices.IndexFunc(devs, func(x device.USBDevice) bool { return same(x) && x.Bus == d.Bus && x.Address == d.Address })
+	if i >= 0 {
+		return node(devs[i])
+	}
+	devs = slices.DeleteFunc(devs, func(x device.USBDevice) bool { return !same(x) })
+	if len(devs) != 1 {
+		return ""
+	}
+	return node(devs[0])
 }
 
 func usbMode(s *device.Spec) bool { return s.Mode == device.ModeUSB || s.Mode == device.ModeProbe }
@@ -382,7 +456,7 @@ func (b *Backend) converge(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	w, restart := b.want, b.restart
+	w, restart, dev := b.want, b.restart, b.usbDev
 	b.restart = false
 	b.mu.Unlock()
 	rolled := false
@@ -414,15 +488,25 @@ func (b *Backend) converge(ctx context.Context) {
 	}
 	if usbMode(w.spec) && !b.printerPresent() {
 		b.mu.Lock()
-		b.gated, b.done = true, ""
+		b.gated, b.noDev, b.done = true, false, ""
 		b.mu.Unlock()
 		if err := b.teardown(ctx, owned); err != nil {
 			b.fail(ctx, err)
 		}
 		return
 	}
+	// The USB daemons run with the matched printer's node or not at all; the
+	// probe and agent still run, so a replugged or new printer is reported.
+	ew := *w
+	node := ""
+	if slices.ContainsFunc(w.containers, func(c plannedContainer) bool { return c.usbDaemon }) {
+		node = b.deviceNode(dev)
+	}
+	ew.containers = withDevice(w.containers, node)
+	noDev := len(ew.containers) < len(w.containers)
+	w = &ew
 	b.mu.Lock()
-	b.gated = false
+	b.gated, b.noDev = false, noDev
 	b.mu.Unlock()
 
 	if !restart {
@@ -496,20 +580,16 @@ func (b *Backend) printerPresent() bool {
 // healthy reports whether the owned containers are exactly the wanted
 // workload and still up: run-once inits exited 0, the rest running or restarting.
 func (b *Backend) healthy(ctx context.Context, owned []container.Summary, w *wanted) (bool, error) {
-	var have, want []string
-	for _, c := range owned {
-		have = append(have, containerName(c))
-	}
+	want := map[string]string{} // name: usbfs node
 	for _, c := range w.containers {
-		want = append(want, c.Opts.Name)
+		want[c.Opts.Name] = c.Opts.Config.Labels[LabelUSBDevice]
 	}
-	slices.Sort(have)
-	slices.Sort(want)
-	if !slices.Equal(have, want) {
+	if len(owned) != len(want) {
 		return false, nil
 	}
 	for _, c := range owned {
-		if c.Labels[LabelWorkloadHash] != w.hash {
+		node, ok := want[containerName(c)]
+		if !ok || c.Labels[LabelWorkloadHash] != w.hash || c.Labels[LabelUSBDevice] != node {
 			return false, nil
 		}
 		if c.Labels[LabelInit] != "true" {
@@ -803,7 +883,7 @@ func (b *Backend) Observe(ctx context.Context) (device.Observation, error) {
 	}
 	obs := device.Observation{HostIP: b.HostIP(ctx)}
 	b.mu.Lock()
-	w, gated, done, applied := b.want, b.gated, b.done, b.applied
+	w, gated, noDev, done, applied := b.want, b.gated, b.noDev, b.done, b.applied
 	msg := cmp.Or(b.err, b.busy, "starting")
 	b.mu.Unlock()
 
@@ -830,6 +910,8 @@ func (b *Backend) Observe(ctx context.Context) (device.Observation, error) {
 		obs.Phase, obs.Unschedulable, obs.Message = device.PhasePending, true, msgNoPrinter
 	case w != nil && done != w.hash:
 		obs.Phase, obs.Message = device.PhasePending, msg
+	case w != nil && noDev:
+		obs.Phase, obs.Message = device.PhasePending, msgNoDevice
 	case n == 0:
 		obs.Phase = device.PhaseAbsent
 	case !applied && stopped > 0:

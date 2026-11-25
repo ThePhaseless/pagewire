@@ -25,8 +25,8 @@ Clean up afterwards, and before running it again: the test creates the config wi
 
 ```sh
 DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
-docker ps -aq --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker rm -fv
-docker volume ls -q --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker volume rm
+docker ps -aq --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker rm -fv
+docker volume ls -q --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker volume rm
 ```
 
 The last command also removes the `pagewire-blobs` volume when the backend created it. The device containers use the host network, so free port 5353 first, as above. CI runs the same test against rootful Podman too, with `DOCKER_HOST=unix:///run/podman/podman.sock` and `DOCKER_SOCKET=/run/podman/podman.sock`.

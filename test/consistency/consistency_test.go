@@ -562,7 +562,7 @@ func TestSourcesReference(t *testing.T) {
 			"ARG IMAGE=" + image,
 			"ARG SOURCES_REF=" + ref,
 			"COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/",
-			`LABEL dev.pagewire.sources="${SOURCES_REF}"`,
+			`LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"`,
 		} {
 			if !slices.ContainsFunc(s.lines, func(l string) bool { return strings.TrimSpace(l) == want }) {
 				t.Errorf("%s stage %s: no line %q", file, target, want)

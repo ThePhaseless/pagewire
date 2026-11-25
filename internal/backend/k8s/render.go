@@ -29,8 +29,8 @@ const (
 	ManagedByLabel  = "app.kubernetes.io/managed-by"
 	FieldManager    = "pagewire"
 
-	SpecHashAnnotation   = "pagewire.dev/spec-hash"
-	ConfigHashAnnotation = "pagewire.dev/config-hash"
+	SpecHashAnnotation   = "pagewire.thephaseless.github.io/spec-hash"
+	ConfigHashAnnotation = "pagewire.thephaseless.github.io/config-hash"
 )
 
 // ErrNoUSBResource is returned for usb and probe specs when Params.USBResource is empty.

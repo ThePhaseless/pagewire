@@ -81,13 +81,13 @@ Open the UI. With no config file the wizard starts, shows what the agent found o
 
 ## Deploying with Docker or Podman
 
-`compose.docker.yaml` runs pagewire on one Linux host with a USB printer, without Kubernetes. The control plane runs with the docker backend and creates the device containers itself through the Docker Engine API: `pagewire-device-probe`, `-dbus`, `-avahi`, `-agent`, then `-ipp-usb`, or a printer application and `-airsane` (plus `-fetch-blobs` for a vendor file). These are the same containers as the Kubernetes device pod, on the host network, with read-only root file systems, all capabilities dropped and no privilege escalation. None of them is privileged. The containers that use the printer get `/dev/bus/usb` and a device-cgroup rule for USB devices, so a printer that is plugged in again stays reachable. Scratch space for print spools sits on disk (anonymous volumes), not in memory. Config files and the agent token go into named volumes that are recreated on every rollout.
+`compose.docker.yaml` runs pagewire on one Linux host with a USB printer, without Kubernetes. The control plane runs with the docker backend and creates the device containers itself through the Docker Engine API: `pagewire-device-probe`, `-dbus`, `-avahi`, `-agent`, then `-ipp-usb`, or a printer application and `-airsane` (plus `-fetch-blobs` for a vendor file). They are the containers of the Kubernetes device pod, on the host network, with read-only root file systems, all capabilities dropped and no privilege escalation. None of them is privileged. Two things differ from Kubernetes: more of them run as uid 0 (see Security), and USB access is set up differently. On Kubernetes the device plugin hands the printer to each container that uses it. Here ipp-usb, the printer application and AirSane get only the matched printer's device node, `/dev/bus/usb/<bus>/<device>`, read-write. A printer that is plugged in again gets a new node, and pagewire recreates these three containers with it. While it cannot find the node, they do not run. The probe, which looks at every USB device to find the printer, gets all of `/dev/bus/usb` through a read-only mount and may open any USB device in it. Scratch space for print spools sits on disk (anonymous volumes), not in memory. Config files and the agent token go into named volumes that are recreated on every rollout.
 
 Requirements:
 
 - A Linux host with the printer on USB.
 - Docker Engine 20.10 or newer, or rootful Podman 4 or newer with its API socket enabled.
-- Docker Compose 2.24.4 or newer (the socket proxy override below needs it).
+- Docker Compose 2.24.4 or newer (`compose.docker-proxy.yaml` needs it).
 - No avahi-daemon on the host answering on port 5353. Two mDNS responders on one host make discovery unreliable.
 - Free host ports: 8080 and 8081 (bound to 127.0.0.1 by default), and for the device 8001 to 8004, 8090, 8631 and 60000 to 60009, as on Kubernetes.
 
@@ -101,6 +101,8 @@ DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose -f compose.docker.y
 
 The UI listens on 127.0.0.1:8080 only. Put an authenticating proxy in front of it (see Security), or set `PAGEWIRE_LISTEN=:8080` on a trusted LAN. By default pagewire answers only `localhost`, `127.0.0.1`, `[::1]` and the host's IP address, and any other host name gets 421. When you reach it by a host name, set `PAGEWIRE_ALLOWED_HOSTS` to that name. The host IP in that list is read once when the control plane starts; restart it after the address changes, or set `PAGEWIRE_HOST_IP`.
 
+To require the proxy secret (see Security), set `PAGEWIRE_PROXY_SECRET` in the environment of `docker compose up`. `compose.docker.yaml` passes it, `PAGEWIRE_PROXY_SECRET_FILE` and `PAGEWIRE_PROXY_SECRET_HEADER` to the control plane; for the file, mount it into the container yourself and give its path inside the container.
+
 On Podman, enable the API socket and point Docker Compose at it:
 
 ```sh
@@ -109,12 +111,12 @@ DOCKER_HOST=unix:///run/podman/podman.sock DOCKER_SOCKET=/run/podman/podman.sock
   docker compose -f compose.docker.yaml up -d
 ```
 
-CI runs this path: the Docker Compose CLI against rootful Podman's socket. `podman compose` also works when its provider is docker-compose. podman-compose (the Python tool) is untested. It does not support `!reset` or `!override`, which the socket proxy override needs, and it may handle `userns_mode` and `group_add` differently.
+CI runs this path: the Docker Compose CLI against rootful Podman's socket. `podman compose` also works when its provider is docker-compose. podman-compose (the Python tool) is untested. It does not support `!reset` or `!override`, which `compose.docker-proxy.yaml` needs, and it may handle `userns_mode` and `group_add` differently.
 
 Also:
 
 - Image pinning: set `PAGEWIRE_IMAGE=ghcr.io/thephaseless/pagewire:<version>@sha256:<digest>` and, for the device and driver images, `PAGEWIRE_IMAGE_OVERRIDES` (see Images). The probe, agent and fetch-blobs containers run the image of the control-plane container (named `pagewire`), so they always match its build. Upgrading the control-plane image, or any change to the device images, their config or the agent URL, recreates the device containers once. A control-plane restart with the same image and config keeps them running.
-- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB printer. The control plane starts nothing until a printer appears, and checks again every 5 s.
+- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB printer. The control plane starts nothing until a printer appears, and checks again every 5 s. "waiting for the matched printer's USB device node" means pagewire knows which printer to use but cannot find its device node, for example while it is being plugged in again. ipp-usb, the printer application and AirSane stay stopped until the node is back.
 - Connect URIs and the printer address use the source address of the host's default route, read again each time the control plane checks the device. On a host with several networks, or IPv6 only, set `PAGEWIRE_HOST_IP` to the address clients should use.
 - Vendor files, such as HP's plug-in, go into the `pagewire-blobs` volume, never into an image. The control plane creates the volume when it is missing and never removes it, and a volume of that name you create yourself is used as it is.
 - Memory: the control plane sets its Go memory limit to 80% of its container memory limit (256Mi on Kubernetes), read from the cgroup; `GOMEMLIMIT` overrides it. `compose.docker.yaml` sets no memory limit for the control plane by default, so there is none; add `mem_limit` to get one. The device containers get the same limits as on Kubernetes.
@@ -124,37 +126,31 @@ Stopping and cleaning up: `docker compose down` stops only the control plane. Th
 
 ```sh
 DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
-docker ps -aq --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker rm -fv
-docker volume ls -q --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker volume rm
+docker ps -aq --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker rm -fv
+docker volume ls -q --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker volume rm
 ```
 
-The last command also removes the `pagewire-blobs` volume when pagewire created it. `down -v` removes the config and stored scans with the data volume; leave out `-v` to keep them.
+With the socket proxy, add `-f compose.docker-proxy.yaml` to the `down` command so it removes the proxy too. The last command also removes the `pagewire-blobs` volume when pagewire created it. `down -v` removes the config and stored scans with the data volume; leave out `-v` to keep them.
 
 ### Socket proxy
 
-The Engine socket is root-equivalent: whoever can use it can start a privileged container. A socket proxy such as [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) narrows what the control plane can reach to the calls it makes: `/_ping`; list, inspect, create, start, stop, wait for and remove containers, and copy files into them; inspect and pull images; inspect, create and remove volumes. Run the proxy with `CONTAINERS=1 IMAGES=1 VOLUMES=1 POST=1` (check its README for the current variable names), listening on `127.0.0.1:2375`. Then write `compose.override.yaml` next to `compose.docker.yaml`, which drops the socket mount and the extra group:
-
-```yaml
-services:
-  pagewire:
-    group_add: !reset []
-    volumes: !override
-      - data:/data
-```
-
-Start the stack with both files, because Compose reads `compose.override.yaml` by itself only when no `-f` is given:
+The Engine socket is root-equivalent: whoever can use it can start a privileged container. `compose.docker-proxy.yaml` adds [socket-proxy](https://github.com/wollomatic/socket-proxy) between the control plane and the socket. The proxy passes only the Engine API calls the docker backend makes (`SECURITY.md` lists them) and refuses bind mounts from any host path other than `/dev/bus/usb`. The control plane then holds neither the socket nor its group. Start the stack with both files:
 
 ```sh
-PAGEWIRE_DOCKER_HOST=tcp://127.0.0.1:2375 DOCKER_GID=0 \
-  docker compose -f compose.docker.yaml -f compose.override.yaml up -d
+DOCKER_GID=$(stat -c %g /var/run/docker.sock) \
+  docker compose -f compose.docker.yaml -f compose.docker-proxy.yaml up -d
 ```
 
-`DOCKER_GID` must still be set, to any value, because `compose.docker.yaml` requires it. Creating containers through the proxy is still root-equivalent. Because the control plane uses the host network, the proxy has to listen on the host's loopback address, where every local user can reach it. On a host with other users, keep the socket mount instead.
+`DOCKER_GID` is now the group the proxy uses to reach the socket. On Podman, set `DOCKER_HOST`, `DOCKER_SOCKET` and `DOCKER_GID=0` as shown above.
+
+The proxy listens on a UNIX socket in a small in-memory volume. Only the proxy and the control plane mount that volume. Do not give the proxy a TCP port instead: the device containers use the host network, so a port on 127.0.0.1 is open to every one of them, including ipp-usb, the printer application and AirSane, which serve the LAN. It is open to every local user as well.
+
+The proxy narrows what a compromised control plane can reach, yet creating containers is one of the calls it allows, so the control plane can still take over the host.
 
 ### Limits
 
 - Rootless Docker and rootless Podman are not supported: they cannot open USB device nodes or apply device-cgroup rules.
-- A daemon with `userns-remap` works: the control plane and every device container set `userns_mode: host`.
+- A daemon with `userns-remap` works: the control plane, the socket proxy and every device container set `userns_mode: host`.
 - SELinux hosts need `setsebool -P container_use_devices on` for the USB devices, and `label=disable` (or a policy) for the socket mount.
 - One pagewire installation per host. The container names are fixed, and two installations would want the same host ports.
 
@@ -275,8 +271,8 @@ A scanned page may be at most 256 MiB, and stored scans may take 1 GiB in total.
 - The agent dials out to the control plane's internal port with a bearer token from a Secret the control plane creates. That connection is plain HTTP inside the cluster. The device pod opens no port of pagewire's own.
 - The control plane's Role names every object it may change, except device pods, which it can only list and delete.
 - On the LAN the device pod serves IPP, eSCL and mDNS on the node's address, like a network printer would. ipp-usb also proxies the printer's own web console, and AirSane's web page on port 8090 can start scans. A web page open in a browser on the LAN can send requests to these ports too. PAPPL's admin pages answer only local clients. Treat the LAN as trusted, or restrict these ports on the node.
-- With the docker backend, the control plane holds the Engine socket, which is root-equivalent on the host. It only touches containers and volumes labelled `dev.pagewire.managed-by=pagewire`. See `SECURITY.md`.
-- Containers drop all capabilities, run with read-only root file systems and no privilege escalation. The containers that open the USB device (probe, ipp-usb, the printer application, AirSane) run as uid 0, because device nodes from the device plugin are owned by root. Everything else runs as non-root users.
+- With the docker backend, the control plane can use the Docker Engine API, which is root-equivalent on the host. It only stops or removes containers and volumes labelled `io.github.thephaseless.pagewire.managed-by=pagewire`, and containers only when their names also start with `pagewire-device-`. `compose.docker-proxy.yaml` narrows that access (see Socket proxy). See `SECURITY.md`.
+- Containers drop all capabilities, run with read-only root file systems and no privilege escalation. On Kubernetes the containers that open the USB device (probe, ipp-usb, the printer application, AirSane) run as uid 0, because device nodes from the device plugin are owned by root. Everything else runs as non-root users. With the docker backend more containers run as uid 0, because Docker has no fsGroup and the containers that write a shared volume need root: the probe in every mode, the agent in probe and usb modes, fetch-blobs, and in usb mode ipp-usb, the printer application and AirSane. dbus, Avahi, and in simulated mode the agent, the simulated printer and AirSane run as non-root users.
 
 Report vulnerabilities as described in `SECURITY.md`.
 
@@ -293,7 +289,7 @@ All images are built for linux/amd64 and linux/arm64, with SBOM and provenance a
 - `main` follows the main branch. Use it until the first release.
 - `1.2.3`, `1.2` and `1` come from release tags, and `latest` points at the newest release.
 - `sha-<commit>` names the images built from one commit. It is a tag, so pin by digest when you need an exact image.
-- `<tag>-sources` holds the corresponding source of the device and driver images for every published branch and version tag: `main-sources`, `1.2.3-sources`, `1.2-sources`, `1-sources`. The source for `latest` is the newest `<version>-sources`. Each device and driver image names its source image in `/usr/share/pagewire/SOURCES` and in the label `dev.pagewire.sources`.
+- `<tag>-sources` holds the corresponding source of the device and driver images for every published branch and version tag: `main-sources`, `1.2.3-sources`, `1.2-sources`, `1-sources`. The source for `latest` is the newest `<version>-sources`. Each device and driver image names its source image in `/usr/share/pagewire/SOURCES` and in the label `io.github.thephaseless.pagewire.sources`.
 
 The control plane picks the device and driver image tags from its own version: a release runs the same release's images, and any other build (`dev`, `main`) runs `main`. `--image-tag` sets the tag directly. Images tagged `main` without a digest get `imagePullPolicy: Always`, so a restarted device pod always pulls the newest `main`. Everything else gets `IfNotPresent`.
 

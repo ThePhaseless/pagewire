@@ -61,8 +61,14 @@ func testParams(t *testing.T) Params {
 	}
 }
 
+// testPrinter is the controller's matched device for the printer in sysfs(t, true).
+func testPrinter() *device.USBDevice {
+	return &device.USBDevice{VendorID: "03f0", ProductID: "2b17", Bus: 1, Address: 7}
+}
+
 func newTestBackend(f *fakeEngine, p Params) *Backend {
 	b := New(f, p)
+	b.SetUSBDevice(testPrinter(), false)
 	b.healthTimeout, b.healthPoll = 50*time.Millisecond, 2*time.Millisecond
 	return b
 }
@@ -1021,5 +1027,171 @@ func TestTokenUnreadableNotReplaced(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(p.TokenFile); string(raw) != "keep" {
 		t.Errorf("token replaced: %q", raw)
+	}
+}
+
+// TestLabelledForeignContainerLeftAlone: the owner label alone does not make a
+// container ours; without the name prefix it is never stopped or removed and
+// does not make the workload look unhealthy.
+func TestLabelledForeignContainerLeftAlone(t *testing.T) {
+	f := newFakeWithSelf()
+	f.addContainer("someone-else", "busybox", ownerLabels(), container.StateRunning)
+	p := testParams(t)
+	rolledOut(t, f, p, simSpec())
+	b := newTestBackend(f, p)
+	mustApply(t, b, simSpec())
+	converge(t, b)
+	if m := mutations(f); len(m) > 0 {
+		t.Errorf("adoption changed the workload: %q", m)
+	}
+	mustApply(t, b, nil)
+	converge(t, b)
+	for _, c := range f.callLog() {
+		if strings.HasSuffix(c, " someone-else") {
+			t.Errorf("foreign container touched: %s", c)
+		}
+	}
+	if !slices.Contains(f.names(), "someone-else") {
+		t.Error("foreign container removed")
+	}
+}
+
+func setDevnum(t *testing.T, root string, addr string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "bus", "usb", "devices", "1-1", "devnum"), []byte(addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func usbDevices(f *fakeEngine, name string) []container.DeviceMapping {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.containers[Prefix+name]
+	if c == nil {
+		return nil
+	}
+	return c.opts.HostConfig.Devices
+}
+
+func wantNode(t *testing.T, f *fakeEngine, node string) {
+	t.Helper()
+	d := usbDevices(f, "ipp-usb")
+	if len(d) != 1 || d[0].PathOnHost != node || d[0].PathInContainer != node || d[0].CgroupPermissions != "rw" {
+		t.Fatalf("ipp-usb devices %+v, want %s rw", d, node)
+	}
+}
+
+// TestUSBDeviceNode: the USB daemons get the matched printer's node and are
+// recreated when the printer comes back at a new address; with the printer
+// not attached they are left out, while the probe and agent still run.
+func TestUSBDeviceNode(t *testing.T) {
+	f := newFakeWithSelf()
+	p := testParams(t)
+	b := newTestBackend(f, p)
+	mustApply(t, b, ippusbSpec())
+	converge(t, b)
+	wantPhase(t, b, device.PhaseRunning)
+	wantNode(t, f, "/dev/bus/usb/001/007")
+
+	t.Run("replug rolls to the new node", func(t *testing.T) {
+		setDevnum(t, p.SysRoot, "9")
+		converge(t, b)
+		wantPhase(t, b, device.PhaseRunning)
+		wantNode(t, f, "/dev/bus/usb/001/009")
+		f.resetCalls()
+		converge(t, b)
+		if m := mutations(f); len(m) > 0 {
+			t.Errorf("second converge changed the workload: %q", m)
+		}
+	})
+	t.Run("RestartPod after a replug uses the new node", func(t *testing.T) {
+		setDevnum(t, p.SysRoot, "11")
+		if err := b.RestartPod(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		converge(t, b)
+		wantNode(t, f, "/dev/bus/usb/001/011")
+	})
+	t.Run("two identical printers off the recorded address: daemons left out", func(t *testing.T) {
+		twin := filepath.Join(p.SysRoot, "bus", "usb", "devices", "1-2")
+		if err := os.CopyFS(twin, os.DirFS(filepath.Join(p.SysRoot, "bus", "usb", "devices", "1-1"))); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(twin, "devnum"), []byte("12\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		converge(t, b)
+		if slices.Contains(f.names(), Prefix+"ipp-usb") {
+			t.Fatalf("containers %v: ipp-usb runs on one of two identical printers", f.names())
+		}
+		if o := wantPhase(t, b, device.PhasePending); o.Message != msgNoDevice {
+			t.Errorf("observation %+v", o)
+		}
+		if err := os.RemoveAll(twin); err != nil {
+			t.Fatal(err)
+		}
+		converge(t, b)
+		wantNode(t, f, "/dev/bus/usb/001/011")
+	})
+	t.Run("another printer: daemons left out until the controller matches it", func(t *testing.T) {
+		dir := filepath.Join(p.SysRoot, "bus", "usb", "devices", "1-1")
+		if err := os.WriteFile(filepath.Join(dir, "idProduct"), []byte("1234\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		converge(t, b)
+		if slices.Contains(f.names(), Prefix+"ipp-usb") || !slices.Contains(f.names(), Prefix+"agent") {
+			t.Fatalf("containers %v: want the agent and no ipp-usb", f.names())
+		}
+		if o := wantPhase(t, b, device.PhasePending); o.Unschedulable || o.Message != msgNoDevice {
+			t.Errorf("observation %+v", o)
+		}
+		b.SetUSBDevice(&device.USBDevice{VendorID: "03f0", ProductID: "1234", Bus: 1, Address: 11}, false)
+		converge(t, b)
+		wantPhase(t, b, device.PhaseRunning)
+		wantNode(t, f, "/dev/bus/usb/001/011")
+	})
+	t.Run("no matched device", func(t *testing.T) {
+		b.SetUSBDevice(nil, false)
+		converge(t, b)
+		if slices.Contains(f.names(), Prefix+"ipp-usb") {
+			t.Fatal("ipp-usb runs without a matched device")
+		}
+		wantPhase(t, b, device.PhasePending)
+	})
+}
+
+// TestUSBDeviceStagedForApply: a device passed before an Apply reaches the
+// worker with that Apply's spec, never with the old one, and a failing Apply
+// leaves it out.
+func TestUSBDeviceStagedForApply(t *testing.T) {
+	f := newFakeWithSelf()
+	b := newTestBackend(f, testParams(t))
+	<-b.wake
+	other := &device.USBDevice{VendorID: "03f0", ProductID: "1234", Bus: 1, Address: 11}
+	current := func() *device.USBDevice {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.usbDev
+	}
+	b.SetUSBDevice(other, true)
+	if d := current(); d == nil || d.Address != 7 || len(b.wake) != 0 {
+		t.Fatalf("staged device taken or worker woken: %+v, %d wakes", d, len(b.wake))
+	}
+	f.setErr("ContainerInspect pagewire", errors.New("engine down"))
+	if err := b.Apply(t.Context(), ippusbSpec()); err == nil {
+		t.Fatal("Apply succeeded with the engine down")
+	}
+	if d := current(); d.Address != 7 {
+		t.Fatalf("failing Apply took the staged device %+v", d)
+	}
+	f.setErr("ContainerInspect pagewire", nil)
+	mustApply(t, b, ippusbSpec())
+	if d := current(); d.Address != 11 {
+		t.Fatalf("Apply did not take the staged device: %+v", d)
+	}
+	<-b.wake
+	b.SetUSBDevice(testPrinter(), false)
+	if d := current(); d.Address != 7 || len(b.wake) != 1 {
+		t.Fatalf("device %+v, %d wakes: want it taken at once", d, len(b.wake))
 	}
 }

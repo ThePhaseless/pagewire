@@ -162,7 +162,7 @@ ARG VERSION
 ARG IMAGE=pagewire-driver-ps
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
 RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
-LABEL dev.pagewire.sources="${SOURCES_REF}"
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8001
 CMD ["/usr/local/bin/ps-printer-app", "-o", "server-port=8001", "server"]
 
@@ -200,7 +200,7 @@ ARG VERSION
 ARG IMAGE=pagewire-driver-hplip
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
 RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
-LABEL dev.pagewire.sources="${SOURCES_REF}"
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8002
 CMD ["/usr/local/bin/hplip-printer-app", "-o", "server-port=8002", "server"]
 
@@ -228,7 +228,7 @@ ARG VERSION
 ARG IMAGE=pagewire-driver-gutenprint
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
 RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
-LABEL dev.pagewire.sources="${SOURCES_REF}"
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8003
 CMD ["/usr/local/bin/gutenprint-printer-app", "-o", "server-port=8003", "server"]
 
@@ -256,7 +256,7 @@ ARG VERSION
 ARG IMAGE=pagewire-driver-ghostscript
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
 RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
-LABEL dev.pagewire.sources="${SOURCES_REF}"
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8004
 CMD ["/usr/local/bin/ghostscript-printer-app", "-o", "server-port=8004", "server"]
 

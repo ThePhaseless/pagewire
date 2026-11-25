@@ -31,9 +31,9 @@
         "/pagewire"
       ],
       "Labels": {
-        "dev.pagewire.container": "probe",
-        "dev.pagewire.init": "true",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "probe",
+        "io.github.thephaseless.pagewire.init": "true",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -100,7 +100,7 @@
       "CpusetMems": "",
       "Devices": null,
       "DeviceCgroupRules": [
-        "c 189:* rwm"
+        "c 189:* rw"
       ],
       "DeviceRequests": null,
       "MemoryReservation": 0,
@@ -125,7 +125,8 @@
         {
           "Type": "bind",
           "Source": "/dev/bus/usb",
-          "Target": "/dev/bus/usb"
+          "Target": "/dev/bus/usb",
+          "ReadOnly": true
         }
       ],
       "MaskedPaths": null,
@@ -163,9 +164,9 @@
         "/usr/bin/dbus-daemon"
       ],
       "Labels": {
-        "dev.pagewire.container": "dbus",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "dbus",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -296,9 +297,9 @@
         "/usr/sbin/avahi-daemon"
       ],
       "Labels": {
-        "dev.pagewire.container": "avahi",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "avahi",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -437,9 +438,9 @@
         "/pagewire"
       ],
       "Labels": {
-        "dev.pagewire.container": "agent",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "agent",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -586,9 +587,10 @@
         "/usr/local/sbin/ipp-usb"
       ],
       "Labels": {
-        "dev.pagewire.container": "ipp-usb",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "ipp-usb",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire",
+        "io.github.thephaseless.pagewire.usb-device": "/dev/bus/usb/001/007"
       },
       "StopTimeout": 10
     },
@@ -657,10 +659,14 @@
       "CpuRealtimeRuntime": 0,
       "CpusetCpus": "",
       "CpusetMems": "",
-      "Devices": null,
-      "DeviceCgroupRules": [
-        "c 189:* rwm"
+      "Devices": [
+        {
+          "PathOnHost": "/dev/bus/usb/001/007",
+          "PathInContainer": "/dev/bus/usb/001/007",
+          "CgroupPermissions": "rw"
+        }
       ],
+      "DeviceCgroupRules": null,
       "DeviceRequests": null,
       "MemoryReservation": 0,
       "MemorySwap": 0,
@@ -689,11 +695,6 @@
           "VolumeOptions": {
             "NoCopy": true
           }
-        },
-        {
-          "Type": "bind",
-          "Source": "/dev/bus/usb",
-          "Target": "/dev/bus/usb"
         }
       ],
       "MaskedPaths": null,

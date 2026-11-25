@@ -31,9 +31,9 @@
         "/pagewire"
       ],
       "Labels": {
-        "dev.pagewire.container": "probe",
-        "dev.pagewire.init": "true",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "probe",
+        "io.github.thephaseless.pagewire.init": "true",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -156,9 +156,9 @@
         "/usr/bin/dbus-daemon"
       ],
       "Labels": {
-        "dev.pagewire.container": "dbus",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "dbus",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -289,9 +289,9 @@
         "/usr/sbin/avahi-daemon"
       ],
       "Labels": {
-        "dev.pagewire.container": "avahi",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "avahi",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -428,9 +428,9 @@
         "/pagewire"
       ],
       "Labels": {
-        "dev.pagewire.container": "agent",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "agent",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -575,9 +575,9 @@
         "/usr/sbin/ippeveprinter"
       ],
       "Labels": {
-        "dev.pagewire.container": "sim-printer",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "sim-printer",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -669,7 +669,7 @@
           "Target": "/tmp",
           "VolumeOptions": {
             "Labels": {
-              "dev.pagewire.managed-by": "pagewire"
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
             }
           }
         }
@@ -713,9 +713,9 @@
         "/usr/local/bin/airsaned"
       ],
       "Labels": {
-        "dev.pagewire.container": "airsane",
-        "dev.pagewire.init": "false",
-        "dev.pagewire.managed-by": "pagewire"
+        "io.github.thephaseless.pagewire.container": "airsane",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -825,7 +825,7 @@
           "Target": "/tmp",
           "VolumeOptions": {
             "Labels": {
-              "dev.pagewire.managed-by": "pagewire"
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
             }
           }
         }

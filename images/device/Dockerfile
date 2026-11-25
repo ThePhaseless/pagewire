@@ -106,10 +106,10 @@ ARG VERSION
 ARG IMAGE=pagewire-device
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
 RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
-LABEL dev.pagewire.sources="${SOURCES_REF}"
-LABEL dev.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
-      dev.pagewire.uid.avahi="${AVAHI_UID}" \
-      dev.pagewire.uid.nonroot="${NONROOT_UID}"
+LABEL io.github.thephaseless.pagewire.sources="${SOURCES_REF}"
+LABEL io.github.thephaseless.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
+      io.github.thephaseless.pagewire.uid.avahi="${AVAHI_UID}" \
+      io.github.thephaseless.pagewire.uid.nonroot="${NONROOT_UID}"
 EXPOSE 8090 8631 60000-60009
 
 # Package lists for the sources target, chosen by SOURCES_LISTS.

@@ -1,0 +1,56 @@
+# Optional: a filtering proxy between the control plane and the Engine socket.
+# Use it together with compose.docker.yaml (README "Socket proxy"):
+#   DOCKER_GID=$(stat -c %g /var/run/docker.sock) \
+#     docker compose -f compose.docker.yaml -f compose.docker-proxy.yaml up -d
+# The proxy listens on a UNIX socket in a volume that only the control plane
+# mounts. Never give it a TCP port: the device containers use the host network,
+# so a port on 127.0.0.1 would be open to every one of them.
+services:
+  pagewire:
+    # The control plane no longer holds the Engine socket or its group.
+    group_add: !reset []
+    volumes: !override
+      - data:/data
+      - docker-proxy:/run/docker-proxy:ro
+    environment:
+      DOCKER_HOST: unix:///run/docker-proxy/docker.sock
+    depends_on: [docker-proxy]
+  docker-proxy:
+    image: ghcr.io/wollomatic/socket-proxy:1.14.0@sha256:b9e5b7e320287ea329229c9cbe9c2f78492befe408c4510c6c76cd897696fa88
+    # The control plane's uid, so it can open the 0600 socket; the group reads the Engine socket.
+    user: "65532:${DOCKER_GID:?set DOCKER_GID to the socket's group: stat -c %g /var/run/docker.sock}"
+    network_mode: none
+    userns_mode: host
+    # Exactly the calls internal/backend/docker/engine.go makes. The proxy
+    # anchors each pattern; the client prefixes all but /_ping with /v1.NN.
+    command:
+      - '-proxysocketendpoint=/run/docker-proxy/docker.sock'
+      - '-proxysocketendpointfilemode=0600'
+      - '-allowbindmountfrom=/dev/bus/usb' # the probe's only bind mount
+      - '-allowHEAD=/_ping'
+      - '-allowGET=/_ping'
+      - '-allowGET=(/v1\.[0-9]+)?/containers/json'
+      - '-allowGET=(/v1\.[0-9]+)?/containers/[^/]+/json'
+      - '-allowGET=(/v1\.[0-9]+)?/images/.+/json' # image names hold slashes
+      - '-allowGET=(/v1\.[0-9]+)?/volumes/[^/]+'
+      - '-allowPOST=(/v1\.[0-9]+)?/containers/create'
+      - '-allowPOST=(/v1\.[0-9]+)?/containers/[^/]+/(start|stop|wait)'
+      - '-allowPOST=(/v1\.[0-9]+)?/images/create'
+      - '-allowPOST=(/v1\.[0-9]+)?/volumes/create'
+      - '-allowPUT=(/v1\.[0-9]+)?/containers/[^/]+/archive'
+      - '-allowDELETE=(/v1\.[0-9]+)?/containers/[^/]+'
+      - '-allowDELETE=(/v1\.[0-9]+)?/volumes/[^/]+'
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - docker-proxy:/run/docker-proxy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  # In memory, owned by the control plane's uid and closed to everyone else.
+  docker-proxy:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=65532,gid=65532,mode=0700

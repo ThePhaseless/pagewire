@@ -204,3 +204,13 @@ type PodRestarter interface {
 type AgentTokenSource interface {
 	AgentToken(ctx context.Context) (string, error)
 }
+
+// USBDeviceSetter is an optional Backend capability, found by type assertion.
+// Every step that may Apply, the controller passes the matched USB device (nil
+// outside usb mode); the docker backend gives that device's node, and no
+// other, to the daemons that serve the LAN. With beforeApply the backend holds
+// d until the next successful Apply takes it with the new spec, so the worker
+// never pairs the old workload with the new device; without, it takes d now.
+type USBDeviceSetter interface {
+	SetUSBDevice(d *USBDevice, beforeApply bool)
+}

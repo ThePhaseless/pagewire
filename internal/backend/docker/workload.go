@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -21,11 +22,12 @@ import (
 
 // Labels and names of the objects the backend owns.
 const (
-	LabelManagedBy    = "dev.pagewire.managed-by"
+	LabelManagedBy    = "io.github.thephaseless.pagewire.managed-by"
 	ManagedBy         = "pagewire"
-	LabelWorkloadHash = "dev.pagewire.workload-hash"
-	LabelContainer    = "dev.pagewire.container"
-	LabelInit         = "dev.pagewire.init" // "true" only for run-to-completion inits
+	LabelWorkloadHash = "io.github.thephaseless.pagewire.workload-hash"
+	LabelContainer    = "io.github.thephaseless.pagewire.container"
+	LabelInit         = "io.github.thephaseless.pagewire.init"       // "true" only for run-to-completion inits
+	LabelUSBDevice    = "io.github.thephaseless.pagewire.usb-device" // the usbfs node a USB daemon was given
 
 	Prefix        = "pagewire-device-" // + the workload container's name
 	SeedContainer = Prefix + "seed"
@@ -42,7 +44,10 @@ const (
 	// the probe, agent, fetch-blobs and seed containers run.
 	DefaultContainer = "pagewire"
 
-	usbCgroupRule = "c 189:* rwm" // USB character devices, including nodes that appear later
+	// The probe reads every USB device (sysfs, then the IEEE-1284 ID through
+	// usbfs). Opening a device node read-write works on a read-only mount; it
+	// never needs mknod.
+	usbCgroupRule = "c 189:* rw"
 	usbDevDir     = "/dev/bus/usb"
 	stopTimeout   = 10 // seconds, as terminationGracePeriodSeconds
 	seedConfigDir = "/seed/config"
@@ -50,11 +55,13 @@ const (
 )
 
 // plannedContainer is one device container ready for ContainerCreate. RunOnce
-// marks an init that runs to completion.
+// marks an init that runs to completion. usbDaemon marks a LAN-facing daemon
+// that gets the matched printer's usbfs node, and only that, from withDevice.
 type plannedContainer struct {
-	Name    string
-	Opts    client.ContainerCreateOptions
-	RunOnce bool
+	Name      string
+	Opts      client.ContainerCreateOptions
+	RunOnce   bool
+	usbDaemon bool
 }
 
 // namedVolumes maps k8s volume names to the Docker named volume behind them.
@@ -130,7 +137,8 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 	}
 
 	hc := &container.HostConfig{
-		NetworkMode:    "host",
+		NetworkMode: "host",
+		// A daemon with userns-remap refuses host networking without it.
 		UsernsMode:     "host",
 		ReadonlyRootfs: true,
 		CapDrop:        []string{"ALL"},
@@ -164,10 +172,9 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 			})
 		}
 	}
-	if c.USB {
-		// A bind and a cgroup rule, not static Devices: a re-plugged printer
-		// gets a new node, which both still cover.
-		hc.Mounts = append(hc.Mounts, mount.Mount{Type: mount.TypeBind, Source: usbDevDir, Target: usbDevDir})
+	usbDaemon := c.USB && !runOnce
+	if c.USB && runOnce { // the probe, our own code and not LAN-facing
+		hc.Mounts = append(hc.Mounts, mount.Mount{Type: mount.TypeBind, Source: usbDevDir, Target: usbDevDir, ReadOnly: true})
 		hc.DeviceCgroupRules = []string{usbCgroupRule}
 	}
 
@@ -185,8 +192,9 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 	labels[LabelContainer] = c.Name
 	labels[LabelInit] = strconv.FormatBool(runOnce)
 	return plannedContainer{
-		Name:    c.Name,
-		RunOnce: runOnce,
+		Name:      c.Name,
+		RunOnce:   runOnce,
+		usbDaemon: usbDaemon,
 		Opts: client.ContainerCreateOptions{
 			Name: Prefix + c.Name,
 			Config: &container.Config{
@@ -202,6 +210,28 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 			HostConfig: hc,
 		},
 	}, nil
+}
+
+// withDevice returns cs as they run with the matched printer at the usbfs
+// node: each USB daemon gets that node alone (rw, no mknod) and a label naming
+// it. With node "" the USB daemons are left out, never given the whole bus.
+// cs itself is not changed.
+func withDevice(cs []plannedContainer, node string) []plannedContainer {
+	out := make([]plannedContainer, 0, len(cs))
+	for _, c := range cs {
+		if c.usbDaemon {
+			if node == "" {
+				continue
+			}
+			cfg, hc := *c.Opts.Config, *c.Opts.HostConfig
+			cfg.Labels = maps.Clone(cfg.Labels)
+			cfg.Labels[LabelUSBDevice] = node
+			hc.Devices = []container.DeviceMapping{{PathOnHost: node, PathInContainer: node, CgroupPermissions: "rw"}}
+			c.Opts.Config, c.Opts.HostConfig = &cfg, &hc
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // workloadHash identifies a rollout: the spec hash, the planned containers
@@ -253,9 +283,8 @@ func seedContainer(selfImage string) client.ContainerCreateOptions {
 			Labels:      ownerLabels(),
 			Healthcheck: &container.HealthConfig{Test: []string{"NONE"}},
 		},
-		HostConfig: &container.HostConfig{
+		HostConfig: &container.HostConfig{ // no UsernsMode: it never runs, and needs no host namespace
 			NetworkMode:    "none",
-			UsernsMode:     "host",
 			ReadonlyRootfs: true,
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges:true"},

@@ -7,7 +7,7 @@ Versions were read from images built from this repository on 2026-11-24 (linux/a
 - the SBOM attestation published with every image (Go modules, npm packages, Alpine, Debian and Ubuntu packages);
 - `/licenses` in the control-plane image (`go/` for Go modules and the Go standard library, `c/` for the statically linked C libraries, `pagewire/` for this project's `LICENSE`, `NOTICE` and this file);
 - `/usr/share/pagewire/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`;
-- `/usr/share/pagewire/` in the device and driver images also holds `NOTICE`, this file and `SOURCES`, which names the image with the corresponding source (`ghcr.io/thephaseless/<image>:<tag>-sources`). The image label `dev.pagewire.sources` carries the same name.
+- `/usr/share/pagewire/` in the device and driver images also holds `NOTICE`, this file and `SOURCES`, which names the image with the corresponding source (`ghcr.io/thephaseless/<image>:<tag>-sources`). The image label `io.github.thephaseless.pagewire.sources` carries the same name.
 
 Licence cells give the licence of the component's own files. Debian packaging files (`debian/*`) are often GPL-2.0-or-later and are not repeated here; the copyright file in the image has every stanza.
 
@@ -238,7 +238,7 @@ In `pagewire-driver-hplip` the HP plug-in paths are symlinks into the vendor-fil
 
 ## Corresponding source
 
-For every published image tag, CI publishes a matching `-sources` image for the device image and each driver image: `ghcr.io/thephaseless/<image>:<tag>-sources`, for example `main-sources`, `1.2.3-sources`, `1.2-sources` and `1-sources`. The source for `latest` is the newest `<version>-sources`. The `SOURCES` file and the `dev.pagewire.sources` label in each image name its `-sources` image.
+For every published image tag, CI publishes a matching `-sources` image for the device image and each driver image: `ghcr.io/thephaseless/<image>:<tag>-sources`, for example `main-sources`, `1.2.3-sources`, `1.2-sources` and `1-sources`. The source for `latest` is the newest `<version>-sources`. The `SOURCES` file and the `io.github.thephaseless.pagewire.sources` label in each image name its `-sources` image.
 
 Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
 
@@ -259,6 +259,7 @@ These are never in an image, in this repository or in CI:
 - hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. pagewire never opens that page. Its plug-in paths lead into `/blobs`. The driver container mounts the vendor-file volume there only after you accepted HP's licence, and then read-only; before that, `/blobs` does not exist on the read-only root file system. So hplip-printer-app could install the plug-in itself only into a mounted `/blobs`, which happens after acceptance, and the read-only mount stops even that.
 - foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and pagewire adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
 - Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript, foo2zjs, SpliX, HPLIP's free parts) and the SANE backends Ubuntu ships.
+- socket-proxy (`ghcr.io/wollomatic/socket-proxy`, MIT AND Apache-2.0): `compose.docker-proxy.yaml` names its image by digest, and Docker pulls it from its publisher. pagewire does not ship or rebuild it; its licence and source are at https://github.com/wollomatic/socket-proxy
 - The Mopria eSCL specification: pagewire's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.
 
 ## Regenerating these lists

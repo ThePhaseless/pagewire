@@ -365,7 +365,8 @@ type snapshot struct {
 // desired is the outcome of the spec rules.
 type desired struct {
 	spec           *device.Spec
-	apply          bool // false: wait, or leave whatever runs
+	dev            *device.USBDevice // the matched device in usb mode
+	apply          bool              // false: wait, or leave whatever runs
 	phase, message string
 }
 
@@ -385,7 +386,11 @@ func (c *Controller) deviceSpec(mode string, dec device.Decision, cfg *config.Co
 		s.Name, s.Location = cfg.Name, cfg.Location
 	}
 	s.Hash = device.SpecHash(s)
-	return desired{spec: s, apply: true}
+	d := desired{spec: s, apply: true}
+	if mode == device.ModeUSB {
+		d.dev = dec.Device
+	}
+	return d
 }
 
 // decide picks the device spec and phase from the config, inventory and pod state.
@@ -463,7 +468,13 @@ func (c *Controller) step(ctx context.Context) {
 	c.spec = d.spec
 	c.mu.Unlock()
 
-	if hash := device.SpecHash(d.spec); d.apply && c.due(hash, in.now) {
+	hash := device.SpecHash(d.spec)
+	if t, ok := c.backend.(device.USBDeviceSetter); ok && d.apply {
+		// Before Apply, so the backend adopts what runs. Until the backend's
+		// want is this spec, the device waits for the Apply that brings it.
+		t.SetUSBDevice(d.dev, !c.applied || hash != c.appliedHash)
+	}
+	if d.apply && c.due(hash, in.now) {
 		actx, cancel := context.WithTimeout(ctx, applyTimeout)
 		err := c.backend.Apply(actx, d.spec)
 		cancel()

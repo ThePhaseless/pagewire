@@ -213,7 +213,7 @@ jobs:
         run: |
           DOCKER_GID=0 docker compose -f compose.docker.yaml logs --tail=500
           docker ps -a
-          for c in $(docker ps -aq --filter label=dev.pagewire.managed-by=pagewire); do
+          for c in $(docker ps -aq --filter label=io.github.thephaseless.pagewire.managed-by=pagewire); do
             echo "::group::$c"
             docker logs --tail=200 "$c"
             echo "::endgroup::"
@@ -222,8 +222,8 @@ jobs:
       - if: always()
         run: |
           DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
-          docker ps -aq --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker rm -fv
-          docker volume ls -q --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker volume rm
+          docker ps -aq --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker rm -fv
+          docker volume ls -q --filter label=io.github.thephaseless.pagewire.managed-by=pagewire | xargs -r docker volume rm
 
   # The VERSION build arg: the branch or tag name with each run of characters a tag cannot hold
   # replaced by `-`, as docker/metadata-action does for type=ref tags. A manual run on renovate/foo
