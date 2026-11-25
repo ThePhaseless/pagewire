@@ -1,0 +1,136 @@
+pappl-retrofit 1.0b3 leaks file descriptors in the printer application's
+server process: one /dev/null per CUPS backend on every device listing
+(Find-Devices), one per backend launch and raster job, and one PPD file per
+driver setup. Once the numbers below 1024 are used up, the next select() on a
+new descriptor ends the process ("bit out of range 0 - FD_SETSIZE on fd_set").
+
+This is the upstream fix, unchanged; no pappl-retrofit tag holds it yet. Drop
+this patch once PAPPL_RETROFIT_COMMIT moves to a tag that does.
+https://github.com/OpenPrinting/pappl-retrofit/commit/9e8cfd03c76f9fb26d88914ad66afedab7ab283b
+
+From 9e8cfd03c76f9fb26d88914ad66afedab7ab283b Mon Sep 17 00:00:00 2001
+From: Ronit Mehta <ronitdmehta@gmail.com>
+Date: Sat, 14 Nov 2026 05:21:01 +0530
+Subject: [PATCH] Close leaked /dev/null and PPD file descriptors in parent
+ process
+
+cfFilterPOpen() forks and closes inputfd/outputfd in the child process on exit, but does not close the caller-supplied file descriptor in the parent process. Passing open("/dev/null", O_RDWR) inline to cfFilterPOpen() in _prCUPSDevList() and _prCUPSDevLaunchBackend() (and leaving nullfd unclosed after cfFilterPOpen() in _prRasterPrepareJob()) leaked an open /dev/null descriptor in the parent process on every backend discovery, backend launch, and raster job.
+
+Similarly, ppdOpen2() does not close the cups_file_t * returned by ppdCollectionGetPPD() in _prDriverSetup(), leaving the opened PPD file descriptor open in the server process.
+
+Store the /dev/null descriptor in nullfd and close it in the parent after cfFilterPOpen(), and close tempfp with cupsFileClose() after ppdOpen2() (as well as on cupsCreateTempFd() failure).
+
+Fixes #53
+
+Signed-off-by: Ronit Mehta <ronitdmehta@gmail.com>
+---
+ pappl-retrofit/cups-backends.c  | 28 +++++++++++++++++++---------
+ pappl-retrofit/pappl-retrofit.c | 12 +++++++++---
+ pappl-retrofit/print-job.c      |  2 ++
+ 3 files changed, 30 insertions(+), 12 deletions(-)
+
+diff --git a/pappl-retrofit/cups-backends.c b/pappl-retrofit/cups-backends.c
+index 22de520..0721da9 100644
+--- a/pappl-retrofit/cups-backends.c
++++ b/pappl-retrofit/cups-backends.c
+@@ -251,6 +251,7 @@ _prCUPSDevList(pappl_device_cb_t cb,
+ 	        *info,		// Device info
+ 	        *device_id;	// 1284 device ID
+   size_t        bytes;          // Bytes read from pipe
++  int           nullfd;         // File descriptor for /dev/null
+   pr_backend_device_t *device;  // New device
+ 
+   // Common arguments amd parameters for calling the CUPS backends in
+@@ -402,10 +403,14 @@ _prCUPSDevList(pappl_device_cb_t cb,
+ 	backends[num_backends + 1].name = NULL;
+ 
+       // Launch the backend with pipe providing backend's stdout
+-      if ((backend->pipe = cfFilterPOpen(ppdFilterExternalCUPS,
+-					 open("/dev/null", O_RDWR), -1,
+-					 0, &filter_data, &backend_params,
+-					 &(backend->pid))) == 0)
++      nullfd = open("/dev/null", O_RDWR);
++      backend->pipe = cfFilterPOpen(ppdFilterExternalCUPS,
++				    nullfd, -1,
++				    0, &filter_data, &backend_params,
++				    &(backend->pid));
++      if (nullfd >= 0)
++	close(nullfd);
++      if (backend->pipe == 0)
+       {
+ 	_prCUPSDevLog(&devlog_data, PAPPL_LOGLEVEL_ERROR,
+ 		      "Unable to execute '%s' - %s\n",
+@@ -754,6 +759,7 @@ _prCUPSDevLaunchBackend(pappl_device_t *device)
+   pr_cups_device_data_t *device_data =
+     (pr_cups_device_data_t *)papplDeviceGetData(device);
+   char buf[2048];
++  int nullfd;
+ 
+ 
+   if (!device_data)
+@@ -828,11 +834,15 @@ _prCUPSDevLaunchBackend(pappl_device_t *device)
+   device_data->sidefd = device_data->filter_data->side_pipe[0];
+ 
+   // Launch the backend with pipe providing backend's stdin
+-  if ((device_data->inputfd =
+-       cfFilterPOpen(ppdFilterExternalCUPS,
+-		     -1, open("/dev/null", O_RDWR),
+-		     0, device_data->filter_data, &device_data->backend_params,
+-		     &device_data->backend_pid)) == 0)
++  nullfd = open("/dev/null", O_RDWR);
++  device_data->inputfd =
++    cfFilterPOpen(ppdFilterExternalCUPS,
++		  -1, nullfd,
++		  0, device_data->filter_data, &device_data->backend_params,
++		  &device_data->backend_pid);
++  if (nullfd >= 0)
++    close(nullfd);
++  if (device_data->inputfd == 0)
+   {
+     papplDeviceError(device,
+ 		     "Unable to execute '%s' - %s\n",
+diff --git a/pappl-retrofit/pappl-retrofit.c b/pappl-retrofit/pappl-retrofit.c
+index ca6b965..8e18657 100644
+--- a/pappl-retrofit/pappl-retrofit.c
++++ b/pappl-retrofit/pappl-retrofit.c
+@@ -1337,9 +1337,12 @@ _prDriverSetup(
+       }
+     }
+ 
+-    if ((ppd = ppdOpen2(ppdCollectionGetPPD(ppd_path->ppd_path, NULL,
+-					    (cf_logfunc_t)papplLog,
+-					    system))) == NULL)
++    tempfp = ppdCollectionGetPPD(ppd_path->ppd_path, NULL,
++				 (cf_logfunc_t)papplLog,
++				 system);
++    ppd = ppdOpen2(tempfp);
++    cupsFileClose(tempfp);
++    if (ppd == NULL)
+     {
+       ppd_status_t	err;		// Last error in file
+       int		line;		// Line number in file
+@@ -1476,8 +1479,11 @@ _prDriverSetup(
+ 	extension->temp_ppd_name = strdup(tempfile);
+       }
+       else
++      {
++	cupsFileClose(tempfp);
+ 	papplLog(system, PAPPL_LOGLEVEL_WARN,
+ 		 "Unable to create physical PPD file for the CUPS filter, filter may not work correctly.");
++      }
+     }
+     else
+       papplLog(system, PAPPL_LOGLEVEL_DEBUG,
+diff --git a/pappl-retrofit/print-job.c b/pappl-retrofit/print-job.c
+index cf330ab..473710c 100644
+--- a/pappl-retrofit/print-job.c
++++ b/pappl-retrofit/print-job.c
+@@ -1869,6 +1869,8 @@ _prRasterPrepareJob(
+   job_data->device_fd = cfFilterPOpen(cfFilterChain, -1, nullfd,
+ 				      0, job_data->filter_data, job_data->chain,
+ 				      &(job_data->device_pid));
++  if (nullfd >= 0)
++    close(nullfd);
+ 
+   if (job_data->device_fd < 0)
+   {

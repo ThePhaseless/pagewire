@@ -26,6 +26,8 @@ ARG PUSHED_IMAGE=scratch
 
 # PAPPL and pappl-retrofit, both under /usr/local. The rock's PAPPL edits are in
 # images/driver/patches/pappl-max-vendor.patch (PAPPL_MAX_VENDOR is still 32 in 1.4.12).
+# images/driver/patches/pappl-retrofit-fd-leak.patch is upstream's fix for the
+# descriptors 1.0b3 leaks on every device listing; drop it with the first tag that has it.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS pappl-base
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 ARG PAPPL_COMMIT
@@ -36,7 +38,7 @@ RUN apt-get update \
       libcups2-dev libcupsfilters-dev libppd-dev libgnutls28-dev libavahi-client-dev \
       libjpeg-dev libpng-dev libusb-1.0-0-dev libpam0g-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
-COPY images/driver/patches/pappl-max-vendor.patch /src/
+COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-retrofit-fd-leak.patch /src/
 WORKDIR /src/pappl
 # The installed patch is the notice of modification that Apache-2.0 4(b) asks for.
 RUN git init -q . \
@@ -54,12 +56,13 @@ RUN git init -q . \
  && git fetch -q --depth 1 https://github.com/OpenPrinting/pappl-retrofit.git "${PAPPL_RETROFIT_COMMIT}" \
  && git checkout -q FETCH_HEAD \
  && git archive --prefix="pappl-retrofit-${PAPPL_RETROFIT_COMMIT}/" -o "/out/upstream/pappl-retrofit-${PAPPL_RETROFIT_COMMIT}.tar.gz" HEAD \
+ && patch -p1 < /src/pappl-retrofit-fd-leak.patch \
  && ./autogen.sh \
  && ./configure --prefix=/usr/local \
  && make -j"$(nproc)" \
  && make install \
  && ldconfig \
- && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING \
+ && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING /src/pappl-retrofit-fd-leak.patch \
  # pappl-retrofit runs CUPS backends from "/usr/lib/<app>/backend" (a
  # symlink to CUPS's serverbin that the apps' "make install" makes only for
  # prefix /usr), not from CUPS's /usr/lib/cups/backend. The targets below
@@ -367,7 +370,7 @@ COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/arm64.tx
 FROM lists-${SOURCES_LISTS} AS lists
 
 # Corresponding source: the union of the package lists, plus git archives of the
-# pinned commits of everything built from source, the patch and the build files.
+# pinned commits of everything built from source, the patches and the build files.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sources-fetch
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
 COPY --from=lists /lists/ /sources/lists/
