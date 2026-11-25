@@ -456,6 +456,22 @@ describe("Print view", () => {
     expect(printButton().hasAttribute("disabled")).toBe(true);
   });
 
+  test("a printing job uses a different badge tone than a waiting one", async () => {
+    const base: Job = {
+      id: 1,
+      name: "waiting.pdf",
+      state: "pending",
+      reasons: [],
+      createdAt: "2026-11-24T17:00:00+01:00",
+    };
+    jobs = [base, { ...base, id: 2, name: "printing.pdf", state: "processing" }];
+    await renderPrint(ready);
+    await waitFor(() => expect(within(row("printing.pdf")).getByText("Printing")).toBeTruthy());
+    const tone = (name: string) => row(name).querySelector(".ui-badge")?.getAttribute("data-tone");
+    expect(tone("waiting.pdf")).toBe("busy");
+    expect(tone("printing.pdf")).toBe("active");
+  });
+
   test("a job row moves from pending to completed after a job event, and can be canceled while pending", async () => {
     const job: Job = {
       id: 7,

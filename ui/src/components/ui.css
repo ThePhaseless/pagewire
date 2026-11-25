@@ -745,6 +745,10 @@
     background: var(--busy);
   }
 
+  .ui-badge[data-tone="active"] .ui-badge-dot {
+    background: var(--accent);
+  }
+
   .ui-badge[data-tone="problem"] .ui-badge-dot {
     background: var(--problem);
   }
@@ -755,6 +759,10 @@
 
   .ui-badge[data-tone="busy"] .ui-badge-label {
     color: var(--busy-text);
+  }
+
+  .ui-badge[data-tone="active"] .ui-badge-label {
+    color: var(--accent-text);
   }
 
   .ui-badge[data-tone="problem"] .ui-badge-label {
@@ -779,6 +787,10 @@
 
   .ui-badge[data-tone="busy"] .ui-badge-dot[data-pulse]::after {
     color: var(--busy);
+  }
+
+  .ui-badge[data-tone="active"] .ui-badge-dot[data-pulse]::after {
+    color: var(--accent);
   }
 
   .ui-badge[data-tone="ok"] .ui-badge-dot[data-pulse]::after {

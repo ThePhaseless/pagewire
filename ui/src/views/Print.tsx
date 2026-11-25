@@ -114,7 +114,7 @@ export function helpFor(name: string, detected: string | null | undefined): stri
 
 const jobTone: Record<Job["state"], Tone> = {
   pending: "busy",
-  processing: "busy",
+  processing: "active",
   completed: "ok",
   canceled: "idle",
   aborted: "problem",

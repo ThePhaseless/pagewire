@@ -565,7 +565,7 @@ export function Card({
   );
 }
 
-export type Tone = "ok" | "busy" | "problem" | "idle";
+export type Tone = "ok" | "busy" | "active" | "problem" | "idle";
 
 /** A coloured dot plus a text label; the colour never carries meaning alone. */
 export function StatusBadge({

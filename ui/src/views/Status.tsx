@@ -45,7 +45,7 @@ const endpointTone: Record<StatusDTO["printer"]["state"], Tone> = {
 
 const jobTone: Record<Job["state"], Tone> = {
   pending: "busy",
-  processing: "busy",
+  processing: "active",
   completed: "ok",
   canceled: "idle",
   aborted: "problem",
