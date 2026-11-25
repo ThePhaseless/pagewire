@@ -10,8 +10,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +26,7 @@ import (
 
 	"github.com/ThePhaseless/printscan/internal/api"
 	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/printscan/internal/backend/docker"
 	"github.com/ThePhaseless/printscan/internal/backend/k8s"
 	"github.com/ThePhaseless/printscan/internal/backend/sim"
 	"github.com/ThePhaseless/printscan/internal/catalog"
@@ -53,6 +58,7 @@ type serveFlags struct {
 	agentURL, registry, tag, uiDir              string
 	allowedHosts, proxySecretHeader             string
 	proxySecretFile, simScanDelay               string
+	dockerHost, dockerContainer, hostIP         string
 	proxySecret                                 string // from PRINTSCAN_PROXY_SECRET or the file; never a flag
 	internalListenSet                           bool
 	scanDelay                                   time.Duration // parsed --sim-scan-delay
@@ -60,6 +66,46 @@ type serveFlags struct {
 
 // simAllowedHosts is the sim backend's default Host allowlist.
 var simAllowedHosts = []string{"localhost", "127.0.0.1", "[::1]"}
+
+// The Engine socket and the files that mark a container; vars so tests can
+// point them at temp files.
+var (
+	dockerSocket     = "/var/run/docker.sock"
+	containerMarkers = []string{"/.dockerenv", "/run/.containerenv"}
+)
+
+// defaultBackend picks --backend's default: k8s inside Kubernetes; docker in a
+// container with DOCKER_HOST set or the Engine socket mounted; else sim. A host
+// shell's DOCKER_HOST (rootless Docker, colima) alone does not pick docker.
+func defaultBackend() string {
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return controller.BackendK8s
+	}
+	inContainer := slices.ContainsFunc(containerMarkers, func(m string) bool { _, err := os.Stat(m); return err == nil })
+	if inContainer {
+		if _, err := os.Stat(dockerSocket); err == nil || os.Getenv("DOCKER_HOST") != "" {
+			return controller.BackendDocker
+		}
+	}
+	return controller.BackendSim
+}
+
+// dockerAgentURL is the agent's control-plane URL on the docker backend: the
+// explicit --agent-url, else http://<internal listen host>:<port>, with
+// 127.0.0.1 for an empty or unspecified host (the agent shares the host network).
+func dockerAgentURL(explicit, internalListen string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	host, port, err := net.SplitHostPort(internalListen)
+	if err != nil || port == "" {
+		return "", fmt.Errorf("--internal-listen %q: want host:port to derive --agent-url", internalListen)
+	}
+	if a, err := netip.ParseAddr(host); host == "" || (err == nil && a.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port), nil
+}
 
 func parseServeFlags(args []string) (serveFlags, error) {
 	var f serveFlags
@@ -70,8 +116,8 @@ func parseServeFlags(args []string) (serveFlags, error) {
 	if fl.NArg() > 0 {
 		return f, fmt.Errorf("serve takes no arguments, got %q", fl.Args())
 	}
-	if f.backend != controller.BackendK8s && f.backend != controller.BackendSim {
-		return f, fmt.Errorf("--backend must be k8s or sim, got %q", f.backend)
+	if f.backend != controller.BackendK8s && f.backend != controller.BackendDocker && f.backend != controller.BackendSim {
+		return f, fmt.Errorf("--backend must be k8s, docker or sim, got %q", f.backend)
 	}
 	if f.esclClient != "mfp" && f.esclClient != "xml" {
 		return f, fmt.Errorf("--escl-client must be mfp or xml, got %q", f.esclClient)
@@ -96,6 +142,42 @@ func parseServeFlags(args []string) (serveFlags, error) {
 	return f, setLogLevel(f.logLevel)
 }
 
+// cgroupMemoryMax holds the container's cgroup v2 memory limit.
+const cgroupMemoryMax = "/sys/fs/cgroup/memory.max"
+
+// setMemoryLimit sets the Go soft memory limit to 80% of the cgroup memory
+// limit in path, unless GOMEMLIMIT is set. The 20% left over covers memory the
+// Go runtime does not count but the cgroup does (kernel socket
+// buffers, page tables, mapped binary pages), so the GC works harder before
+// the OOM killer acts.
+func setMemoryLimit(path string) {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return
+	}
+	limit := cgroupMemoryLimit(path)
+	if limit <= 0 {
+		slog.Debug("no cgroup v2 memory limit found; Go memory limit not set", "path", path)
+		return
+	}
+	debug.SetMemoryLimit(limit / 5 * 4)
+	slog.Debug("memory limit from cgroup", "cgroupBytes", limit, "goMemLimitBytes", limit/5*4)
+}
+
+// cgroupMemoryLimit returns the limit in a cgroup v2 memory.max file in bytes,
+// or 0 when the file is missing or says "max" (no limit).
+// shortcut: cgroup v2 only; on a cgroup v1 host set GOMEMLIMIT by hand.
+func cgroupMemoryLimit(path string) int64 {
+	b, err := os.ReadFile(path) //nolint:gosec // the cgroup path, or a temp file in tests
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // readProxySecret takes the proxy secret from the environment or a file,
 // never both. An empty file is an error; an unset secret is "".
 func readProxySecret(fromEnv, file string) (string, error) {
@@ -117,9 +199,9 @@ func readProxySecret(fromEnv, file string) (string, error) {
 }
 
 // allowedHostsFor is the Host allowlist for --allowed-hosts: the backend's
-// default when empty (sim: loopback names; k8s: no check), none for "*",
-// else the comma-separated names.
-func allowedHostsFor(backend, value string) []string {
+// default when empty (sim: loopback names; docker: loopback names plus hostIP;
+// k8s: no check), none for "*", else the comma-separated names.
+func allowedHostsFor(backend, value, hostIP string) []string {
 	if strings.TrimSpace(value) == "*" {
 		return nil
 	}
@@ -129,25 +211,30 @@ func allowedHostsFor(backend, value string) []string {
 			hosts = append(hosts, h)
 		}
 	}
-	if len(hosts) == 0 && backend == controller.BackendSim {
-		return simAllowedHosts
+	if len(hosts) > 0 {
+		return hosts
 	}
-	return hosts
+	switch backend {
+	case controller.BackendSim:
+		return simAllowedHosts
+	case controller.BackendDocker:
+		if hostIP == "" || slices.Contains(simAllowedHosts, hostIP) {
+			return simAllowedHosts
+		}
+		return append(slices.Clone(simAllowedHosts), hostIP)
+	}
+	return nil
 }
 
 // serveFlagSet defines serve's flags into f, with usage written to out.
 func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fl.SetOutput(out)
-	defBackend := controller.BackendSim
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		defBackend = controller.BackendK8s
-	}
 	fl.StringVar(&f.listen, "listen", env("PRINTSCAN_LISTEN", ":8080"), "public listen address (env PRINTSCAN_LISTEN)")
 	fl.StringVar(&f.internalListen, "internal-listen", env("PRINTSCAN_INTERNAL_LISTEN", ":8081"), "agent listen address (env PRINTSCAN_INTERNAL_LISTEN)")
 	fl.StringVar(&f.configPath, "config", env("PRINTSCAN_CONFIG", "/data/printscan.yaml"), "config file (env PRINTSCAN_CONFIG)")
 	fl.StringVar(&f.dataDir, "data-dir", env("PRINTSCAN_DATA_DIR", "/data"), "data directory (env PRINTSCAN_DATA_DIR)")
-	fl.StringVar(&f.backend, "backend", env("PRINTSCAN_BACKEND", defBackend), "k8s or sim (env PRINTSCAN_BACKEND)")
+	fl.StringVar(&f.backend, "backend", env("PRINTSCAN_BACKEND", defaultBackend()), "k8s, docker or sim (env PRINTSCAN_BACKEND)")
 	fl.StringVar(&f.simDevice, "sim-device", env("PRINTSCAN_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PRINTSCAN_SIM_DEVICE)")
 	// hidden test seam (e2e scan cancel): sim backend only, holds each scanned page this long
 	fl.StringVar(&f.simScanDelay, "sim-scan-delay", env("PRINTSCAN_SIM_SCAN_DELAY", "0s"), "")
@@ -157,11 +244,14 @@ func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 	fl.StringVar(&f.owner, "k8s-owner", env("PRINTSCAN_K8S_OWNER", "printscan"), "owner Deployment (env PRINTSCAN_K8S_OWNER)")
 	fl.StringVar(&f.usbResource, "usb-resource", env("PRINTSCAN_USB_RESOURCE", ""), "USB extended resource, e.g. devic.es/printer (env PRINTSCAN_USB_RESOURCE)")
 	fl.StringVar(&f.blobPVC, "blob-pvc", env("PRINTSCAN_BLOB_PVC", "printscan-blobs"), "blob PVC (env PRINTSCAN_BLOB_PVC)")
-	fl.StringVar(&f.agentURL, "agent-url", env("PRINTSCAN_AGENT_URL", ""), "control-plane URL for the agent (env PRINTSCAN_AGENT_URL; default http://printscan.<ns>.svc:8081)")
+	fl.StringVar(&f.agentURL, "agent-url", env("PRINTSCAN_AGENT_URL", ""), "control-plane URL for the agent (env PRINTSCAN_AGENT_URL; default k8s: http://printscan.<ns>.svc:8081; docker: http://<internal host or 127.0.0.1>:<internal port>)")
+	fl.StringVar(&f.dockerHost, "docker-host", env("DOCKER_HOST", ""), "docker: Engine API address, unix:// or tcp:// (env DOCKER_HOST; default unix:///var/run/docker.sock)")
+	fl.StringVar(&f.dockerContainer, "docker-container", env("PRINTSCAN_DOCKER_CONTAINER", docker.DefaultContainer), "docker: the control plane's container, whose image the probe and agent run (env PRINTSCAN_DOCKER_CONTAINER)")
+	fl.StringVar(&f.hostIP, "host-ip", env("PRINTSCAN_HOST_IP", ""), "docker: the address the device serves on (env PRINTSCAN_HOST_IP; default the default route's source address)")
 	fl.StringVar(&f.registry, "image-registry", env("PRINTSCAN_IMAGE_REGISTRY", "ghcr.io/thephaseless"), "image registry (env PRINTSCAN_IMAGE_REGISTRY)")
 	fl.StringVar(&f.tag, "image-tag", env("PRINTSCAN_IMAGE_TAG", k8s.ImageTag(version)), "device and driver image tag (env PRINTSCAN_IMAGE_TAG)")
 	fl.StringVar(&f.allowedHosts, "allowed-hosts", env("PRINTSCAN_ALLOWED_HOSTS", ""),
-		"comma-separated host names the UI and API answer; others get 421. * turns the check off (env PRINTSCAN_ALLOWED_HOSTS; default: localhost,127.0.0.1,[::1] with the sim backend, no check with k8s)")
+		"comma-separated host names the UI and API answer; others get 421. * turns the check off (env PRINTSCAN_ALLOWED_HOSTS; default: localhost,127.0.0.1,[::1] with the sim backend, those plus the host IP with docker, no check with k8s)")
 	fl.StringVar(&f.proxySecretHeader, "proxy-secret-header", env("PRINTSCAN_PROXY_SECRET_HEADER", api.DefaultProxySecretHeader),
 		"header that must carry the proxy secret on /api/ requests (env PRINTSCAN_PROXY_SECRET_HEADER)")
 	fl.StringVar(&f.proxySecretFile, "proxy-secret-file", env("PRINTSCAN_PROXY_SECRET_FILE", ""),
@@ -193,6 +283,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	if err != nil {
 		return err
 	}
+	setMemoryLimit(cgroupMemoryMax)
 	// Everything below stops when serve returns, also on a listen error.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -215,6 +306,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 
 	var backend device.Backend
 	var simBackend *sim.Backend
+	var dockerBackend *docker.Backend
 	usbAvailable, usbUnavailable := f.usbResource != "", ""
 	switch f.backend {
 	case controller.BackendK8s:
@@ -224,6 +316,13 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		if !usbAvailable {
 			usbUnavailable = noUSBResource
 		}
+	case controller.BackendDocker:
+		if dockerBackend, err = newDockerBackend(f, overrides); err != nil {
+			return err
+		}
+		backend = dockerBackend
+		// The backend's USB gate covers a host without a printer.
+		usbAvailable = true
 	default:
 		simBackend = sim.New(sim.Options{Fixture: f.simDevice, DataDir: f.dataDir, ScanDelay: f.scanDelay})
 		backend = simBackend
@@ -244,7 +343,8 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	if simBackend != nil {
 		simBackend.SetReporter(ctrl.AgentReport)
 		// The sim devices live in this process; stop them on the way out. Never
-		// on k8s, where Apply(nil) deletes the device Deployment.
+		// on k8s or docker, where Apply(nil) deletes the device workload, which
+		// keeps serving the LAN across control-plane restarts.
 		defer func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 			defer cancel()
@@ -311,6 +411,14 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		LastGoodPath: filepath.Join(f.dataDir, lastGoodName),
 	}
 
+	// shortcut: the docker allowlist takes the host IP once at start, so a DHCP
+	// change (or a route lookup that fell back to 127.0.0.1) needs a restart or
+	// --allowed-hosts/--host-ip; upgrade to a per-request check if that bites.
+	hostIP := f.hostIP
+	if dockerBackend != nil && hostIP == "" && strings.TrimSpace(f.allowedHosts) == "" {
+		hostIP = dockerBackend.HostIP(ctx)
+	}
+
 	var tokens device.AgentTokenSource
 	if ts, ok := backend.(device.AgentTokenSource); ok {
 		tokens = ts
@@ -331,7 +439,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		Ready:       ready.Load,
 		BaseContext: ctx,
 
-		AllowedHosts:      allowedHostsFor(f.backend, f.allowedHosts),
+		AllowedHosts:      allowedHostsFor(f.backend, f.allowedHosts, hostIP),
 		ProxySecret:       f.proxySecret,
 		ProxySecretHeader: f.proxySecretHeader,
 	})
@@ -351,6 +459,10 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { ctrl.Run(ctx) })
+	if dockerBackend != nil {
+		// The worker stops with ctx and never tears the device containers down.
+		wg.Go(func() { dockerBackend.Run(ctx) })
+	}
 	wg.Go(func() { scans.RunJanitor(ctx) })
 	defer func() { cancel(); wg.Wait() }()
 
@@ -457,6 +569,22 @@ func newK8sBackend(f serveFlags, overrides map[string]string) (*k8s.Backend, err
 		Namespace: ns, Owner: k8s.Owner{Name: f.owner},
 		Registry: f.registry, Tag: f.tag, Overrides: overrides,
 		AgentURL: agentURL, USBResource: f.usbResource, BlobPVC: f.blobPVC,
+	}), nil
+}
+
+func newDockerBackend(f serveFlags, overrides map[string]string) (*docker.Backend, error) {
+	agentURL, err := dockerAgentURL(f.agentURL, f.internalListen)
+	if err != nil {
+		return nil, err
+	}
+	eng, err := docker.NewClient(f.dockerHost)
+	if err != nil {
+		return nil, fmt.Errorf("docker client: %w", err)
+	}
+	return docker.New(eng, docker.Params{
+		Registry: f.registry, Tag: f.tag, Overrides: overrides,
+		AgentURL: agentURL, Container: f.dockerContainer, HostIP: f.hostIP,
+		TokenFile: filepath.Join(f.dataDir, "agent-token"), SysRoot: "/sys",
 	}), nil
 }
 

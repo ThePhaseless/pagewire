@@ -1,6 +1,6 @@
 # printscan
 
-printscan turns one USB multifunction printer into a network printer and scanner that phones, tablets and computers find by themselves, plus a web page for printing and scanning from any browser. It runs on Kubernetes and drives the OpenPrinting daemons (ipp-usb, PAPPL printer applications, AirSane, Avahi) for you. You describe the printer in one YAML file, or let the setup wizard write it.
+printscan turns one USB multifunction printer into a network printer and scanner that phones, tablets and computers find by themselves, plus a web page for printing and scanning from any browser. It runs on Kubernetes or on a single Docker or Podman host, and drives the OpenPrinting daemons (ipp-usb, PAPPL printer applications, AirSane, Avahi) for you. You describe the printer in one YAML file, or let the setup wizard write it.
 
 Clients see an IPP printer that driverless (IPP Everywhere) clients can use, and an eSCL scanner. These are the protocols that AirPrint and Mopria clients speak. printscan is not certified by Apple, the Mopria Alliance or the Printer Working Group, and it is not affiliated with them. AirPrint, Mopria and IPP Everywhere are trademarks of their owners (see `NOTICE`).
 
@@ -17,9 +17,10 @@ The catalog targets USB printers and multifunction devices of these kinds: anyth
 | Control plane | Deployment `printscan`, image `printscan` | Web UI and REST API on `:8080`, the agent endpoint on `:8081`. Reads `/data/printscan.yaml`, picks drivers from its catalog and renders the device pod through the Kubernetes API |
 | Device pod | Deployment `printscan-device`, owned by the control plane | Host network, so mDNS and the IPP and eSCL ports sit on the node's LAN address. Holds dbus, Avahi, the agent, and then ipp-usb, or a PAPPL printer application plus AirSane |
 | Agent | Sidecar in the device pod, same image as the control plane | Probes USB, sets up the PAPPL print queue over loopback IPP, browses DNS-SD, downloads and checks vendor archives so their licence can be shown, and reports to the control plane every 5 s. It opens no port |
+| Device containers (docker backend) | `printscan-device-*` containers created by the control plane through the Engine API | Same daemons as the device pod, on the host network |
 | Simulated backend | Inside the control plane, outside Kubernetes | In-process virtual printer and scanner, for trying printscan and for tests |
 
-printscan never runs commands itself: it talks IPP, eSCL, D-Bus and the Kubernetes API.
+printscan never runs commands itself: it talks IPP, eSCL, D-Bus and the Kubernetes API or the Docker Engine API.
 
 Driver choice is data in `internal/catalog/catalog.yaml`. The first matching rule wins:
 
@@ -37,6 +38,8 @@ You can override the printer driver and the scanner in the config.
 - Two ReadWriteOnce volumes: one for the config and scans, one for vendor files. The config watcher relies on inotify, which network RWX file systems do not deliver. The device pod for a USB printer mounts the vendor-file volume, so it must be mountable on the node with the printer.
 - An auth proxy in front of the web UI (see Security).
 
+This list is for Kubernetes. For a single Docker or Podman host, see [Deploying with Docker or Podman](#deploying-with-docker-or-podman).
+
 `docs/kubernetes.md` walks through each of these: USB passthrough, the device plugin, the namespace and admission policy, volumes, ingress, the NetworkPolicy, the image tag and the memory limit.
 
 ## Quick start (simulated printer)
@@ -49,7 +52,7 @@ Compose builds the image from source, which takes several minutes the first time
 
 Open http://127.0.0.1:8080. The setup wizard detects a simulated IPP-over-USB printer, writes the config, and brings up a virtual printer and scanner you can print to and scan from in the browser. Nothing touches real hardware.
 
-Compose is a demo. It runs only the simulated backend, and a real printer needs Kubernetes with generic-device-plugin (see Requirements).
+Compose is a demo. It runs only the simulated backend. For a real printer, use Kubernetes with generic-device-plugin (see Requirements) or `compose.docker.yaml` (see [Deploying with Docker or Podman](#deploying-with-docker-or-podman)).
 
 It publishes port 8080 on 127.0.0.1 only. If you change that to reach it from another machine, also set `PRINTSCAN_ALLOWED_HOSTS` to the host name or IP address you open it with, or to `*`. With the simulated backend printscan answers only `localhost`, `127.0.0.1` and `[::1]` by default, and any other host gets 421.
 
@@ -75,6 +78,85 @@ Also:
 - To lock down the namespace beyond the `privileged` Pod Security level, apply `deploy/examples/admission-policy.yaml` (see `docs/kubernetes.md`).
 
 Open the UI. With no config file the wizard starts, shows what the agent found on USB, and writes the file.
+
+## Deploying with Docker or Podman
+
+`compose.docker.yaml` runs printscan on one Linux host with a USB printer, without Kubernetes. The control plane runs with the docker backend and creates the device containers itself through the Docker Engine API: `printscan-device-probe`, `-dbus`, `-avahi`, `-agent`, then `-ipp-usb`, or a printer application and `-airsane` (plus `-fetch-blobs` for a vendor file). These are the same containers as the Kubernetes device pod, on the host network, with read-only root file systems, all capabilities dropped and no privilege escalation. None of them is privileged. The containers that use the printer get `/dev/bus/usb` and a device-cgroup rule for USB devices, so a printer that is plugged in again stays reachable. Scratch space for print spools sits on disk (anonymous volumes), not in memory. Config files and the agent token go into named volumes that are recreated on every rollout.
+
+Requirements:
+
+- A Linux host with the printer on USB.
+- Docker Engine 20.10 or newer, or rootful Podman 4 or newer with its API socket enabled.
+- Docker Compose 2.24.4 or newer (the socket proxy override below needs it).
+- No avahi-daemon on the host answering on port 5353. Two mDNS responders on one host make discovery unreliable.
+- Free host ports: 8080 and 8081 (bound to 127.0.0.1 by default), and for the device 8001 to 8004, 8090, 8631 and 60000 to 60009, as on Kubernetes.
+
+Start it from a checkout of this repository:
+
+```sh
+DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose -f compose.docker.yaml up -d
+```
+
+`DOCKER_GID` is the group that owns the Engine socket. The control plane joins that group so it can use the socket. Then open http://127.0.0.1:8080. With no config file the wizard starts, shows what the agent found on USB, and writes the file. The stack is the Compose project `printscan-docker`, apart from the demo `compose.yaml`, so neither one's `up` or `down -v` touches the other's containers or data volume.
+
+The UI listens on 127.0.0.1:8080 only. Put an authenticating proxy in front of it (see Security), or set `PRINTSCAN_LISTEN=:8080` on a trusted LAN. By default printscan answers only `localhost`, `127.0.0.1`, `[::1]` and the host's IP address, and any other host name gets 421. When you reach it by a host name, set `PRINTSCAN_ALLOWED_HOSTS` to that name. The host IP in that list is read once when the control plane starts; restart it after the address changes, or set `PRINTSCAN_HOST_IP`.
+
+On Podman, enable the API socket and point Docker Compose at it:
+
+```sh
+sudo systemctl enable --now podman.socket
+DOCKER_HOST=unix:///run/podman/podman.sock DOCKER_SOCKET=/run/podman/podman.sock DOCKER_GID=0 \
+  docker compose -f compose.docker.yaml up -d
+```
+
+CI runs this path: the Docker Compose CLI against rootful Podman's socket. `podman compose` also works when its provider is docker-compose. podman-compose (the Python tool) is untested. It does not support `!reset` or `!override`, which the socket proxy override needs, and it may handle `userns_mode` and `group_add` differently.
+
+Also:
+
+- Image pinning: set `PRINTSCAN_IMAGE=ghcr.io/thephaseless/printscan:<version>@sha256:<digest>` and, for the device and driver images, `PRINTSCAN_IMAGE_OVERRIDES` (see Images). The probe, agent and fetch-blobs containers run the image of the control-plane container (named `printscan`), so they always match its build. Upgrading the control-plane image, or any change to the device images, their config or the agent URL, recreates the device containers once. A control-plane restart with the same image and config keeps them running.
+- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB printer. The control plane starts nothing until a printer appears, and checks again every 5 s.
+- Connect URIs and the printer address use the source address of the host's default route, read again each time the control plane checks the device. On a host with several networks, or IPv6 only, set `PRINTSCAN_HOST_IP` to the address clients should use.
+- Vendor files, such as HP's plug-in, go into the `printscan-blobs` volume, never into an image. The control plane creates the volume when it is missing and never removes it, and a volume of that name you create yourself is used as it is.
+- Memory: the control plane sets its Go memory limit to 80% of its container memory limit (256Mi on Kubernetes), read from the cgroup; `GOMEMLIMIT` overrides it. `compose.docker.yaml` sets no memory limit for the control plane by default, so there is none; add `mem_limit` to get one. The device containers get the same limits as on Kubernetes.
+- Logs: the device containers use the engine's default log driver. Configure log rotation in the daemon (`/etc/docker/daemon.json`).
+
+Stopping and cleaning up: `docker compose down` stops only the control plane. The device containers keep serving the LAN, because the control plane created them, not Compose. To remove everything:
+
+```sh
+DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
+docker ps -aq --filter label=dev.printscan.managed-by=printscan | xargs -r docker rm -fv
+docker volume ls -q --filter label=dev.printscan.managed-by=printscan | xargs -r docker volume rm
+```
+
+The last command also removes the `printscan-blobs` volume when printscan created it. `down -v` removes the config and stored scans with the data volume; leave out `-v` to keep them.
+
+### Socket proxy
+
+The Engine socket is root-equivalent: whoever can use it can start a privileged container. A socket proxy such as [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) narrows what the control plane can reach to the calls it makes: `/_ping`; list, inspect, create, start, stop, wait for and remove containers, and copy files into them; inspect and pull images; inspect, create and remove volumes. Run the proxy with `CONTAINERS=1 IMAGES=1 VOLUMES=1 POST=1` (check its README for the current variable names), listening on `127.0.0.1:2375`. Then write `compose.override.yaml` next to `compose.docker.yaml`, which drops the socket mount and the extra group:
+
+```yaml
+services:
+  printscan:
+    group_add: !reset []
+    volumes: !override
+      - data:/data
+```
+
+Start the stack with both files, because Compose reads `compose.override.yaml` by itself only when no `-f` is given:
+
+```sh
+PRINTSCAN_DOCKER_HOST=tcp://127.0.0.1:2375 DOCKER_GID=0 \
+  docker compose -f compose.docker.yaml -f compose.override.yaml up -d
+```
+
+`DOCKER_GID` must still be set, to any value, because `compose.docker.yaml` requires it. Creating containers through the proxy is still root-equivalent. Because the control plane uses the host network, the proxy has to listen on the host's loopback address, where every local user can reach it. On a host with other users, keep the socket mount instead.
+
+### Limits
+
+- Rootless Docker and rootless Podman are not supported: they cannot open USB device nodes or apply device-cgroup rules.
+- A daemon with `userns-remap` works: the control plane and every device container set `userns_mode: host`.
+- SELinux hosts need `setsebool -P container_use_devices on` for the USB devices, and `label=disable` (or a policy) for the socket mount.
+- One printscan installation per host. The container names are fixed, and two installations would want the same host ports.
 
 ## Configuration
 
@@ -117,7 +199,7 @@ Each flag has an environment variable:
 | `--internal-listen` | `PRINTSCAN_INTERNAL_LISTEN` | `:8081`; ignored with the sim backend, which opens no agent port |
 | `--config` | `PRINTSCAN_CONFIG` | `/data/printscan.yaml` |
 | `--data-dir` | `PRINTSCAN_DATA_DIR` | `/data` (scans in `/data/scans`) |
-| `--backend` | `PRINTSCAN_BACKEND` | `k8s` inside Kubernetes, else `sim` |
+| `--backend` | `PRINTSCAN_BACKEND` | `k8s` inside Kubernetes; `docker` inside a container that has `DOCKER_HOST` set or the Engine socket mounted; else `sim` |
 | `--sim-device` | `PRINTSCAN_SIM_DEVICE` | `ippusb-mfp`; any fixture in `internal/catalog/fixtures`, or `none` |
 | `--escl-client` | `PRINTSCAN_ESCL_CLIENT` | `mfp`; `xml` selects the fallback client |
 | `--log-level` | `PRINTSCAN_LOG_LEVEL` | `info` |
@@ -125,11 +207,14 @@ Each flag has an environment variable:
 | `--k8s-owner` | `PRINTSCAN_K8S_OWNER` | `printscan` |
 | `--usb-resource` | `PRINTSCAN_USB_RESOURCE` | empty, meaning no USB (simulated mode only) |
 | `--blob-pvc` | `PRINTSCAN_BLOB_PVC` | `printscan-blobs`; `--blob-pvc=` (empty) runs without a vendor-file volume |
-| `--agent-url` | `PRINTSCAN_AGENT_URL` | `http://printscan.<namespace>.svc:8081` |
+| `--agent-url` | `PRINTSCAN_AGENT_URL` | `http://printscan.<namespace>.svc:8081`; docker: `http://<internal host or 127.0.0.1>:<internal port>` |
+| `--docker-host` | `DOCKER_HOST` | the Engine default, `unix:///var/run/docker.sock` |
+| `--docker-container` | `PRINTSCAN_DOCKER_CONTAINER` | `printscan` |
+| `--host-ip` | `PRINTSCAN_HOST_IP` | docker: the default route's source address |
 | `--image-registry` | `PRINTSCAN_IMAGE_REGISTRY` | `ghcr.io/thephaseless` |
 | `--image-tag` | `PRINTSCAN_IMAGE_TAG` | derived from the version (see Images) |
 | | `PRINTSCAN_IMAGE_OVERRIDES` | empty |
-| `--allowed-hosts` | `PRINTSCAN_ALLOWED_HOSTS` | sim: `localhost,127.0.0.1,[::1]`; k8s: no check. `*` turns the check off |
+| `--allowed-hosts` | `PRINTSCAN_ALLOWED_HOSTS` | sim: `localhost,127.0.0.1,[::1]`; docker: those plus the host IP; k8s: no check. `*` turns the check off |
 | `--proxy-secret-header` | `PRINTSCAN_PROXY_SECRET_HEADER` | `X-Printscan-Proxy-Secret` |
 | `--proxy-secret-file` | `PRINTSCAN_PROXY_SECRET_FILE` | empty |
 | | `PRINTSCAN_PROXY_SECRET` | empty; set this or `--proxy-secret-file`, not both |
@@ -190,6 +275,7 @@ A scanned page may be at most 256 MiB, and stored scans may take 1 GiB in total.
 - The agent dials out to the control plane's internal port with a bearer token from a Secret the control plane creates. That connection is plain HTTP inside the cluster. The device pod opens no port of printscan's own.
 - The control plane's Role names every object it may change, except device pods, which it can only list and delete.
 - On the LAN the device pod serves IPP, eSCL and mDNS on the node's address, like a network printer would. ipp-usb also proxies the printer's own web console, and AirSane's web page on port 8090 can start scans. A web page open in a browser on the LAN can send requests to these ports too. PAPPL's admin pages answer only local clients. Treat the LAN as trusted, or restrict these ports on the node.
+- With the docker backend, the control plane holds the Engine socket, which is root-equivalent on the host. It only touches containers and volumes labelled `dev.printscan.managed-by=printscan`. See `SECURITY.md`.
 - Containers drop all capabilities, run with read-only root file systems and no privilege escalation. The containers that open the USB device (probe, ipp-usb, the printer application, AirSane) run as uid 0, because device nodes from the device plugin are owned by root. Everything else runs as non-root users.
 
 Report vulnerabilities as described in `SECURITY.md`.

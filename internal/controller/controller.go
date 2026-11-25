@@ -45,9 +45,9 @@ type ScannerObserver interface {
 // Options configure New.
 type Options struct {
 	Backend        device.Backend
-	BackendName    string           // BackendK8s or BackendSim
+	BackendName    string           // BackendK8s, BackendDocker or BackendSim
 	Catalog        *catalog.Catalog // nil: catalog.Default()
-	USBAvailable   bool             // k8s: --usb-resource set; sim: --sim-device != none
+	USBAvailable   bool             // k8s: --usb-resource set; docker: always; sim: --sim-device != none
 	USBUnavailable string           // k8s without --usb-resource: why mode usb cannot run; else ""
 	Printer        func(uri string) PrinterObserver
 	Scanner        func(url string) ScannerObserver

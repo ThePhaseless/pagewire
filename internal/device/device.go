@@ -177,9 +177,10 @@ type Observation struct {
 	HostIP  string `json:"hostIp"`
 	Message string `json:"message"`
 	// Unschedulable is set for pod condition PodScheduled=False with reason
-	// Unschedulable (for example no free USB resource).
+	// Unschedulable (for example no free USB resource); docker: no USB printer
+	// on the host.
 	Unschedulable bool `json:"unschedulable"`
-	// Endpoints: k8s: always empty (derived from agent reports).
+	// Endpoints: k8s and docker: always empty (derived from agent reports).
 	// sim: ScannerURL set whenever the spec has a scanner; PrinterURI set only
 	// for the ipp-usb and sim printer families and empty for PAPPL families,
 	// whose URI the controller takes from QueueResult.
@@ -193,13 +194,13 @@ type Backend interface {
 }
 
 // PodRestarter is an optional Backend capability, found by type assertion.
-// The k8s backend implements it; sim does not.
+// The k8s and docker backends implement it; sim does not.
 type PodRestarter interface {
 	RestartPod(ctx context.Context) error
 }
 
 // AgentTokenSource is an optional Backend capability, found by type assertion.
-// The k8s backend implements it; sim does not.
+// The k8s and docker backends implement it; sim does not.
 type AgentTokenSource interface {
 	AgentToken(ctx context.Context) (string, error)
 }

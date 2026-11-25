@@ -876,6 +876,7 @@
           "type": "string",
           "enum": [
             "k8s",
+            "docker",
             "sim"
           ]
         },

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -443,5 +444,71 @@ func TestConfigMapBackends(t *testing.T) {
 		if !strings.Contains(cm.Data["ignore.conf"], "airscan") || !strings.Contains(cm.Data["ignore.conf"], "escl") {
 			t.Errorf("%s ignore.conf %q", name, cm.Data["ignore.conf"])
 		}
+	}
+}
+
+func TestPlanPodUID(t *testing.T) {
+	agentOf := func(p Params) Container {
+		t.Helper()
+		pod, err := Plan(goldenSpecs["ippusb"], p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range append(slices.Clone(pod.Inits), pod.Mains...) {
+			if c.Name == "agent" {
+				return c
+			}
+		}
+		t.Fatal("no agent")
+		return Container{}
+	}
+	p := goldenParams()
+	p.PodUID = "x"
+	a := agentOf(p)
+	if i := slices.Index(a.Args, "--pod-uid"); i < 0 || a.Args[i+1] != "x" || len(a.Env) != 0 {
+		t.Errorf("PodUID x: args %v env %v", a.Args, a.Env)
+	}
+	a = agentOf(goldenParams())
+	if i := slices.Index(a.Args, "--pod-uid"); i < 0 || a.Args[i+1] != "$(POD_UID)" ||
+		!slices.Equal(a.Env, []EnvVar{{Name: "POD_UID", FieldPath: "metadata.uid"}}) {
+		t.Errorf("no PodUID: args %v env %v", a.Args, a.Env)
+	}
+}
+
+func TestPlanMatchesRender(t *testing.T) {
+	planNames := func(cs []Container) []string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+	for name, s := range goldenSpecs {
+		pod, err := Plan(s, goldenParams())
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		d, cm := render(t, s, goldenParams())
+		spec := d.Spec.Template.Spec
+		if got, want := planNames(pod.Inits), names(spec.InitContainers); !slices.Equal(got, want) {
+			t.Errorf("%s inits: Plan %v, Render %v", name, got, want)
+		}
+		if got, want := planNames(pod.Mains), names(spec.Containers); !slices.Equal(got, want) {
+			t.Errorf("%s mains: Plan %v, Render %v", name, got, want)
+		}
+		if !maps.Equal(pod.Config, cm.Data) {
+			t.Errorf("%s: Plan config differs from the ConfigMap data", name)
+		}
+	}
+}
+
+func TestPlanNoUSBCheck(t *testing.T) {
+	p := goldenParams()
+	p.USBResource = ""
+	if _, err := Plan(goldenSpecs["ippusb"], p); err != nil {
+		t.Errorf("Plan: %v", err)
+	}
+	if _, _, err := Render(goldenSpecs["ippusb"], p); !errors.Is(err, ErrNoUSBResource) {
+		t.Errorf("Render: %v, want ErrNoUSBResource", err)
 	}
 }

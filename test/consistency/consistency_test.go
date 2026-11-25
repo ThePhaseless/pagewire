@@ -14,6 +14,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/ThePhaseless/printscan/internal/backend/docker"
 	"github.com/ThePhaseless/printscan/internal/backend/k8s"
 	"github.com/ThePhaseless/printscan/internal/catalog"
 )
@@ -303,19 +304,21 @@ func TestCITargets(t *testing.T) {
 			t.Errorf("build matrix entry %v: %s ends with a sources stage, so it needs an explicit non-sources target", e, file)
 		}
 	}
-	n := 0
-	for _, step := range list(get(ci, "jobs", "integration", "steps")) {
-		file := str(get(step, "with", "file"))
-		if file == "" || !hasSourcesStage(t, file) {
-			continue
+	for _, job := range []string{"integration", "docker-backend"} {
+		n := 0
+		for _, step := range list(get(ci, "jobs", job, "steps")) {
+			file := str(get(step, "with", "file"))
+			if file == "" || !hasSourcesStage(t, file) {
+				continue
+			}
+			n++
+			if target := str(get(step, "with", "target")); target == "" || target == "sources" {
+				t.Errorf("%s step %q builds %s without an explicit non-sources target", job, str(get(step, "name")), file)
+			}
 		}
-		n++
-		if target := str(get(step, "with", "target")); target == "" || target == "sources" {
-			t.Errorf("integration step %q builds %s without an explicit non-sources target", str(get(step, "name")), file)
+		if n == 0 {
+			t.Errorf("%s job builds no device or driver image", job)
 		}
-	}
-	if n == 0 {
-		t.Error("integration job builds no device or driver image")
 	}
 }
 
@@ -585,6 +588,28 @@ func TestDeploymentContainerName(t *testing.T) {
 		return str(get(c, "name")) == k8s.SelfContainer
 	}) {
 		t.Errorf("deploy/base/deployment.yaml has no container named %q (k8s.SelfContainer)", k8s.SelfContainer)
+	}
+}
+
+// The device containers run the image of the container named docker.DefaultContainer,
+// and the stack's Compose project must not be the demo's or the integration test's.
+func TestComposeDockerContainerName(t *testing.T) {
+	var c, it map[string]any
+	if err := yaml.Unmarshal([]byte(read(t, "compose.docker.yaml")), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(read(t, "compose.test.yaml")), &it); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(get(c, "services", "printscan", "container_name")); got != docker.DefaultContainer {
+		t.Errorf("compose.docker.yaml container_name = %q, want %q (docker.DefaultContainer)", got, docker.DefaultContainer)
+	}
+	if !slices.ContainsFunc(list(get(c, "services", "printscan", "command")), func(a any) bool { return str(a) == "--backend=docker" }) {
+		t.Error("compose.docker.yaml command lacks --backend=docker")
+	}
+	// compose.yaml has no name, so its project is the checkout directory, usually printscan.
+	if name := str(get(c, "name")); name == "" || name == "printscan" || name == str(get(it, "name")) {
+		t.Errorf("compose.docker.yaml name = %q; want a project apart from compose.test.yaml (%q) and the demo stack (printscan)", name, str(get(it, "name")))
 	}
 }
 

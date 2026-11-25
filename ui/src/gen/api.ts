@@ -265,7 +265,7 @@ export type SetupEULA = z.infer<typeof SetupEULASchema>;
 
 export const SetupSchema = z.strictObject({
   required: z.boolean(),
-  backend: z.enum(["k8s","sim"]),
+  backend: z.enum(["k8s","docker","sim"]),
   usbResourceConfigured: z.boolean(),
   inventory: InventorySchema.nullable(),
   decision: DecisionSchema.nullable(),

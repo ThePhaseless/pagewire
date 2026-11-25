@@ -1,0 +1,33 @@
+# Real hardware on one Docker or rootful Podman host. The control plane creates
+# the device containers (dbus, avahi, ipp-usb, driver, AirSane, agent) through
+# the Engine API. See README "Deploying with Docker or Podman".
+name: printscan-docker # apart from the demo stack in compose.yaml
+services:
+  printscan:
+    image: ${PRINTSCAN_IMAGE:-ghcr.io/thephaseless/printscan:main}
+    # --docker-container: the probe, agent and fetch-blobs run this container's image.
+    container_name: printscan
+    command: ["serve", "--backend=docker"]
+    network_mode: host
+    userns_mode: host
+    environment:
+      PRINTSCAN_LISTEN: ${PRINTSCAN_LISTEN:-127.0.0.1:8080}
+      PRINTSCAN_INTERNAL_LISTEN: ${PRINTSCAN_INTERNAL_LISTEN:-127.0.0.1:8081}
+      PRINTSCAN_IMAGE_OVERRIDES: ${PRINTSCAN_IMAGE_OVERRIDES:-}
+      PRINTSCAN_HOST_IP: ${PRINTSCAN_HOST_IP:-}
+      # Empty: localhost, 127.0.0.1, [::1] and the host IP.
+      PRINTSCAN_ALLOWED_HOSTS: ${PRINTSCAN_ALLOWED_HOSTS:-}
+      # Inside the container; a socket proxy sets tcp://127.0.0.1:2375 here.
+      DOCKER_HOST: ${PRINTSCAN_DOCKER_HOST:-unix:///var/run/docker.sock}
+    # The Engine socket is root:docker (Docker) or root:root (Podman) 0660.
+    group_add: ["${DOCKER_GID:?set DOCKER_GID to the socket's group: stat -c %g /var/run/docker.sock}"]
+    volumes:
+      - data:/data
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  data:

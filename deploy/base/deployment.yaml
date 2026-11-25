@@ -53,10 +53,8 @@ spec:
               value: printscan
             - name: TZ
               value: Etc/UTC
-            # Keep this about 50 MiB below resources.limits.memory (256Mi), so the Go GC
-            # collects before the container is OOM-killed. Change both together.
-            - name: GOMEMLIMIT
-              value: 200MiB
+            # No GOMEMLIMIT: printscan sets the Go memory limit to 80% of
+            # resources.limits.memory, read from the cgroup. Setting GOMEMLIMIT overrides that.
             # Host names the UI and API answer to, comma-separated; other Host headers
             # get 421. Unset or empty: no check on Kubernetes. "*" turns the check off.
             # - name: PRINTSCAN_ALLOWED_HOSTS

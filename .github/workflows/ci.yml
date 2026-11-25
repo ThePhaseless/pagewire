@@ -29,6 +29,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
       - run: go mod verify
       - run: go vet ./...
+      # The docker backend's end-to-end test compiles only with both tags; fail here, not in docker-backend.
+      - run: go vet -tags integration,docker ./test/integration/...
       - run: golangci-lint run
       - run: go test -race -count=1 ./...
       - run: go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml
@@ -150,6 +152,79 @@ jobs:
       - if: always()
         run: docker compose -f compose.test.yaml down -v
 
+  # The docker backend end to end, without hardware: compose.docker.yaml's control plane creates the
+  # simulated-mode device containers through the Engine API of Docker or rootful Podman.
+  docker-backend:
+    needs: go
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    env:
+      # Fully qualified, so Podman does not apply its docker.io short-name rule.
+      PRINTSCAN_IMAGE: localhost/printscan:dev
+      PRINTSCAN_IMAGE_OVERRIDES: device=localhost/printscan-device:dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      - name: Install the cgo build headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Reads the integration job's caches; writing them from two matrix legs would race.
+      - name: Build localhost/printscan:dev
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          tags: localhost/printscan:dev
+          load: true
+          cache-from: type=gha,scope=integration-printscan
+      - name: Build localhost/printscan-device:dev
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/device/Dockerfile
+          target: device
+          tags: localhost/printscan-device:dev
+          load: true
+          cache-from: type=gha,scope=integration-printscan-device
+      - name: Free port 5353 for the device's avahi-daemon
+        run: |
+          if systemctl is-active --quiet avahi-daemon.service avahi-daemon.socket; then
+            sudo systemctl stop avahi-daemon.socket avahi-daemon.service
+          fi
+      - name: Switch to rootful Podman
+        if: matrix.engine == 'podman'
+        run: |
+          command -v podman || (sudo apt-get update && sudo apt-get install -y --no-install-recommends podman)
+          sudo systemctl start podman.socket
+          docker save localhost/printscan:dev localhost/printscan-device:dev | sudo podman load
+          # Ephemeral runner: compose and the test reach the root socket without sudo.
+          sudo chmod 0666 /run/podman/podman.sock
+          echo "DOCKER_HOST=unix:///run/podman/podman.sock" >> "$GITHUB_ENV"
+          echo "DOCKER_SOCKET=/run/podman/podman.sock" >> "$GITHUB_ENV"
+      # No --wait: the test polls /healthz and the status.
+      - name: Start the control plane
+        run: DOCKER_GID="$(stat -c %g "${DOCKER_SOCKET:-/var/run/docker.sock}")" docker compose -f compose.docker.yaml up -d
+      - run: go test -tags integration,docker -count=1 -timeout 20m -run '^TestDockerBackend$' ./test/integration/...
+      - if: failure()
+        run: |
+          DOCKER_GID=0 docker compose -f compose.docker.yaml logs --tail=500
+          docker ps -a
+          for c in $(docker ps -aq --filter label=dev.printscan.managed-by=printscan); do
+            echo "::group::$c"
+            docker logs --tail=200 "$c"
+            echo "::endgroup::"
+          done
+      # compose down leaves the device containers: the control plane created them.
+      - if: always()
+        run: |
+          DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
+          docker ps -aq --filter label=dev.printscan.managed-by=printscan | xargs -r docker rm -fv
+          docker volume ls -q --filter label=dev.printscan.managed-by=printscan | xargs -r docker volume rm
+
   # The VERSION build arg: the branch or tag name with each run of characters a tag cannot hold
   # replaced by `-`, as docker/metadata-action does for type=ref tags. A manual run on renovate/foo
   # then labels its images with the renovate-foo-sources tag the sources job pushes.
@@ -167,7 +242,7 @@ jobs:
   # Docker's reusable workflow: one native runner per platform, a merged multi-platform manifest,
   # provenance and SBOM attestations signed with the job's OIDC identity. A pull request builds without pushing.
   build:
-    needs: [go, ui, e2e, integration, version]
+    needs: [go, ui, e2e, integration, docker-backend, version]
     strategy:
       fail-fast: false
       matrix:
@@ -271,7 +346,7 @@ jobs:
   # skipped only on pull requests, which push nothing.
   ci-ok:
     if: always()
-    needs: [go, ui, e2e, integration, build, sources]
+    needs: [go, ui, e2e, integration, docker-backend, build, sources]
     runs-on: ubuntu-26.04
     steps:
       - run: |
@@ -279,6 +354,7 @@ jobs:
           test "${{ needs.ui.result }}" = success
           test "${{ needs.e2e.result }}" = success
           test "${{ needs.integration.result }}" = success
+          test "${{ needs.docker-backend.result }}" = success
           test "${{ needs.build.result }}" = success
           case "${{ needs.sources.result }}" in
             success) ;;

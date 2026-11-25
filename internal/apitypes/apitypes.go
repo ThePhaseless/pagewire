@@ -60,7 +60,7 @@ type ConfigEvent struct {
 // Setup is the body of GET /setup (wizard data).
 type Setup struct {
 	Required              bool              `json:"required"` // true only while the config file is missing
-	Backend               string            `json:"backend" jsonschema:"enum=k8s,enum=sim"`
+	Backend               string            `json:"backend" jsonschema:"enum=k8s,enum=docker,enum=sim"`
 	USBResourceConfigured bool              `json:"usbResourceConfigured"`
 	Inventory             *device.Inventory `json:"inventory" jsonschema:"nullable"`
 	Decision              *device.Decision  `json:"decision" jsonschema:"nullable"`

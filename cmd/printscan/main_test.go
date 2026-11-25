@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
@@ -552,20 +553,152 @@ func TestRunDispatch(t *testing.T) {
 func TestAllowedHostsFor(t *testing.T) {
 	simDefault := []string{"localhost", "127.0.0.1", "[::1]"}
 	for _, tc := range []struct {
-		backend, value string
-		want           []string
+		backend, value, hostIP string
+		want                   []string
 	}{
-		{controller.BackendSim, "", simDefault},
-		{controller.BackendSim, " , ", simDefault},
-		{controller.BackendSim, "*", nil},
-		{controller.BackendK8s, "", nil},
-		{controller.BackendK8s, "*", nil},
-		{controller.BackendK8s, "print.example.org, 192.0.2.10 ,", []string{"print.example.org", "192.0.2.10"}},
-		{controller.BackendSim, "printer.lan", []string{"printer.lan"}},
+		{controller.BackendSim, "", "", simDefault},
+		{controller.BackendSim, " , ", "", simDefault},
+		{controller.BackendSim, "*", "", nil},
+		{controller.BackendK8s, "", "", nil},
+		{controller.BackendK8s, "*", "", nil},
+		{controller.BackendK8s, "print.example.org, 192.0.2.10 ,", "", []string{"print.example.org", "192.0.2.10"}},
+		{controller.BackendSim, "printer.lan", "", []string{"printer.lan"}},
+		{controller.BackendDocker, "", "192.0.2.7", append(slices.Clone(simDefault), "192.0.2.7")},
+		{controller.BackendDocker, "", "127.0.0.1", simDefault},
+		{controller.BackendDocker, "", "fd00::5", append(slices.Clone(simDefault), "fd00::5")},
+		{controller.BackendDocker, "printer.lan", "192.0.2.7", []string{"printer.lan"}},
+		{controller.BackendDocker, "*", "192.0.2.7", nil},
 	} {
-		if got := allowedHostsFor(tc.backend, tc.value); !slices.Equal(got, tc.want) {
-			t.Errorf("allowedHostsFor(%s, %q) = %q, want %q", tc.backend, tc.value, got, tc.want)
+		if got := allowedHostsFor(tc.backend, tc.value, tc.hostIP); !slices.Equal(got, tc.want) {
+			t.Errorf("allowedHostsFor(%s, %q, %q) = %q, want %q", tc.backend, tc.value, tc.hostIP, got, tc.want)
 		}
+	}
+}
+
+func TestDefaultBackend(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "docker.sock")
+	marker := filepath.Join(dir, ".dockerenv")
+	missing := filepath.Join(dir, "missing")
+	_ = os.WriteFile(sock, nil, 0o600)
+	_ = os.WriteFile(marker, nil, 0o600)
+	for _, tc := range []struct {
+		name, k8sHost, dockerHost, socket, marker, want string
+	}{
+		{name: "kubernetes", k8sHost: "10.0.0.1", dockerHost: "unix:///x.sock", socket: sock, marker: marker, want: controller.BackendK8s},
+		{name: "DOCKER_HOST outside a container", dockerHost: "tcp://127.0.0.1:2375", socket: missing, marker: missing, want: controller.BackendSim},
+		{name: "DOCKER_HOST in a container", dockerHost: "tcp://127.0.0.1:2375", socket: missing, marker: marker, want: controller.BackendDocker},
+		{name: "container with socket", socket: sock, marker: marker, want: controller.BackendDocker},
+		{name: "socket without container", socket: sock, marker: missing, want: controller.BackendSim},
+		{name: "container without socket", socket: missing, marker: marker, want: controller.BackendSim},
+		{name: "nothing", socket: missing, marker: missing, want: controller.BackendSim},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KUBERNETES_SERVICE_HOST", tc.k8sHost)
+			t.Setenv("DOCKER_HOST", tc.dockerHost)
+			t.Setenv("PRINTSCAN_BACKEND", "")
+			oldSock, oldMarkers := dockerSocket, containerMarkers
+			t.Cleanup(func() { dockerSocket, containerMarkers = oldSock, oldMarkers })
+			dockerSocket, containerMarkers = tc.socket, []string{missing, tc.marker}
+			if got := defaultBackend(); got != tc.want {
+				t.Fatalf("defaultBackend() = %q, want %q", got, tc.want)
+			}
+			f, err := parseServeFlags(nil)
+			if err != nil || f.backend != tc.want {
+				t.Fatalf("parseServeFlags: backend %q err %v, want %q", f.backend, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestBackendFlagValues(t *testing.T) {
+	f, err := parseServeFlags([]string{"--backend=docker"})
+	if err != nil || f.backend != controller.BackendDocker || f.dockerContainer != "printscan" {
+		t.Fatalf("--backend=docker: backend %q container %q err %v", f.backend, f.dockerContainer, err)
+	}
+	if _, err := parseServeFlags([]string{"--backend=bogus"}); err == nil || !strings.Contains(err.Error(), "k8s, docker or sim") {
+		t.Fatalf("--backend=bogus: %v", err)
+	}
+}
+
+func TestDockerAgentURL(t *testing.T) {
+	for _, tc := range []struct{ explicit, listen, want string }{
+		{"", "127.0.0.1:8081", "http://127.0.0.1:8081"},
+		{"", ":8081", "http://127.0.0.1:8081"},
+		{"", "0.0.0.0:8081", "http://127.0.0.1:8081"},
+		{"", "[::]:8081", "http://127.0.0.1:8081"},
+		{"", "192.168.1.5:8081", "http://192.168.1.5:8081"},
+		{"", "[fd00::5]:8081", "http://[fd00::5]:8081"},
+		{"http://cp.lan:9000", "bogus", "http://cp.lan:9000"},
+	} {
+		if got, err := dockerAgentURL(tc.explicit, tc.listen); err != nil || got != tc.want {
+			t.Errorf("dockerAgentURL(%q, %q) = %q, %v; want %q", tc.explicit, tc.listen, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"bogus", "127.0.0.1", "host:"} {
+		if got, err := dockerAgentURL("", bad); err == nil {
+			t.Errorf("dockerAgentURL(%q) = %q, want an error", bad, got)
+		}
+	}
+}
+
+// The Engine client connects lazily: serve starts on an unreachable socket,
+// and the failure shows only in the status.
+func TestServeDockerUnreachable(t *testing.T) {
+	t.Setenv("PRINTSCAN_HOST_IP", "")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	got := make(chan net.Addr, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, []string{
+			"--backend=docker", "--docker-host=unix:///nonexistent.sock",
+			"--listen=127.0.0.1:0", "--internal-listen=127.0.0.1:0", "--host-ip=192.0.2.7",
+			"--data-dir=" + dir, "--config=" + filepath.Join(dir, "printscan.yaml"),
+		},
+			func(p, i net.Addr) {
+				if i == nil {
+					t.Error("docker serve opened no internal listener")
+				}
+				got <- p
+			})
+	}()
+	var pub net.Addr
+	select {
+	case pub = <-got:
+	case err := <-done:
+		t.Fatalf("serve exited: %v", err)
+	case <-ctx.Done():
+		t.Fatal("serve did not start")
+	}
+	get := func(path, host string) int {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+pub.String()+path, nil)
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get("/healthz", pub.String()); code != http.StatusOK {
+		t.Errorf("/healthz: %d", code)
+	}
+	if code := get("/api/v1/status", "192.0.2.7:8080"); code != http.StatusOK {
+		t.Errorf("status via the host IP: %d, want 200", code)
+	}
+	if code := get("/api/v1/status", "evil.example"); code != http.StatusMisdirectedRequest {
+		t.Errorf("status via evil.example: %d, want 421", code)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Error("serve did not stop within 20 s")
 	}
 }
 
@@ -609,7 +742,7 @@ func TestServeUsage(t *testing.T) {
 	var b bytes.Buffer
 	serveFlagSet(&serveFlags{}, &b).Usage()
 	usage := b.String()
-	for _, want := range []string{"--allowed-hosts", "--proxy-secret-header", "--proxy-secret-file", "PRINTSCAN_PROXY_SECRET", "PRINTSCAN_IMAGE_OVERRIDES"} {
+	for _, want := range []string{"--allowed-hosts", "--docker-host", "--docker-container", "--host-ip", "--proxy-secret-header", "--proxy-secret-file", "PRINTSCAN_PROXY_SECRET", "PRINTSCAN_IMAGE_OVERRIDES"} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("serve usage lacks %s:\n%s", want, usage)
 		}
@@ -697,5 +830,50 @@ func TestServeSimHasNoInternalListener(t *testing.T) {
 	}
 	if code := get("evil.example", "X-Printscan-Proxy-Secret", "s3cret"); code != http.StatusMisdirectedRequest {
 		t.Errorf("Host evil.example: %d, want 421", code)
+	}
+}
+
+func TestCgroupMemoryLimit(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		content string // "" means no file
+		want    int64
+	}{
+		"limit":   {"268435456\n", 268435456},
+		"max":     {"max\n", 0},
+		"missing": {"", 0},
+		"garbage": {"lots\n", 0},
+	} {
+		path := filepath.Join(dir, name)
+		if tc.content != "" {
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := cgroupMemoryLimit(path); got != tc.want {
+			t.Errorf("%s: cgroupMemoryLimit = %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+func TestSetMemoryLimit(t *testing.T) {
+	before := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetMemoryLimit(before) })
+	path := filepath.Join(t.TempDir(), "memory.max")
+	if err := os.WriteFile(path, []byte("268435456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GOMEMLIMIT", "")
+	setMemoryLimit(path)
+	if got, want := debug.SetMemoryLimit(-1), int64(268435456/5*4); got != want {
+		t.Errorf("limit = %d, want %d (80%% of the cgroup limit)", got, want)
+	}
+
+	debug.SetMemoryLimit(before)
+	t.Setenv("GOMEMLIMIT", "100MiB")
+	setMemoryLimit(path)
+	if got := debug.SetMemoryLimit(-1); got != before {
+		t.Errorf("limit = %d with GOMEMLIMIT set, want it untouched (%d)", got, before)
 	}
 }

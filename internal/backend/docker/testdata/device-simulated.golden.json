@@ -1,0 +1,837 @@
+[
+  {
+    "name": "probe",
+    "runOnce": true,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "agent",
+        "probe",
+        "--out",
+        "/run/printscan/inventory.json"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "sha256:self",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/printscan"
+      ],
+      "Labels": {
+        "dev.printscan.container": "probe",
+        "dev.printscan.init": "true",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 67108864,
+      "NanoCpus": 200000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-run",
+          "Target": "/run/printscan",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "dbus",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "101:101",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "--config-file=/etc/printscan/dbus.conf",
+        "--nofork",
+        "--nopidfile"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/bin/dbus-daemon"
+      ],
+      "Labels": {
+        "dev.printscan.container": "dbus",
+        "dev.printscan.init": "false",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 33554432,
+      "NanoCpus": 100000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "avahi",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "102:102",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "--no-drop-root",
+        "--no-chroot",
+        "--no-rlimits",
+        "-f",
+        "/etc/printscan/avahi-daemon.conf"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "CMD",
+          "/usr/sbin/avahi-daemon",
+          "-c"
+        ],
+        "Interval": 5000000000,
+        "Timeout": 3000000000,
+        "StartPeriod": 30000000000,
+        "Retries": 3
+      },
+      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/sbin/avahi-daemon"
+      ],
+      "Labels": {
+        "dev.printscan.container": "avahi",
+        "dev.printscan.init": "false",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Tmpfs": {
+        "/run": "mode=1777"
+      },
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 33554432,
+      "NanoCpus": 100000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "agent",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "65532:65532",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "agent",
+        "run",
+        "--control-plane-url",
+        "http://printscan.printing.svc:8081",
+        "--token-file",
+        "/var/run/printscan/token",
+        "--pod-uid",
+        "docker-d4aad576b417",
+        "--dbus-address",
+        "unix:path=/run/dbus/system_bus_socket",
+        "--inventory",
+        "/run/printscan/inventory.json",
+        "--blob-status",
+        "/run/printscan/blobs.json"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "sha256:self",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/printscan"
+      ],
+      "Labels": {
+        "dev.printscan.container": "agent",
+        "dev.printscan.init": "false",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 134217728,
+      "NanoCpus": 200000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-token",
+          "Target": "/var/run/printscan",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "printscan-device-run",
+          "Target": "/run/printscan",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "printscan-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "sim-printer",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "65532:65532",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "-p",
+        "8631",
+        "-f",
+        "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf",
+        "-l",
+        "Living room",
+        "Living room printer"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/sbin/ippeveprinter"
+      ],
+      "Labels": {
+        "dev.printscan.container": "sim-printer",
+        "dev.printscan.init": "false",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 134217728,
+      "NanoCpus": 500000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/tmp",
+          "VolumeOptions": {
+            "Labels": {
+              "dev.printscan.managed-by": "printscan"
+            }
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "airsane",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "65532:65532",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [
+        "SANE_CONFIG_DIR=/etc/printscan/sane.d:"
+      ],
+      "Cmd": [
+        "--listen-port=8090",
+        "--hotplug=false",
+        "--options-file=/etc/printscan/airsane/options.conf",
+        "--ignore-list=/etc/printscan/airsane/ignore.conf",
+        "--access-file=/etc/printscan/airsane/access.conf"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/local/bin/airsaned"
+      ],
+      "Labels": {
+        "dev.printscan.container": "airsane",
+        "dev.printscan.init": "false",
+        "dev.printscan.managed-by": "printscan"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 536870912,
+      "NanoCpus": 1000000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "printscan-device-config",
+          "Target": "/etc/printscan/airsane",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "printscan-device-config",
+          "Target": "/etc/printscan/sane.d",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "printscan-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/tmp",
+          "VolumeOptions": {
+            "Labels": {
+              "dev.printscan.managed-by": "printscan"
+            }
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  }
+]

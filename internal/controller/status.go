@@ -17,8 +17,9 @@ import (
 
 // Backend names serve passes as Options.BackendName (the Setup DTO's backend).
 const (
-	BackendK8s = "k8s"
-	BackendSim = "sim"
+	BackendK8s    = "k8s"
+	BackendDocker = "docker"
+	BackendSim    = "sim"
 )
 
 // Status messages the controller shows.
@@ -115,7 +116,7 @@ func preferredName(fam catalog.Printer, cfg *config.Config) string {
 	return cfg.Name
 }
 
-// printerURI is the one Printer URI rule for both backends.
+// printerURI is the one Printer URI rule for every backend; docker takes the k8s path.
 func printerURI(backend string, fam catalog.Printer, obs device.Observation, r *device.AgentReport, preferName string) string {
 	switch {
 	case fam.ID == "":
@@ -142,7 +143,7 @@ func printerURI(backend string, fam catalog.Printer, obs device.Observation, r *
 }
 
 // scannerURL is the eSCL base URL: the observation in sim, _uscan._tcp in
-// k8s, preferring the scanner family's catalog port (ipp-usb's own ports for
+// k8s and docker, preferring the scanner family's catalog port (ipp-usb's own ports for
 // ipp-usb's eSCL).
 func scannerURL(cat *catalog.Catalog, backend string, spec *device.Spec, obs device.Observation, r *device.AgentReport) string {
 	switch {
