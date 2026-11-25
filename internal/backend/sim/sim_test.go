@@ -405,8 +405,13 @@ func TestSwitchAndNilStopServers(t *testing.T) {
 	if second.ScannerURL != "" || second.PrinterURI == "" || second.PrinterURI == first.PrinterURI {
 		t.Errorf("endpoints after switch = %+v", second)
 	}
-	if !refused(oldPrinter) || !refused(oldScanner) {
-		t.Error("old servers still accept connections after the spec switch")
+	// The kernel may hand a just-closed port to a new server, so only ports the
+	// new endpoints do not use must refuse connections.
+	reused := map[string]bool{hostPort(t, second.PrinterURI): true}
+	for _, old := range []string{oldPrinter, oldScanner} {
+		if !reused[old] && !refused(old) {
+			t.Errorf("old server at %s still accepts connections after the spec switch", old)
+		}
 	}
 
 	if err := b.Apply(ctx(t), nil); err != nil {
