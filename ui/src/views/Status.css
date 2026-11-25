@@ -44,6 +44,11 @@
     border-block-start: 1px solid var(--rule);
   }
 
+  /* The disclosure above already draws the dividing rule. */
+  .status-view .ui-disclosure + .status-section {
+    border-block-start: 0;
+  }
+
   .status-view .status-section h3 {
     font-size: var(--text-sm);
     font-weight: var(--weight-medium);
