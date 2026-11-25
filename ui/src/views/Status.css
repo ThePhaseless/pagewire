@@ -7,15 +7,38 @@
     overflow-wrap: anywhere;
   }
 
-  .status-view .status-grid {
+  /* One column on phones and tablets; from 1024 px the device cards take the wide track and the
+     jobs, scans and system cards the narrow one. Cards are full width in their track, so rows are
+     never ragged. */
+  .status-view .status-layout {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
     gap: var(--space-4);
     align-items: start;
   }
 
-  .status-view .status-connect {
-    grid-column: 1 / -1;
+  @media (min-width: 1024px) {
+    .status-view .status-layout {
+      grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr);
+    }
+  }
+
+  .status-view .status-main,
+  .status-view .status-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-inline-size: 0;
+  }
+
+  .status-view .status-device-title {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .status-view .status-device-title .ui-icon {
+    flex: none;
+    color: var(--ink-muted);
   }
 
   .status-view .status-error-title {
@@ -46,6 +69,18 @@
 
   /* The disclosure above already draws the dividing rule. */
   .status-view .ui-disclosure + .status-section {
+    border-block-start: 0;
+  }
+
+  /* A disclosure draws only its bottom rule, so the first one in a card gets the rule above it;
+     the next disclosure sits on that bottom rule, so one line separates each. */
+  .status-view .ui-card-body > :not(.ui-disclosure) + .ui-disclosure {
+    border-block-start: 1px solid var(--rule);
+  }
+
+  /* A device's jobs in a card listing several printers: the first needs no rule under the title. */
+  .status-view .ui-card-body > .status-section:first-child {
+    padding-block-start: 0;
     border-block-start: 0;
   }
 

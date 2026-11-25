@@ -1,5 +1,6 @@
 // Shared copy: the shell, navigation, banners, common buttons and problem messages.
 // Each view keeps its own copy in views/<View>.strings.ts.
+import type { PrinterDecision, ScannerDecision, StatusPrinter } from "./gen/api";
 
 export const strings = {
   appName: "pagewire",
@@ -16,9 +17,57 @@ export const strings = {
     ready: "Ready",
     working: "Starting",
     problem: "Needs attention",
-    notFound: "Printer not found",
+    notFound: "No device found",
     idle: "Not set up",
+    /** A config whose printers and scanners are all disabled (overall phase none). */
+    nothingInUse: "Nothing in use",
     offline: "Offline",
+  },
+  /** One printer's or scanner's phase, as its badge reads. */
+  devicePhase: {
+    none: "Not in use",
+    probing: "Not found",
+    deploying: "Starting",
+    ready: "Ready",
+    degraded: "Needs attention",
+    error: "Error",
+  } satisfies Record<StatusPrinter["phase"], string>,
+  /** Device copy shared by Status, Setup and Settings. */
+  device: {
+    families: {
+      "ipp-usb": "Driverless (IPP over USB)",
+      ps: "PostScript",
+      hplip: "HP (HPLIP)",
+      gutenprint: "Gutenprint",
+      ghostscript: "Ghostscript",
+      legacy: "Classic CUPS drivers",
+      airsane: "SANE",
+      sim: "Simulated",
+      none: "No scanner",
+    } as Record<string, string>,
+    /** How the dispatcher chose the printer driver (PrinterDecision.rule). */
+    rules: {
+      "ipp-over-usb": "Driverless printing (IPP over USB)",
+      model: "Printer model",
+      "command-set": "Printer language",
+      override: "Your settings",
+      none: "No match",
+      simulated: "Simulated mode",
+    } satisfies Record<PrinterDecision["rule"], string>,
+    /** How the dispatcher chose the scanner backend (ScannerDecision.rule). */
+    scannerRules: {
+      "ipp-over-usb": "IPP over USB (eSCL)",
+      "sane-index": "Listed in the SANE driver index",
+      "still-image": "USB still-image device",
+      override: "Chosen in Settings",
+      simulated: "Simulated",
+    } satisfies Record<ScannerDecision["rule"], string>,
+    /** The no-driver state: the dispatcher found no driver for the printer. */
+    noDriver: {
+      title: "No printer driver matches this printer",
+      deviceId: "Device ID:",
+      noDeviceId: "The printer did not report a device ID.",
+    },
   },
   banners: {
     offline: "Lost connection to pagewire. Reconnecting…",

@@ -70,8 +70,9 @@ var idPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 // Options configures a Service.
 type Options struct {
 	Dir string // <data-dir>/scans
-	// Scanner returns the current scanner, or a nil interface when there is none.
-	Scanner func() Scanner
+	// Scanner returns the scanner with entry id, or a nil interface when that
+	// scanner is unknown or not available.
+	Scanner func(id string) Scanner
 	// Retention is read on every janitor run; 0 (or a nil func) keeps scans forever.
 	Retention func() time.Duration
 	// Events receives every scan state change; the receiver must keep draining it.
@@ -80,7 +81,7 @@ type Options struct {
 	Context context.Context  // bounds running scans and event sends; default Background
 }
 
-// Service runs one scan at a time and keeps scans in Dir as
+// Service runs one scan at a time, across all scanners, and keeps scans in Dir as
 // <id>/meta.json, <id>/page-<n>.jpg and, for PDF, <id>/scan.pdf.
 type Service struct {
 	o       Options
@@ -133,15 +134,19 @@ func New(o Options) *Service {
 
 func ptr(s string) *string { return &s }
 
-// Start validates set and starts a scan in the background. The returned Scan
-// is in state scanning; progress arrives on Options.Events.
+// Start validates set and starts a scan on scanner set.Scanner in the
+// background. The returned Scan is in state scanning and records the scanner;
+// progress arrives on Options.Events.
+//
+// shortcut: one running scan for all scanners (ErrBusy on another scanner too);
+// track one running scan per scanner if households scan on two at once.
 func (s *Service) Start(set Settings) (apitypes.Scan, error) {
 	if err := Validate(set); err != nil {
 		return apitypes.Scan{}, err
 	}
 	var sc Scanner
 	if s.o.Scanner != nil {
-		sc = s.o.Scanner()
+		sc = s.o.Scanner(set.Scanner)
 	}
 	if sc == nil {
 		return apitypes.Scan{}, ErrNoScanner
@@ -161,7 +166,7 @@ func (s *Service) Start(set Settings) (apitypes.Scan, error) {
 	if err != nil {
 		return apitypes.Scan{}, err
 	}
-	scan := apitypes.Scan{ID: id, State: ScanScanning, CreatedAt: s.o.Now(), Format: set.Format, Settings: set}
+	scan := apitypes.Scan{ID: id, Scanner: set.Scanner, State: ScanScanning, CreatedAt: s.o.Now(), Format: set.Format, Settings: set}
 	if err := os.MkdirAll(filepath.Join(s.o.Dir, id), 0o750); err != nil {
 		return apitypes.Scan{}, &StorageError{err}
 	}

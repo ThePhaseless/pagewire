@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -31,7 +32,10 @@ func NewXML(rawURL string) (Scanner, error) {
 type xmlInputCaps struct {
 	MaxWidth  int `xml:"MaxWidth"`
 	MaxHeight int `xml:"MaxHeight"`
-	Profiles  []struct {
+	// Scanners name SupportedIntents' children either way (go-mfp decodes both).
+	Intents          []string `xml:"SupportedIntents>Intent"`
+	SupportedIntents []string `xml:"SupportedIntents>SupportedIntent"`
+	Profiles         []struct {
 		ColorModes []string `xml:"ColorModes>ColorMode"`
 		Res        []struct {
 			Discrete []struct {
@@ -71,6 +75,9 @@ func (c *xmlCaps) inputs() []input {
 			continue
 		}
 		in := input{source: src.name, maxW: src.ic.MaxWidth, maxH: src.ic.MaxHeight}
+		for _, it := range slices.Concat(src.ic.Intents, src.ic.SupportedIntents) {
+			in.addIntent(it)
+		}
 		for _, p := range src.ic.Profiles {
 			in.modes = append(in.modes, p.ColorModes...)
 			for _, sr := range p.Res {
@@ -175,9 +182,9 @@ func (x *xmlScanner) Start(ctx context.Context, s Settings) (string, error) {
 	fmt.Fprintf(&b, `<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
 <pwg:Version>%d.%d</pwg:Version>
-<pwg:ScanRegions><pwg:ScanRegion><pwg:Height>%d</pwg:Height><pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits><pwg:Width>%d</pwg:Width><pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset></pwg:ScanRegion></pwg:ScanRegions>
+%s<pwg:ScanRegions><pwg:ScanRegion><pwg:Height>%d</pwg:Height><pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits><pwg:Width>%d</pwg:Width><pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset></pwg:ScanRegion></pwg:ScanRegions>
 <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
-`, major, minor, rq.h, rq.w)
+`, major, minor, intentXML(rq.intent), rq.h, rq.w)
 	if useFormatExt(major, minor) {
 		b.WriteString("<scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>\n")
 	}
@@ -203,6 +210,14 @@ func (x *xmlScanner) Start(ctx context.Context, s Settings) (string, error) {
 		return "", fmt.Errorf("eSCL scan job: invalid Location %q", rsp.Header.Get("Location"))
 	}
 	return loc.Path, nil
+}
+
+// intentXML is the scan:Intent element for an eSCL intent, "" for none.
+func intentXML(intent string) string {
+	if intent == "" {
+		return ""
+	}
+	return "<scan:Intent>" + intent + "</scan:Intent>\n"
 }
 
 func (x *xmlScanner) NextPage(ctx context.Context, job string) (io.ReadCloser, error) {

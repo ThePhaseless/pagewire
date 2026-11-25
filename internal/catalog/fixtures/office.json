@@ -1,0 +1,64 @@
+{
+  "devices": [
+    {
+      "vendorId": "046d",
+      "productId": "c31c",
+      "serial": "",
+      "manufacturer": "Logitech",
+      "product": "USB Keyboard",
+      "bus": 1,
+      "address": 2,
+      "interfaces": [
+        {"class": 3, "subClass": 1, "protocol": 1},
+        {"class": 3, "subClass": 0, "protocol": 0}
+      ],
+      "deviceId": ""
+    },
+    {
+      "vendorId": "03f0",
+      "productId": "2754",
+      "serial": "FAKE0005",
+      "manufacturer": "HP",
+      "product": "OfficeJet Pro 8020 series",
+      "bus": 1,
+      "address": 4,
+      "interfaces": [
+        {"class": 255, "subClass": 204, "protocol": 0},
+        {"class": 7, "subClass": 1, "protocol": 2},
+        {"class": 255, "subClass": 4, "protocol": 1},
+        {"class": 7, "subClass": 1, "protocol": 4},
+        {"class": 7, "subClass": 1, "protocol": 4}
+      ],
+      "deviceId": "MFG:HP;MDL:OfficeJet Pro 8020 series;CMD:PCL3GUI,PJL,Automatic,JPEG,PCLM,AppleRaster,PWGRaster,DW-PCL,802.11,DESKJET,DYN;CLS:PRINTER;DES:1KR67A;CID:HPIJVIPAV9;LEDMDIS:USB#FF#CC#00,USB#07#01#02,USB#FF#04#01;SN:FAKE0005;"
+    },
+    {
+      "vendorId": "04e8",
+      "productId": "342e",
+      "serial": "FAKE0008",
+      "manufacturer": "Samsung Electronics Co., Ltd.",
+      "product": "SCX-4300 Series",
+      "bus": 1,
+      "address": 9,
+      "interfaces": [
+        {"class": 255, "subClass": 255, "protocol": 255},
+        {"class": 7, "subClass": 1, "protocol": 2}
+      ],
+      "deviceId": "MFG:Samsung;CMD:GDI;MDL:SCX-4300 Series;CLS:PRINTER;MODE:PCL;STATUS:IDLE;"
+    },
+    {
+      "vendorId": "04a9",
+      "productId": "1904",
+      "serial": "FAKE0011",
+      "manufacturer": "Canon",
+      "product": "CanoScan LiDE 100",
+      "bus": 1,
+      "address": 11,
+      "interfaces": [
+        {"class": 255, "subClass": 255, "protocol": 255}
+      ],
+      "deviceId": ""
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

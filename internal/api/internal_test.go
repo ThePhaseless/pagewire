@@ -49,7 +49,7 @@ func report(e *testEnv, auth, body string) *httptest.ResponseRecorder {
 }
 
 func TestAgentReportAuth(t *testing.T) {
-	body := `{"podUid":"p1","devicePresent":true}`
+	body := `{"podUid":"p1","workload":"n1"}`
 	for name, tc := range map[string]struct {
 		tokens device.AgentTokenSource
 		auth   string
@@ -88,7 +88,7 @@ func TestAgentHeaderCheckedBeforeToken(t *testing.T) {
 
 func TestAgentReport(t *testing.T) {
 	e, got := agentEnv(t, tokenSource{token: "secret"})
-	rec := report(e, "Bearer secret", `{"podUid":"p1","devicePresent":true}`)
+	rec := report(e, "Bearer secret", `{"podUid":"p1","workload":"n1","attached":[{"vendorId":"03f0","productId":"2754","bus":1,"address":4}]}`)
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -96,7 +96,7 @@ func TestAgentReport(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"browse":[]`) || !strings.Contains(rec.Body.String(), `"hash":"h"`) {
 		t.Fatalf("body %s", rec.Body)
 	}
-	if len(*got) != 1 || (*got)[0].PodUID != "p1" || !(*got)[0].DevicePresent {
+	if len(*got) != 1 || (*got)[0].PodUID != "p1" || (*got)[0].Workload != "n1" || len((*got)[0].Attached) != 1 {
 		t.Fatalf("reports %+v", *got)
 	}
 	wantProblem(t, report(e, "Bearer secret", `{"podUid":`), 400, "bad-request")

@@ -111,6 +111,46 @@
     font-size: var(--text-sm);
   }
 
+  .setup-view .setup-device-use {
+    margin-block-start: var(--space-1);
+    font-size: var(--text-sm);
+  }
+
+  /* An MFP's printer and scanner choices sit side by side when there is room. */
+  .setup-view .setup-device-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-6);
+    margin-block-start: var(--space-2);
+  }
+
+  .setup-view .setup-detect,
+  .setup-view .setup-row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .setup-view .setup-review-list {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .setup-view .setup-option-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .setup-view .setup-option-group + .setup-option-group {
+    padding-block-start: var(--space-3);
+    border-block-start: 1px solid var(--rule);
+  }
+
   .setup-view .setup-facts {
     display: grid;
     grid-template-columns: minmax(8rem, max-content) 1fr;

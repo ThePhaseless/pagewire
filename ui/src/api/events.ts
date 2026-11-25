@@ -4,6 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -19,6 +20,7 @@ import {
   type Status,
   StatusSchema,
 } from "../gen/api";
+import { enabled } from "../lib/devices";
 import { API, api } from "./client";
 
 const schemas = {
@@ -43,7 +45,7 @@ export type StoreOptions = {
   loadStatus?: () => Promise<Status>;
   minBackoffMs?: number;
   maxBackoffMs?: number;
-  /** How long the device may probe without finding a printer before usePrinterNotFound says so. */
+  /** How long pagewire may probe without finding a device before useNothingFound says so. */
   notFoundAfterMs?: number;
 };
 
@@ -188,20 +190,28 @@ export function useEvent<T extends EventType>(type: T): EventPayload[T] | null {
   return useSyncExternalStore(subscribe, () => store.latest(type));
 }
 
+/** The enabled printers in Status order ([] until the first Status). */
+export function useEnabledPrinters() {
+  const printers = useStatus()?.printers;
+  return useMemo(() => enabled(printers ?? []), [printers]);
+}
+
+/** The enabled scanners in Status order ([] until the first Status). */
+export function useEnabledScanners() {
+  const scanners = useStatus()?.scanners;
+  return useMemo(() => enabled(scanners ?? []), [scanners]);
+}
+
 /**
- * True once a configured device has been probing for longer than the store's notFoundAfterMs
- * with an inventory but no decision, which means no usable printer is plugged in or switched on.
- * Without an inventory the device agent has not reported yet, so nothing is known.
+ * True once the overall phase has been probing for longer than the store's notFoundAfterMs while
+ * no detected device can print or scan: pagewire is looking for USB devices (no config yet) and
+ * has found nothing it can use. Probing lasts the whole wizard, so found devices end it.
  */
-export function usePrinterNotFound(): boolean {
+export function useNothingFound(): boolean {
   const store = useContext(EventsContext);
   const status = useStatus();
   const searching =
-    status !== null &&
-    status.config.state !== "missing" &&
-    status.device.phase === "probing" &&
-    status.device.inventory !== null &&
-    status.device.decision === null;
+    status?.phase === "probing" && !status.devices.some((d) => d.canPrint || d.canScan);
   const [late, setLate] = useState(false);
   useEffect(() => {
     setLate(false);
@@ -224,29 +234,44 @@ export function mergeJobs(current: Job[], incoming: Job[]): Job[] {
 }
 
 /**
- * The recent print jobs. Loads GET /jobs, merges `job` events by id, and refetches on SSE
- * reconnect and whenever the printer state changes (jobs sent over IPP produce no events).
- * It only asks while a printer is available, since GET /jobs answers 503 otherwise.
+ * The recent print jobs of one printer. Loads GET /printers/{id}/jobs, merges that printer's `job`
+ * events by id, and refetches on SSE reconnect and whenever the printer's state changes (jobs sent
+ * over IPP produce no events). It only asks while the printer is available, since the route answers
+ * 503 otherwise. A new printer id starts from an empty list.
  */
-export function useJobs(getJobs: () => Promise<Job[]> = api.getJobs) {
+export function useJobs(
+  printerId: string | undefined,
+  getJobs: (printerId: string) => Promise<Job[]> = api.getJobs,
+) {
   const store = useContext(EventsContext);
-  const status = useStatus();
-  const available = status?.printer.available ?? false;
-  const printerState = status?.printer.state;
+  const printer = useStatus()?.printers.find((p) => p.id === printerId);
+  const available = printer?.available ?? false;
+  const printerState = printer?.state;
   const [jobs, setJobs] = useState<Job[]>([]);
   const [error, setError] = useState<unknown>(null);
   const availableRef = useRef(available);
   availableRef.current = available;
+  const idRef = useRef(printerId);
+  idRef.current = printerId;
 
   const refetch = useCallback(async () => {
+    if (printerId === undefined) return;
     try {
-      const list = await getJobs();
+      const list = await getJobs(printerId);
+      // A reply for the printer the page has since switched away from.
+      if (idRef.current !== printerId) return;
       setJobs(mergeJobs([], list));
       setError(null);
     } catch (err) {
-      setError(err);
+      if (idRef.current === printerId) setError(err);
     }
-  }, [getJobs]);
+  }, [getJobs, printerId]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: printerId is the reset trigger
+  useEffect(() => {
+    setJobs([]);
+    setError(null);
+  }, [printerId]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: printerState is intentionally a refetch trigger
   useEffect(() => {
@@ -260,7 +285,13 @@ export function useJobs(getJobs: () => Promise<Job[]> = api.getJobs) {
       }),
     [store, refetch],
   );
-  useEffect(() => store.on("job", (job) => setJobs((prev) => mergeJobs(prev, [job]))), [store]);
+  useEffect(
+    () =>
+      store.on("job", (job) => {
+        if (job.printer === printerId) setJobs((prev) => mergeJobs(prev, [job]));
+      }),
+    [store, printerId],
+  );
 
   return { jobs, error, refetch };
 }

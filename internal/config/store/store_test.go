@@ -15,11 +15,12 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/config/yamledit"
 )
 
-const valid = `apiVersion: pagewire/v1
-# the printer's name
+const valid = `apiVersion: pagewire/v2
+# the UI title
 name: Office   # shown in the UI
 
-location: Desk
+scan:
+  retentionDays: 7
 `
 
 func check(b []byte) error {
@@ -82,7 +83,7 @@ func TestCreateTwice(t *testing.T) {
 
 func TestCreateInvalid(t *testing.T) {
 	s, path := newStore(t)
-	_, err := s.Create([]byte("apiVersion: pagewire/v1\n"))
+	_, err := s.Create([]byte("apiVersion: pagewire/v2\n"))
 	var el *config.ErrorList
 	if !errors.As(err, &el) {
 		t.Fatalf("err = %v, want *config.ErrorList", err)
@@ -139,7 +140,7 @@ func TestPatchInvalidResult(t *testing.T) {
 
 func TestNoOpPatchOnInvalidFile(t *testing.T) {
 	s, path := newStore(t)
-	const invalid = "apiVersion: pagewire/v1\n"
+	const invalid = "apiVersion: pagewire/v2\n"
 	if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +199,7 @@ func TestReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := "apiVersion: pagewire/v1\nname: Other\n"
+	other := "apiVersion: pagewire/v2\nname: Other\n"
 	if _, err := s.Replace("stale", []byte(other)); !errors.As(err, new(*ErrPreconditionFailed)) {
 		t.Fatalf("err = %v, want ErrPreconditionFailed", err)
 	}
@@ -260,7 +261,7 @@ func TestReadersSeeWholeFiles(t *testing.T) {
 	defer func() { _ = old.Close() }()
 	var contents []string
 	for i := range 50 {
-		contents = append(contents, "apiVersion: pagewire/v1\nname: P\n# "+strings.Repeat("x", i*400)+"\n")
+		contents = append(contents, "apiVersion: pagewire/v2\nname: P\n# "+strings.Repeat("x", i*400)+"\n")
 	}
 	for _, c := range contents {
 		versions[c] = true
@@ -311,12 +312,125 @@ func TestUnwritableDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restore for TempDir cleanup
-	_, err = s.Replace(etag, []byte("apiVersion: pagewire/v1\nname: Other\n"))
+	_, err = s.Replace(etag, []byte("apiVersion: pagewire/v2\nname: Other\n"))
 	var el *config.ErrorList
 	if err == nil || errors.As(err, &el) || errors.As(err, new(*ErrPreconditionFailed)) {
 		t.Fatalf("err = %v, want a plain write error", err)
 	}
 	assertContent(t, path, valid)
+}
+
+// v1 is a pagewire/v1 file; normalized stores migrate it on every write.
+const v1 = `apiVersion: pagewire/v1
+name: Office # kept
+print:
+  maxUploadMiB: 20
+  defaults:
+    sides: two-sided-long-edge
+`
+
+func newNormalizingStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pagewire.yaml")
+	validate := func(b []byte) error {
+		_, err := config.Check(b, config.Known{})
+		return err
+	}
+	migrate := func(b []byte) ([]byte, error) {
+		out, _, err := config.Migrate(b)
+		return out, err
+	}
+	return New(path, validate, WithNormalize(migrate)), path
+}
+
+// assertV2 checks that the file is the migrated v1 file and etag its etag.
+func assertV2(t *testing.T, path, etag string) {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // test temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag != sum(b) {
+		t.Errorf("etag %s is not the etag of the file on disk %s", etag, sum(b))
+	}
+	if config.IsV1(b) || !strings.Contains(string(b), "name: Office # kept") {
+		t.Fatalf("file is not the migrated v1 file:\n%s", b)
+	}
+	got, err := config.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Printers) != 1 || got.Printers[0].Defaults.Sides != "two-sided-long-edge" || got.Print.MaxUploadMiB != 20 {
+		t.Errorf("migrated config %+v", got)
+	}
+}
+
+func TestNormalizeCreate(t *testing.T) {
+	s, path := newNormalizingStore(t)
+	etag, err := s.Create([]byte(v1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertV2(t, path, etag)
+}
+
+func TestNormalizeReplace(t *testing.T) {
+	s, path := newNormalizingStore(t)
+	etag, err := s.Create([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag, err = s.Replace(etag, []byte(v1)); err != nil {
+		t.Fatal(err)
+	}
+	assertV2(t, path, etag)
+}
+
+func TestNormalizePatch(t *testing.T) {
+	for name, patch := range map[string]string{
+		"rename": `{"name":"Home","printers":[{"id":"printer","name":"Home"}]}`,
+		"no-op":  `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, path := newNormalizingStore(t)
+			if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, etag, err := s.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, etag, err := s.Patch(etag, []byte(patch))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertContent(t, path, string(raw))
+			if name == "no-op" {
+				assertV2(t, path, etag)
+				return
+			}
+			b, _ := os.ReadFile(path) //nolint:gosec // test temp path
+			got, err := config.Parse(b)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, b)
+			}
+			if etag != sum(b) || got.Name != "Home" || len(got.Printers) != 1 || got.Printers[0].Name != "Home" ||
+				got.Printers[0].Defaults.Sides != "" || len(got.Scanners) != 1 || got.Print.MaxUploadMiB != 20 {
+				t.Errorf("patched v1 file:\n%s", b)
+			}
+		})
+	}
+}
+
+func TestNormalizeError(t *testing.T) {
+	s, path := newNormalizingStore(t)
+	bad := "apiVersion: pagewire/v1\nname: Office\nscan:\n  retentionDays: soon\n"
+	if _, err := s.Create([]byte(bad)); !errors.As(err, new(*config.ErrorList)) {
+		t.Fatalf("err = %v, want the v1 file's *config.ErrorList", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file written despite a normalize error: %v", err)
+	}
 }
 
 func assertContent(t *testing.T, path, want string) {

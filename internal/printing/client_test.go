@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,8 @@ import (
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 )
 
 // recorder is the virtual printer's abstract.Printer backend plus a hook
@@ -423,5 +426,142 @@ func TestResponseSizeLimit(t *testing.T) {
 	}
 	if maxResponseBytes != 8<<20 {
 		t.Errorf("maxResponseBytes = %d, want 8 MiB", maxResponseBytes)
+	}
+}
+
+// ippServer serves raw IPP: respond builds the response to each decoded
+// request, and every request is kept in order.
+func ippServer(t *testing.T, respond func(req *goipp.Message) *goipp.Message) (*Client, func() []*goipp.Message) {
+	t.Helper()
+	var mu sync.Mutex
+	var reqs []*goipp.Message
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := &goipp.Message{}
+		if err := req.Decode(r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body) // the document, if any
+		mu.Lock()
+		reqs = append(reqs, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", goipp.ContentType)
+		_ = respond(req).Encode(w)
+	}))
+	t.Cleanup(srv.Close)
+	return New("ipp://" + strings.TrimPrefix(srv.URL, "http://") + "/ipp/print"), func() []*goipp.Message {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(reqs)
+	}
+}
+
+// TestAttributesSamsungCaps: a printer reporting what the Samsung SCX-4300's
+// queue reports gives exactly those caps, and nothing for the other kinds.
+func TestAttributesSamsungCaps(t *testing.T) {
+	c, reqs := ippServer(t, func(req *goipp.Message) *goipp.Message {
+		rsp := goipp.NewResponse(goipp.DefaultVersion, goipp.StatusOk, req.RequestID)
+		kw := func(name string, vs ...string) {
+			a := goipp.Attribute{Name: name}
+			for _, v := range vs {
+				a.Values.Add(goipp.TagKeyword, goipp.String(v))
+			}
+			rsp.Printer.Add(a)
+		}
+		rsp.Printer.Add(goipp.MakeAttribute("printer-state", goipp.TagEnum, goipp.Integer(3)))
+		kw("media-supported", "iso_a4_210x297mm", "na_letter_8.5x11in")
+		kw("media-default", "na_letter_8.5x11in")
+		kw("sides-supported", "one-sided")
+		kw("sides-default", "one-sided")
+		kw("print-color-mode-supported", "monochrome")
+		kw("print-color-mode-default", "monochrome")
+		q := goipp.Attribute{Name: "print-quality-supported"}
+		for _, v := range []goipp.Integer{3, 4, 5} {
+			q.Values.Add(goipp.TagEnum, v)
+		}
+		rsp.Printer.Add(q)
+		rsp.Printer.Add(goipp.MakeAttribute("print-quality-default", goipp.TagEnum, goipp.Integer(4)))
+		res := goipp.Attribute{Name: "printer-resolution-supported"}
+		for _, v := range []int{300, 600} {
+			res.Values.Add(goipp.TagResolution, goipp.Resolution{Xres: v, Yres: v, Units: goipp.UnitsDpi})
+		}
+		rsp.Printer.Add(res)
+		rsp.Printer.Add(goipp.MakeAttribute("printer-resolution-default", goipp.TagResolution, goipp.Resolution{Xres: 600, Yres: 600, Units: goipp.UnitsDpi}))
+		rsp.Printer.Add(goipp.MakeAttribute("copies-supported", goipp.TagRange, goipp.Range{Lower: 1, Upper: 999}))
+		f := goipp.Attribute{Name: "document-format-supported"}
+		f.Values.Add(goipp.TagMimeType, goipp.String("application/pdf"))
+		rsp.Printer.Add(f)
+		return rsp
+	})
+	a, err := c.Attributes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	none := []string{}
+	want := device.PrinterCaps{
+		Media: []string{"iso_a4_210x297mm", "na_letter_8.5x11in"}, MediaSources: none, MediaTypes: none,
+		Sides: []string{"one-sided"}, ColorModes: []string{"monochrome"}, Qualities: []string{"draft", "normal", "high"},
+		ContentOptimize: none, Orientations: none, PrintScalings: none, OutputBins: none, Finishings: none,
+		Formats: []string{"application/pdf"}, Resolutions: []int{300, 600}, NumberUp: []int{},
+		CopiesMax:    999,
+		MediaDefault: "na_letter_8.5x11in", SidesDefault: "one-sided", ColorModeDefault: "monochrome",
+		QualityDefault: "normal", ResolutionDefault: 600,
+	}
+	if !reflect.DeepEqual(a.Caps, want) {
+		t.Errorf("Caps = %+v\nwant %+v", a.Caps, want)
+	}
+	if a.State != "idle" || !slices.Equal(a.Media, want.Media) || !slices.Equal(a.Formats, want.Formats) {
+		t.Errorf("Attributes() = %+v", a)
+	}
+	asked := all(reqs()[0].Operation, "requested-attributes")
+	for _, name := range append([]string{"printer-state", "marker-levels"}, ippcaps.Requested...) {
+		if !slices.Contains(asked, name) {
+			t.Errorf("requested-attributes lacks %s: %v", name, asked)
+		}
+	}
+}
+
+// TestSubmitMediaCol: a tray or media type sends media-col (with the size
+// name) instead of media, and one copy sends no copies attribute.
+func TestSubmitMediaCol(t *testing.T) {
+	c, reqs := ippServer(t, func(req *goipp.Message) *goipp.Message {
+		rsp := goipp.NewResponse(goipp.DefaultVersion, goipp.StatusOk, req.RequestID)
+		if goipp.Op(req.Code) == goipp.OpCreateJob {
+			rsp.Job.Add(goipp.MakeAttribute("job-id", goipp.TagInteger, goipp.Integer(7)))
+		}
+		return rsp
+	})
+	opts := PrintOptions{Copies: 1, PrintSettings: device.PrintSettings{
+		Media: "iso_a4_210x297mm", MediaSource: "tray-1", MediaType: "stationery", OutputBin: "face-down",
+	}}
+	id, err := c.Submit(context.Background(), "a.pdf", "web", FormatPDF, strings.NewReader("%PDF-1.4"), opts)
+	if err != nil || id != 7 {
+		t.Fatalf("Submit = %d, %v", id, err)
+	}
+	cj := reqs()[0]
+	if goipp.Op(cj.Code) != goipp.OpCreateJob {
+		t.Fatalf("first request is %s, want Create-Job", goipp.Op(cj.Code))
+	}
+	for _, name := range []string{"media", "copies"} {
+		if slices.ContainsFunc(cj.Job, func(a goipp.Attribute) bool { return a.Name == name }) {
+			t.Errorf("Create-Job sends %s, want none", name)
+		}
+	}
+	if got := attrString(cj.Job, "output-bin"); got != "face-down" {
+		t.Errorf("output-bin = %q, want face-down", got)
+	}
+	var col goipp.Collection
+	for _, a := range cj.Job {
+		if a.Name == "media-col" && len(a.Values) == 1 {
+			col, _ = a.Values[0].V.(goipp.Collection)
+		}
+	}
+	got := map[string]string{}
+	for _, m := range col {
+		got[m.Name] = attrString(goipp.Attributes{m}, m.Name)
+	}
+	want := map[string]string{"media-size-name": "iso_a4_210x297mm", "media-source": "tray-1", "media-type": "stationery"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("media-col = %v, want %v", got, want)
 	}
 }

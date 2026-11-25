@@ -2,8 +2,19 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ProblemError, type uploadPrint } from "../api/client";
 import { createEventStore, EventsContext } from "../api/events";
-import type { Config, ConfigResponse, Job, PrintOptions, Status } from "../gen/api";
-import { detectFormat, formatAccepted, mediaLabel, Print } from "./Print";
+import { toastQueue } from "../components/ui";
+import type {
+  Config,
+  ConfigResponse,
+  Job,
+  PrinterCaps,
+  PrintOptions,
+  PrintResult,
+  Status,
+  StatusPrinter,
+  Warning,
+} from "../gen/api";
+import { detectFormat, formatAccepted, Print } from "./Print";
 
 type Call = { method: string; path: string };
 let calls: Call[] = [];
@@ -20,8 +31,9 @@ const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       status,
       headers: { "Content-Type": "application/json" },
     });
-  if (path === "/api/v1/jobs" && method === "GET") return json(jobs);
-  if (path.startsWith("/api/v1/jobs/") && method === "DELETE")
+  const jobsOf = /^\/api\/v1\/printers\/([^/]+)\/jobs$/.exec(path);
+  if (jobsOf && method === "GET") return json(jobs.filter((j) => j.printer === jobsOf[1]));
+  if (/^\/api\/v1\/printers\/[^/]+\/jobs\/\d+$/.test(path) && method === "DELETE")
     return new Response(null, { status: 204 });
   if (path === "/api/v1/config") {
     return configResponse
@@ -42,6 +54,8 @@ beforeEach(() => {
   calls = [];
   jobs = [];
   configResponse = null;
+  localStorage.clear();
+  window.history.replaceState(null, "", "/print");
   globalThis.fetch = fakeFetch;
   consoleError = spyOn(console, "error");
 });
@@ -53,71 +67,167 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-const noPrinter: Status = {
-  config: {
-    state: "missing",
-    etag: "",
-    appliedEtag: "",
-    errors: [],
-    changedAt: "0001-01-01T00:00:00Z",
-  },
-  device: {
-    phase: "none",
-    mode: "none",
-    decision: null,
-    inventory: null,
+const noCaps: PrinterCaps = {
+  media: [],
+  mediaSources: [],
+  mediaTypes: [],
+  sides: [],
+  colorModes: [],
+  qualities: [],
+  contentOptimize: [],
+  orientations: [],
+  printScalings: [],
+  outputBins: [],
+  finishings: [],
+  formats: [],
+  resolutions: [],
+  numberUp: [],
+  copiesMax: 0,
+  mediaDefault: "",
+  mediaSourceDefault: "",
+  mediaTypeDefault: "",
+  sidesDefault: "",
+  colorModeDefault: "",
+  qualityDefault: "",
+  contentOptimizeDefault: "",
+  orientationDefault: "",
+  printScalingDefault: "",
+  outputBinDefault: "",
+  finishingsDefault: "",
+  resolutionDefault: 0,
+  numberUpDefault: 0,
+};
+
+/** The Samsung SCX-4300's queue: one-sided, monochrome, and nothing else beyond copies. */
+const samsungCaps: PrinterCaps = {
+  ...noCaps,
+  media: ["iso_a4_210x297mm", "na_letter_8.5x11in"],
+  mediaDefault: "na_letter_8.5x11in",
+  sides: ["one-sided"],
+  sidesDefault: "one-sided",
+  colorModes: ["monochrome"],
+  colorModeDefault: "monochrome",
+  qualities: ["draft", "normal", "high"],
+  qualityDefault: "normal",
+  resolutions: [300, 600],
+  resolutionDefault: 600,
+  copiesMax: 999,
+};
+
+/** The simulated HP OfficeJet: every kind, with a single output bin and finishing. */
+const hpCaps: PrinterCaps = {
+  ...noCaps,
+  media: [
+    "iso_a4_210x297mm",
+    "na_letter_8.5x11in",
+    "na_legal_8.5x14in",
+    "na_number-10_4.125x9.5in",
+    "na_index-4x6_4x6in",
+  ],
+  mediaDefault: "iso_a4_210x297mm",
+  mediaSources: ["auto", "tray-1", "manual"],
+  mediaSourceDefault: "auto",
+  mediaTypes: ["stationery", "photographic-glossy"],
+  mediaTypeDefault: "stationery",
+  sides: ["one-sided", "two-sided-long-edge", "two-sided-short-edge"],
+  sidesDefault: "one-sided",
+  colorModes: ["auto", "color", "monochrome"],
+  colorModeDefault: "auto",
+  qualities: ["draft", "normal", "high"],
+  qualityDefault: "normal",
+  resolutions: [300, 600],
+  resolutionDefault: 600,
+  contentOptimize: ["auto", "photo", "text"],
+  contentOptimizeDefault: "auto",
+  orientations: ["portrait", "landscape"],
+  orientationDefault: "portrait",
+  numberUp: [1, 2, 4],
+  numberUpDefault: 1,
+  printScalings: ["auto", "fit", "fill", "none"],
+  printScalingDefault: "auto",
+  outputBins: ["face-down"],
+  outputBinDefault: "face-down",
+  finishings: ["none"],
+  finishingsDefault: "none",
+  copiesMax: 99,
+};
+
+function printer(p: Partial<StatusPrinter> = {}): StatusPrinter {
+  return {
+    id: "hp",
+    name: "HP OfficeJet",
+    location: "Study",
+    enabled: true,
+    phase: "ready",
     message: "",
-    advertised: [],
-    blobs: [],
-  },
-  printer: {
-    available: false,
-    uri: "",
-    state: "unknown",
+    warnings: [],
+    decision: null,
+    device: null,
+    available: true,
+    uri: "ipp://127.0.0.1:60000/ipp/print",
+    state: "idle",
     reasons: [],
-    formats: [],
+    // octet-stream never makes an unknown file printable (internal/printing.Negotiate).
+    formats: ["application/pdf", "image/jpeg; charset=binary", "application/octet-stream"],
     convertedFormats: [],
     media: [],
     markers: [],
+    capabilities: hpCaps,
+    connect: { dnssdName: "", ippUris: [] },
+    ...p,
+  };
+}
+
+const samsung = printer({
+  id: "samsung",
+  name: "Samsung SCX-4300",
+  location: "",
+  capabilities: samsungCaps,
+});
+
+const base: Status = {
+  config: {
+    state: "applied",
+    etag: "e1",
+    appliedEtag: "e1",
+    errors: [],
+    changedAt: "0001-01-01T00:00:00Z",
   },
-  scanner: { available: false, url: "", state: "unknown" },
+  phase: "ready",
+  message: "",
+  printers: [],
+  scanners: [],
+  workloads: [],
+  devices: [],
   reconcile: [],
-  connect: { dnssdName: "", ippUris: [], esclUrls: [] },
 };
 
-const ready: Status = {
-  ...noPrinter,
-  config: { ...noPrinter.config, state: "applied", etag: "e1", appliedEtag: "e1" },
-  device: { ...noPrinter.device, phase: "ready", mode: "simulated" },
-  printer: {
-    ...noPrinter.printer,
-    available: true,
-    uri: "ipp://127.0.0.1:8631/ipp/print",
-    state: "idle",
-    // octet-stream never makes an unknown file printable (internal/printing.Negotiate).
-    formats: ["application/pdf", "image/jpeg; charset=binary", "application/octet-stream"],
-    media: ["iso_a4_210x297mm", "na_letter_8.5x11in"],
-  },
-};
+const ready: Status = { ...base, printers: [printer()] };
+const both: Status = { ...base, printers: [printer(), samsung] };
 
 const config: Config = {
-  apiVersion: "pagewire/v1",
-  name: "Living room printer",
-  location: "",
-  device: { mode: "simulated", driver: "auto", scanner: "auto" },
-  print: {
-    defaults: {
-      media: "na_letter_8.5x11in",
-      sides: "two-sided-long-edge",
-      colorMode: "monochrome",
-      quality: "high",
+  apiVersion: "pagewire/v2",
+  name: "Home",
+  printers: [
+    {
+      id: "hp",
+      name: "HP OfficeJet",
+      location: "Study",
+      enabled: true,
+      mode: "simulated",
+      driver: "auto",
+      defaults: {
+        media: "na_letter_8.5x11in",
+        sides: "two-sided-long-edge",
+        colorMode: "monochrome",
+        quality: "high",
+      },
     },
-    maxUploadMiB: 1,
-  },
-  scan: {
-    defaults: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
-    retentionDays: 7,
-  },
+  ],
+  scanners: [],
+  ignoredDevices: [],
+  print: { maxUploadMiB: 1 },
+  scan: { retentionDays: 7 },
   licenses: { acceptedEulas: [] },
 };
 
@@ -143,29 +253,40 @@ class FakeEventSource {
 const emit = (type: string, data: unknown) => act(() => FakeEventSource.last?.emit(type, data));
 
 type Upload = {
+  printer: string;
   file: File;
   options: PrintOptions;
   progress: (f: number) => void;
-  done: () => void;
+  done: (warnings?: Warning[]) => void;
   fail: (e: unknown) => void;
 };
 
 /** A controllable upload: each call waits until the test calls done() or fail(). */
 function fakeUpload() {
   const uploads: Upload[] = [];
-  const upload = ((file: File, options: PrintOptions, onProgress?: (f: number) => void) =>
-    new Promise<Job>((resolve, reject) => {
+  const upload = ((
+    printerId: string,
+    file: File,
+    options: PrintOptions,
+    onProgress?: (f: number) => void,
+  ) =>
+    new Promise<PrintResult>((resolve, reject) => {
       uploads.push({
+        printer: printerId,
         file,
         options,
         progress: (f) => onProgress?.(f),
-        done: () =>
+        done: (warnings = []) =>
           resolve({
-            id: 1,
-            name: file.name,
-            state: "pending",
-            reasons: [],
-            createdAt: "2026-11-24T17:00:00Z",
+            job: {
+              id: 1,
+              printer: printerId,
+              name: file.name,
+              state: "pending",
+              reasons: [],
+              createdAt: "2026-11-24T17:00:00Z",
+            },
+            warnings,
           }),
         fail: reject,
       });
@@ -206,13 +327,32 @@ const row = (name: string) => screen.getByText(name).closest("li") as HTMLElemen
 const printButton = () => screen.getByRole("button", { name: /^Print( |$)/ });
 const problem = (status: number, type: string, detail: string) =>
   new ProblemError({ type, title: "x", status, detail, errors: [] });
-/** The visible value of the Select labelled `label` (the hidden native select lists every option). */
-const selected = (label: string) =>
+/** The field of the control labelled `label`, or undefined when it is not shown. */
+const fieldOf = (label: string) =>
   screen
-    .getAllByText(label)
+    .queryAllByText(label)
     .find((e) => e.classList.contains("ui-label"))
-    ?.closest(".ui-field")
-    ?.querySelector(".ui-select-value")?.textContent;
+    ?.closest(".ui-field") as HTMLElement | undefined;
+/** The visible value of the Select labelled `label` (the hidden native select lists every option). */
+const selected = (label: string) => fieldOf(label)?.querySelector(".ui-select-value")?.textContent;
+const optionsOf = (label: string) =>
+  Array.from(fieldOf(label)?.querySelectorAll("select option") ?? [])
+    .map((o) => o.textContent?.trim())
+    .filter(Boolean);
+const shown = (label: string) => fieldOf(label) !== undefined;
+const press = (el: HTMLElement) =>
+  act(async () => {
+    fireEvent.click(el);
+  });
+
+/** Every option the page lists reads as a label, never as a raw PWG or IPP keyword. */
+function expectNoRawKeywords() {
+  expect(document.body.textContent).not.toMatch(/[a-z]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)/);
+  for (const o of document.querySelectorAll("select option")) {
+    const value = (o as HTMLOptionElement).value;
+    if (/[-_]/.test(value)) expect(o.textContent?.trim()).not.toBe(value);
+  }
+}
 
 describe("format detection mirrors the server", () => {
   test("signatures, text and unknown", () => {
@@ -236,12 +376,6 @@ describe("format detection mirrors the server", () => {
     expect(formatAccepted("image/png", ["image/jpeg"])).toBe(false);
     expect(formatAccepted("application/octet-stream", ["application/octet-stream"])).toBe(false);
   });
-
-  test("media names", () => {
-    expect(mediaLabel("iso_a4_210x297mm")).toBe("A4 (210 × 297 mm)");
-    expect(mediaLabel("na_letter_8.5x11in")).toBe("Letter (8.5 × 11 in)");
-    expect(mediaLabel("custom")).toBe("custom");
-  });
 });
 
 describe("Print view", () => {
@@ -251,20 +385,30 @@ describe("Print view", () => {
     expect(screen.getByText("Checking the printer…")).toBeTruthy();
   });
 
-  test("without a printer the controls are disabled and the reason is shown", async () => {
+  test("without a connected printer the controls are hidden or disabled and the reason is shown", async () => {
     await renderPrint({
-      ...noPrinter,
-      device: { ...noPrinter.device, phase: "probing", message: "No printer found on USB" },
+      ...base,
+      phase: "deploying",
+      printers: [
+        printer({
+          phase: "probing",
+          available: false,
+          message: "Not plugged in, or not visible to pagewire",
+        }),
+      ],
     });
     expect(screen.getByText("The printer is not ready")).toBeTruthy();
-    expect(screen.getByText("No printer found on USB")).toBeTruthy();
+    expect(screen.getByText("Not plugged in, or not visible to pagewire")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Choose files" }).hasAttribute("disabled")).toBe(
       true,
     );
     expect(printButton().hasAttribute("disabled")).toBe(true);
+    // Its options are unknown until it is connected, so none is offered.
+    expect(shown("Paper size")).toBe(false);
+    expect(shown("Copies")).toBe(false);
     expect(screen.getByText("Jobs appear here once the printer is ready.")).toBeTruthy();
-    // GET /jobs answers 503 without a printer, so it is not asked.
-    expect(calls.some((c) => c.path === "/api/v1/jobs")).toBe(false);
+    // The jobs route answers 503 without a printer, so it is not asked.
+    expect(calls.some((c) => c.path.endsWith("/jobs"))).toBe(false);
   });
 
   test("flags unsupported files before upload and sends only printable ones", async () => {
@@ -293,17 +437,19 @@ describe("Print view", () => {
     await act(async () => {
       fireEvent.click(printButton());
     });
-    expect(uploads.map((u) => u.file.name)).toEqual(["boarding-pass.pdf"]);
+    expect(uploads.map((u) => [u.printer, u.file.name])).toEqual([["hp", "boarding-pass.pdf"]]);
   });
 
-  test("options default from the config, and progress shows while a file uploads", async () => {
+  test("options default from the printer's entry, and progress shows while a file uploads", async () => {
     configResponse = { etag: "e1", config, state: "applied", errors: [], lastGood: null };
     const { upload, uploads } = fakeUpload();
     const { container } = await renderPrint(ready, upload);
     await waitFor(() => expect(selected("Paper size")).toBe("Letter (8.5 × 11 in)"));
-    expect(selected("Sides")).toBe("Two-sided, flip on long edge");
+    expect(selected("Sides")).toBe("Two-sided, long edge");
     expect(selected("Colour")).toBe("Black and white");
     expect(selected("Quality")).toBe("High");
+    // Not configured: the printer's own default.
+    expect(selected("Paper tray")).toBe("Automatic");
     expect(screen.getByText("Up to 1 MB per file.", { exact: false })).toBeTruthy();
 
     const big = new Uint8Array(1024 * 1024 + 1);
@@ -315,18 +461,26 @@ describe("Print view", () => {
     ]);
     await waitFor(() => expect(within(row("huge.pdf")).getByText(/upload limit/)).toBeTruthy());
     expect(printButton().textContent).toBe("Print 2 of 3 files");
-    expect(screen.getByText("1 copy · Letter · two-sided, flip on long edge")).toBeTruthy();
+    expect(screen.getByText("1 copy · Letter (8.5 × 11 in) · two-sided, long edge")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(printButton());
     });
     expect(uploads.length).toBe(1);
+    // Every shown control is sent; the single-valued output tray and finishing are not, nor is
+    // one copy.
     expect(uploads[0]?.options).toEqual({
-      copies: 1,
+      media: "na_letter_8.5x11in",
+      mediaSource: "auto",
+      mediaType: "stationery",
       sides: "two-sided-long-edge",
       colorMode: "monochrome",
-      media: "na_letter_8.5x11in",
       quality: "high",
+      resolution: 600,
+      contentOptimize: "auto",
+      orientation: "portrait",
+      numberUp: 1,
+      printScaling: "auto",
     });
     act(() => uploads[0]?.progress(0.5));
     const bar = screen.getByRole("progressbar", { name: "Uploading a.pdf" });
@@ -358,13 +512,122 @@ describe("Print view", () => {
     expect(screen.getByText("huge.pdf")).toBeTruthy();
   });
 
+  test("the Samsung shows only paper size, quality, resolution and copies, and sends only those", async () => {
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint({ ...base, printers: [samsung] }, upload);
+    expect(shown("Paper size")).toBe(true);
+    expect(shown("Quality")).toBe(true);
+    expect(shown("Resolution")).toBe(true);
+    expect(shown("Copies")).toBe(true);
+    for (const label of [
+      "Colour",
+      "Sides",
+      "Paper tray",
+      "Paper type",
+      "Orientation",
+      "Pages per sheet",
+      "Scaling",
+      "Output tray",
+      "Finishing",
+    ]) {
+      expect(shown(label)).toBe(false);
+    }
+    // No text stands in for the hidden controls either.
+    expect(screen.queryByText("More options")).toBeNull();
+    expect(screen.queryByText(/one-sided|black and white/i)).toBeNull();
+    expect(screen.getByText("1 copy · Letter (8.5 × 11 in)")).toBeTruthy();
+
+    await pick(container, [new File(["%PDF-1.7\n"], "a.pdf")]);
+    await waitFor(() => expect(printButton().hasAttribute("disabled")).toBe(false));
+    await press(printButton());
+    expect(uploads[0]?.printer).toBe("samsung");
+    expect(uploads[0]?.options).toEqual({
+      media: "na_letter_8.5x11in",
+      quality: "normal",
+      resolution: 600,
+    });
+  });
+
+  test("the HP shows trays and types, hides its single output tray and finishing, and keeps layout under More options", async () => {
+    await renderPrint(ready);
+    expect(optionsOf("Paper tray")).toEqual(["Automatic", "Tray 1", "Manual feed"]);
+    expect(optionsOf("Paper type")).toEqual(["Plain paper", "Glossy photo paper"]);
+    expect(optionsOf("Paper size")).toContain("Envelope #10 (4.125 × 9.5 in)");
+    expect(shown("Output tray")).toBe(false);
+    expect(shown("Finishing")).toBe(false);
+
+    const more = screen.getByRole("button", { name: "More options" });
+    await press(more);
+    const disclosure = more.closest(".ui-disclosure") as HTMLElement;
+    for (const label of ["Orientation", "Pages per sheet", "Scaling"]) {
+      expect(within(disclosure).getAllByText(label).length).toBeGreaterThan(0);
+    }
+    expect(within(disclosure).queryByText("Paper tray")).toBeNull();
+    expectNoRawKeywords();
+  });
+
+  test("the sides control is a dropdown", async () => {
+    await renderPrint(ready);
+    const sides = fieldOf("Sides")?.querySelector("button") as HTMLElement;
+    expect(sides.getAttribute("aria-haspopup")).toBe("listbox");
+  });
+
+  test("a printer that allows one copy shows no copies field and sends no copies", async () => {
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint(
+      { ...base, printers: [printer({ capabilities: { ...hpCaps, copiesMax: 1 } })] },
+      upload,
+    );
+    expect(shown("Copies")).toBe(false);
+    await pick(container, [new File(["%PDF-1.7\n"], "a.pdf")]);
+    await waitFor(() => expect(printButton().hasAttribute("disabled")).toBe(false));
+    await press(printButton());
+    expect(uploads[0]?.options).not.toHaveProperty("copies");
+  });
+
+  test("the response's warnings show in the toast with labels", async () => {
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint(ready, upload);
+    await pick(container, [new File(["%PDF-1.7\n"], "a.pdf")]);
+    await waitFor(() => expect(printButton().hasAttribute("disabled")).toBe(false));
+    await press(printButton());
+    await act(async () =>
+      uploads[0]?.done([{ option: "colorMode", value: "auto", using: "monochrome", message: "x" }]),
+    );
+    const sent = toastQueue.visibleToasts.find(
+      (x) => x.content.title === "Sent a.pdf to the printer",
+    );
+    expect(sent?.content.description).toBe(
+      "The default Colour “Automatic” is not offered by this printer; it uses “Black and white”.",
+    );
+  });
+
+  test("a picker switches printers, recomputing the options and the jobs", async () => {
+    jobs = [
+      {
+        id: 1,
+        printer: "samsung",
+        name: "samsung-job.pdf",
+        state: "completed",
+        reasons: [],
+        createdAt: "2026-11-24T17:00:00Z",
+      },
+    ];
+    await renderPrint(both);
+    expect(shown("Sides")).toBe(true);
+    expect(calls).toContainEqual({ method: "GET", path: "/api/v1/printers/hp/jobs" });
+    await press(screen.getByRole("radio", { name: /^Samsung SCX-4300/ }));
+    expect(shown("Sides")).toBe(false);
+    await waitFor(() => expect(screen.getByText("samsung-job.pdf")).toBeTruthy());
+    expect(calls).toContainEqual({ method: "GET", path: "/api/v1/printers/samsung/jobs" });
+    // The choice is remembered for the next visit.
+    expect(localStorage.getItem("pagewire:printer")).toBe("samsung");
+  });
+
   test("files the server converts are accepted and listed", async () => {
     const { container } = await renderPrint({
-      ...ready,
-      printer: {
-        ...ready.printer,
-        convertedFormats: [{ from: "image/png", to: "image/jpeg" }],
-      },
+      ...base,
+      printers: [printer({ convertedFormats: [{ from: "image/png", to: "image/jpeg" }] })],
     });
     expect(screen.getByText(/This printer accepts PDF, JPEG, and PNG\./)).toBeTruthy();
     await pick(container, [new File([bytes("\x89PNG\r\n\x1a\n")], "scan.png")]);
@@ -406,7 +669,8 @@ describe("Print view", () => {
   });
 
   test("copies stay in the button and the summary, which follows both cards", async () => {
-    const { container } = await renderPrint(ready, fakeUpload().upload);
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint(ready, upload);
     await pick(container, [new File(["%PDF-1.7\n"], "a.pdf"), new File(["%PDF-1.7\n"], "b.pdf")]);
     const copies = screen.getByRole("textbox", { name: "Copies" }) as HTMLInputElement;
     await act(async () => {
@@ -414,12 +678,14 @@ describe("Print view", () => {
       fireEvent.blur(copies);
     });
     await waitFor(() => expect(printButton().textContent).toBe("Print 2 files, 3 copies each"));
-    expect(screen.getByText("3 copies · A4 · one-sided")).toBeTruthy();
+    expect(screen.getByText("3 copies · A4 (210 × 297 mm) · one-sided")).toBeTruthy();
     const options = screen.getByRole("heading", { name: "Options" });
     // The submit row comes after the Options card in reading order.
     expect(
       options.compareDocumentPosition(printButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    await press(printButton());
+    expect(uploads[0]?.options.copies).toBe(3);
   });
 
   test("printing is off while the connection to pagewire is down", async () => {
@@ -429,17 +695,8 @@ describe("Print view", () => {
     expect(printButton().hasAttribute("disabled")).toBe(true);
   });
 
-  test("a device that finds no printer tells you to plug it in", async () => {
-    await renderPrint({
-      ...noPrinter,
-      config: { ...noPrinter.config, state: "applied" },
-      device: {
-        ...noPrinter.device,
-        phase: "probing",
-        mode: "probe",
-        inventory: { devices: [], probedAt: "2026-11-24T18:00:00Z", simulated: false },
-      },
-    });
+  test("while pagewire finds no device it tells you to plug it in", async () => {
+    await renderPrint({ ...base, phase: "probing" });
     expect(await screen.findByText(/Plug the printer in with USB/)).toBeTruthy();
   });
 
@@ -457,16 +714,18 @@ describe("Print view", () => {
   });
 
   test("a printing job uses a different badge tone than a waiting one", async () => {
-    const base: Job = {
+    const job: Job = {
       id: 1,
+      printer: "hp",
       name: "waiting.pdf",
       state: "pending",
       reasons: [],
       createdAt: "2026-11-24T17:00:00+01:00",
     };
-    jobs = [base, { ...base, id: 2, name: "printing.pdf", state: "processing" }];
+    jobs = [job, { ...job, id: 2, name: "printing.pdf", state: "processing" }];
     await renderPrint(ready);
     await waitFor(() => expect(within(row("printing.pdf")).getByText("Printing")).toBeTruthy());
+    expect(calls).toContainEqual({ method: "GET", path: "/api/v1/printers/hp/jobs" });
     const tone = (name: string) => row(name).querySelector(".ui-badge")?.getAttribute("data-tone");
     expect(tone("waiting.pdf")).toBe("busy");
     expect(tone("printing.pdf")).toBe("active");
@@ -475,6 +734,7 @@ describe("Print view", () => {
   test("a job row moves from pending to completed after a job event, and can be canceled while pending", async () => {
     const job: Job = {
       id: 7,
+      printer: "hp",
       name: "boarding-pass.pdf",
       state: "pending",
       reasons: [],
@@ -497,7 +757,7 @@ describe("Print view", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel boarding-pass.pdf" }));
     });
-    expect(calls).toContainEqual({ method: "DELETE", path: "/api/v1/jobs/7" });
+    expect(calls).toContainEqual({ method: "DELETE", path: "/api/v1/printers/hp/jobs/7" });
 
     emit("job", { ...job, state: "completed" });
     await waitFor(() =>

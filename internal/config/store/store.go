@@ -41,14 +41,30 @@ func (e *ErrPreconditionFailed) Error() string {
 // error (a *config.ErrorList for a bad config) is returned unwrapped and
 // nothing is written. Any other error from a write method is a write failure.
 type Store struct {
-	path     string
-	validate func([]byte) error
-	mu       sync.Mutex
+	path      string
+	validate  func([]byte) error
+	normalize func([]byte) ([]byte, error)
+	mu        sync.Mutex
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithNormalize makes every write normalise its bytes first: Create and
+// Replace normalise the bytes they are given, Patch the current file before
+// applying the patch. A normalize error is returned unwrapped, like a
+// validation error, and nothing is written.
+func WithNormalize(normalize func([]byte) ([]byte, error)) Option {
+	return func(s *Store) { s.normalize = normalize }
 }
 
 // New returns a Store for path.
-func New(path string, validate func([]byte) error) *Store {
-	return &Store{path: path, validate: validate}
+func New(path string, validate func([]byte) error, opts ...Option) *Store {
+	s := &Store{path: path, validate: validate, normalize: func(b []byte) ([]byte, error) { return b, nil }}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Etag is the hex sha256 of the file's bytes.
@@ -79,6 +95,10 @@ func (s *Store) Create(raw []byte) (etag string, err error) {
 		}
 		return "", err
 	}
+	raw, err = s.normalize(raw)
+	if err != nil {
+		return "", err
+	}
 	return s.write(raw)
 }
 
@@ -87,6 +107,10 @@ func (s *Store) Replace(etag string, raw []byte) (newEtag string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.current(etag); err != nil {
+		return "", err
+	}
+	raw, err = s.normalize(raw)
+	if err != nil {
 		return "", err
 	}
 	return s.write(raw)
@@ -104,7 +128,11 @@ func (s *Store) Patch(etag string, mergePatch []byte) (newRaw []byte, newEtag st
 	if err != nil {
 		return nil, "", err
 	}
-	newRaw, err = yamledit.Apply(cur, mergePatch)
+	base, err := s.normalize(cur)
+	if err != nil {
+		return nil, "", err
+	}
+	newRaw, err = yamledit.Apply(base, mergePatch)
 	if err != nil {
 		if !errors.Is(err, yamledit.ErrInvalidPatch) && !errors.Is(err, yamledit.ErrUnsupported) {
 			// The current file is not valid YAML: report it with its positions.

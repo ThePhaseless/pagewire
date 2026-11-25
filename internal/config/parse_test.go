@@ -7,35 +7,59 @@ import (
 	"testing"
 )
 
-const minimalYAML = `apiVersion: pagewire/v1
+const minimalYAML = `apiVersion: pagewire/v2
 name: Printer
 `
 
 const fullYAML = `# a comment
-apiVersion: pagewire/v1
-name: Living room printer
-location: Living room
-device:
-  mode: usb
-  usb:
-    vendorId: "03f0"
-    productId: "2b17"
-    serial: "ABC123"
-  driver: hplip
-  scanner: airsane
+apiVersion: pagewire/v2
+name: Home
+printers:
+  - id: living-room
+    name: Living room printer
+    location: Living room
+    enabled: true
+    mode: usb
+    usb:
+      vendorId: "03f0"
+      productId: "2b17"
+      serial: "ABC123"
+    driver: hplip
+    driverName: hp-officejet
+    defaults:
+      media: na_letter_8.5x11in
+      mediaSource: tray-1
+      mediaType: stationery
+      sides: two-sided-long-edge
+      colorMode: monochrome
+      quality: high
+      resolution: 600
+      contentOptimize: text-and-graphic
+      orientation: reverse-landscape
+      numberUp: 4
+      printScaling: auto-fit
+      outputBin: face-down
+      finishings: staple-top-left
+scanners:
+  - id: living-room-scanner
+    name: Living room scanner
+    enabled: false
+    usb:
+      vendorId: "03f0"
+      productId: "2b17"
+      serial: "ABC123"
+    backend: airsane
+    defaults:
+      source: adf-duplex
+      resolution: 600
+      colorMode: grayscale
+      intent: photo
+      format: jpeg
+ignoredDevices:
+  - {vendorId: "046d", productId: "c31c", serial: "", roles: [printer, scanner]}
 print:
-  defaults:
-    media: na_letter_8.5x11in
-    sides: two-sided-long-edge
-    colorMode: monochrome
-    quality: high
   maxUploadMiB: 100
 scan:
-  defaults:
-    source: adf-duplex
-    resolution: 600
-    colorMode: grayscale
-    format: jpeg
   retentionDays: 0
 licenses:
   acceptedEulas:
@@ -43,6 +67,9 @@ licenses:
       version: "3.24.4"
       textSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 `
+
+// printer is a minimal printer list entry for tests to append to.
+const printer = "printers:\n  - id: p\n    name: P\n"
 
 // parseErrors parses src and returns its field errors, failing when Parse
 // succeeds or returns anything but an *ErrorList.
@@ -92,25 +119,27 @@ func TestParseFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	usb := &USB{VendorID: "03f0", ProductID: "2b17", Serial: "ABC123"}
 	want := Config{
 		APIVersion: APIVersion,
-		Name:       "Living room printer",
-		Location:   "Living room",
-		Device: Device{
-			Mode:    ModeUSB,
-			USB:     &USB{VendorID: "03f0", ProductID: "2b17", Serial: "ABC123"},
-			Driver:  "hplip",
-			Scanner: "airsane",
-		},
-		Print: PrintConfig{
-			Defaults:     PrintDefaults{Media: "na_letter_8.5x11in", Sides: "two-sided-long-edge", ColorMode: "monochrome", Quality: "high"},
-			MaxUploadMiB: 100,
-		},
-		Scan: ScanConfig{
-			Defaults:      ScanDefaults{Source: "adf-duplex", Resolution: 600, ColorMode: "grayscale", Format: "jpeg"},
-			RetentionDays: 0,
-		},
-		Licenses: Licenses{AcceptedEULAs: []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: testSHA}}},
+		Name:       "Home",
+		Printers: []Printer{{
+			ID: "living-room", Name: "Living room printer", Location: "Living room", Enabled: true,
+			Mode: ModeUSB, USB: usb, Driver: "hplip", DriverName: "hp-officejet",
+			Defaults: PrintDefaults{
+				Media: "na_letter_8.5x11in", MediaSource: "tray-1", MediaType: "stationery", Sides: "two-sided-long-edge",
+				ColorMode: "monochrome", Quality: "high", Resolution: 600, ContentOptimize: "text-and-graphic",
+				Orientation: "reverse-landscape", NumberUp: 4, PrintScaling: "auto-fit", OutputBin: "face-down", Finishings: "staple-top-left",
+			},
+		}},
+		Scanners: []Scanner{{
+			ID: "living-room-scanner", Name: "Living room scanner", Enabled: false, Mode: ModeUSB, USB: usb, Backend: "airsane",
+			Defaults: ScanDefaults{Source: "adf-duplex", Resolution: 600, ColorMode: "grayscale", Intent: "photo", Format: "jpeg"},
+		}},
+		IgnoredDevices: []IgnoredDevice{{VendorID: "046d", ProductID: "c31c", Roles: []string{RolePrinter, RoleScanner}}},
+		Print:          PrintConfig{MaxUploadMiB: 100},
+		Scan:           ScanConfig{RetentionDays: 0},
+		Licenses:       Licenses{AcceptedEULAs: []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: testSHA}}},
 	}
 	if !reflect.DeepEqual(*c, want) {
 		t.Errorf("full file\n got  %+v\n want %+v", *c, want)
@@ -118,27 +147,52 @@ func TestParseFull(t *testing.T) {
 }
 
 func TestParseDefaults(t *testing.T) {
+	entry := func(c *Config) {
+		c.Printers = []Printer{{ID: "p", Name: "P", Enabled: true, Mode: ModeUSB, Driver: Auto}}
+	}
 	tests := []struct {
 		name string
 		src  string
 		want func(*Config)
 	}{
 		{
-			name: "partly specified nested mapping keeps sibling defaults",
-			src:  minimalYAML + "print:\n  defaults:\n    sides: two-sided-short-edge\n",
-			want: func(c *Config) { c.Print.Defaults.Sides = "two-sided-short-edge" },
+			name: "entry without enabled, mode, driver or defaults gets them",
+			src:  minimalYAML + printer,
+			want: entry,
+		},
+		{
+			name: "enabled null is true",
+			src:  minimalYAML + printer + "    enabled: null\n",
+			want: entry,
+		},
+		{
+			name: "enabled false is kept",
+			src:  minimalYAML + printer + "    enabled: false\n",
+			want: func(c *Config) { entry(c); c.Printers[0].Enabled = false },
+		},
+		{
+			name: "empty mode and driver default",
+			src:  minimalYAML + printer + "    mode: \"\"\n    driver: \"\"\n",
+			want: entry,
+		},
+		{
+			name: "scanner defaults",
+			src:  minimalYAML + "scanners:\n  - {id: s, name: S}\n",
+			want: func(c *Config) {
+				c.Scanners = []Scanner{{ID: "s", Name: "S", Enabled: true, Mode: ModeUSB, Backend: BackendAuto}}
+			},
+		},
+		{
+			name: "null lists stay empty lists",
+			src:  minimalYAML + "printers:\nscanners:\nignoredDevices:\nlicenses:\n  acceptedEulas:\n",
+		},
+		{
+			name: "explicit empty lists",
+			src:  minimalYAML + "printers: []\nscanners: []\nignoredDevices: []\nlicenses:\n  acceptedEulas: []\n",
 		},
 		{
 			name: "null section keeps its defaults",
-			src:  minimalYAML + "device:\nscan:\n",
-		},
-		{
-			name: "null acceptedEulas stays an empty list",
-			src:  minimalYAML + "licenses:\n  acceptedEulas:\n",
-		},
-		{
-			name: "explicit empty acceptedEulas",
-			src:  minimalYAML + "licenses:\n  acceptedEulas: []\n",
+			src:  minimalYAML + "print:\nscan:\n",
 		},
 		{
 			name: "zero retention is kept, not defaulted",
@@ -147,7 +201,28 @@ func TestParseDefaults(t *testing.T) {
 		},
 		{
 			name: "usb null stays nil",
-			src:  minimalYAML + "device:\n  usb: null\n",
+			src:  minimalYAML + printer + "    usb: null\n",
+			want: entry,
+		},
+		{
+			name: "every defaults key accepted",
+			src: minimalYAML + printer + "    defaults:\n      media: iso_a5_148x210mm\n      mediaSource: by-pass-tray\n      mediaType: photographic-glossy\n" +
+				"      resolution: 1200\n      contentOptimize: photo\n      orientation: portrait\n      numberUp: 16\n      printScaling: none\n" +
+				"      outputBin: tray-1\n      finishings: punch\n",
+			want: func(c *Config) {
+				entry(c)
+				c.Printers[0].Defaults = PrintDefaults{
+					Media: "iso_a5_148x210mm", MediaSource: "by-pass-tray", MediaType: "photographic-glossy", Resolution: 1200,
+					ContentOptimize: "photo", Orientation: "portrait", NumberUp: 16, PrintScaling: "none", OutputBin: "tray-1", Finishings: "punch",
+				}
+			},
+		},
+		{
+			name: "scan intent accepted",
+			src:  minimalYAML + "scanners:\n  - id: s\n    name: S\n    defaults:\n      intent: photo\n",
+			want: func(c *Config) {
+				c.Scanners = []Scanner{{ID: "s", Name: "S", Enabled: true, Mode: ModeUSB, Backend: BackendAuto, Defaults: ScanDefaults{Intent: "photo"}}}
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -162,9 +237,6 @@ func TestParseDefaults(t *testing.T) {
 			}
 			if !reflect.DeepEqual(*c, want) {
 				t.Errorf("\n got  %+v\n want %+v", *c, want)
-			}
-			if c.Licenses.AcceptedEULAs == nil {
-				t.Error("acceptedEulas is nil")
 			}
 		})
 	}
@@ -190,8 +262,8 @@ func TestParseErrors(t *testing.T) {
 	}{
 		{
 			name: "unknown key",
-			src:  minimalYAML + "device:\n  mode: usb\n  colour: red\n",
-			path: "/device/colour", line: 5, column: 3, msg: "unknown",
+			src:  minimalYAML + printer + "    colour: red\n",
+			path: "/printers/0/colour", line: 6, column: 5, msg: "unknown",
 		},
 		{
 			name: "unknown top-level key",
@@ -199,19 +271,89 @@ func TestParseErrors(t *testing.T) {
 			path: "/extra", line: 3, column: 1, msg: "unknown",
 		},
 		{
+			name: "v1 key in a v2 file",
+			src:  minimalYAML + "device:\n  mode: usb\n",
+			path: "/device", line: 3, column: 1, msg: "unknown",
+		},
+		{
 			name: "bad enum",
-			src:  minimalYAML + "device:\n  mode: wifi\n",
-			path: "/device/mode", line: 4, column: 9, msg: "usb simulated",
+			src:  minimalYAML + printer + "    mode: wifi\n",
+			path: "/printers/0/mode", line: 6, column: 11, msg: "usb simulated",
+		},
+		{
+			name: "bad backend",
+			src:  minimalYAML + "scanners:\n  - id: s\n    name: S\n    backend: none\n",
+			path: "/scanners/0/backend", line: 6, column: 14, msg: "airsane",
 		},
 		{
 			name: "bad pattern",
-			src:  minimalYAML + "device:\n  usb:\n    vendorId: \"03F0\"\n    productId: \"2b17\"\n",
-			path: "/device/usb/vendorId", line: 5, column: 15, msg: "hex",
+			src:  minimalYAML + printer + "    usb:\n      vendorId: \"03F0\"\n      productId: \"2b17\"\n",
+			path: "/printers/0/usb/vendorId", line: 7, column: 17, msg: "hex",
 		},
 		{
 			name: "bad media",
-			src:  minimalYAML + "print:\n  defaults:\n    media: A4\n",
-			path: "/print/defaults/media", line: 5, column: 12, msg: "PWG",
+			src:  minimalYAML + printer + "    defaults:\n      media: A4\n",
+			path: "/printers/0/defaults/media", line: 7, column: 14, msg: "PWG",
+		},
+		{
+			name: "tray that is not a keyword",
+			src:  minimalYAML + printer + "    defaults:\n      mediaSource: Tray 1\n",
+			path: "/printers/0/defaults/mediaSource", line: 7, column: 20, msg: "must be a lower-case IPP keyword",
+		},
+		{
+			name: "numberUp out of range",
+			src:  minimalYAML + printer + "    defaults:\n      numberUp: 32\n",
+			path: "/printers/0/defaults/numberUp", line: 7, column: 17, msg: "16",
+		},
+		{
+			name: "print resolution out of range",
+			src:  minimalYAML + printer + "    defaults:\n      resolution: 4800\n",
+			path: "/printers/0/defaults/resolution", line: 7, column: 19, msg: "2400",
+		},
+		{
+			name: "bad intent",
+			src:  minimalYAML + "scanners:\n  - id: s\n    name: S\n    defaults:\n      intent: receipt\n",
+			path: "/scanners/0/defaults/intent", line: 7, column: 15, msg: "business-card",
+		},
+		{
+			name: "id starting with a dash",
+			src:  minimalYAML + "printers:\n  - id: -bad\n    name: P\n",
+			path: "/printers/0/id", line: 4, column: 9, msg: "1 to 32 lower-case letters, digits or dashes",
+		},
+		{
+			name: "id of 33 characters",
+			src:  minimalYAML + "scanners:\n  - id: " + strings.Repeat("a", 33) + "\n    name: S\n",
+			path: "/scanners/0/id", line: 4, column: 9, msg: "1 to 32 lower-case letters, digits or dashes",
+		},
+		{
+			name: "entry without id",
+			src:  minimalYAML + "printers:\n  - name: P\n",
+			path: "/printers/0/id", line: 4, column: 5, msg: "required",
+		},
+		{
+			name: "entry without name",
+			src:  minimalYAML + "scanners:\n  - id: s\n",
+			path: "/scanners/0/name", line: 4, column: 5, msg: "required",
+		},
+		{
+			name: "ignored device without roles",
+			src:  minimalYAML + "ignoredDevices:\n  - vendorId: \"046d\"\n    productId: \"c31c\"\n",
+			path: "/ignoredDevices/0/roles", line: 4, column: 5, msg: "at least 1",
+		},
+		{
+			name: "ignored device with an unknown role",
+			src:  minimalYAML + "ignoredDevices:\n  - vendorId: \"046d\"\n    productId: \"c31c\"\n    roles: [fax]\n",
+			path: "/ignoredDevices/0/roles/0", line: 6, column: 13, msg: "printer scanner",
+		},
+		{
+			name: "ignored device with a role twice",
+			src:  minimalYAML + "ignoredDevices:\n  - vendorId: \"046d\"\n    productId: \"c31c\"\n    roles: [printer, printer]\n",
+			path: "/ignoredDevices/0/roles", line: 6, column: 12, msg: "duplicate",
+		},
+		{
+			name: "ignored device without vendorId",
+			src:  minimalYAML + "ignoredDevices:\n  - productId: \"c31c\"\n    roles: [printer]\n",
+			path: "/ignoredDevices/0/vendorId", line: 4, column: 5, msg: "hex",
 		},
 		{
 			name: "out of range",
@@ -220,8 +362,13 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "wrong type",
-			src:  minimalYAML + "scan:\n  defaults:\n    resolution: high\n",
-			path: "/scan/defaults/resolution", line: 5, column: 17, msg: "integer",
+			src:  minimalYAML + "scanners:\n  - id: s\n    name: S\n    defaults:\n      resolution: high\n",
+			path: "/scanners/0/defaults/resolution", line: 7, column: 19, msg: "integer",
+		},
+		{
+			name: "string where boolean expected",
+			src:  minimalYAML + printer + "    enabled: sometimes\n",
+			path: "/printers/0/enabled", line: 6, column: 14, msg: "true or false",
 		},
 		{
 			name: "string where integer expected",
@@ -230,47 +377,52 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "name starting with -",
-			src:  "apiVersion: pagewire/v1\nname: \"-h\"\n",
+			src:  "apiVersion: pagewire/v2\nname: \"-h\"\n",
 			path: "/name", line: 2, column: 7, msg: "must not start with -",
 		},
 		{
+			name: "printer name starting with -",
+			src:  minimalYAML + "printers:\n  - id: p\n    name: \"-h\"\n",
+			path: "/printers/0/name", line: 5, column: 11, msg: "must not start with -",
+		},
+		{
 			name: "serial too long",
-			src:  minimalYAML + "device:\n  usb:\n    vendorId: \"03f0\"\n    productId: \"2b17\"\n    serial: \"" + strings.Repeat("9", 127) + "\"\n",
-			path: "/device/usb/serial", line: 7, column: 13, msg: "126",
+			src:  minimalYAML + printer + "    usb:\n      vendorId: \"03f0\"\n      productId: \"2b17\"\n      serial: \"" + strings.Repeat("9", 127) + "\"\n",
+			path: "/printers/0/usb/serial", line: 9, column: 15, msg: "126",
 		},
 		{
 			name: "serial with a control character",
-			src:  minimalYAML + "device:\n  usb:\n    vendorId: \"03f0\"\n    productId: \"2b17\"\n    serial: \"AB\\u0007C\"\n",
-			path: "/device/usb/serial", line: 7, column: 13, msg: "control",
+			src:  minimalYAML + printer + "    usb:\n      vendorId: \"03f0\"\n      productId: \"2b17\"\n      serial: \"AB\\u0007C\"\n",
+			path: "/printers/0/usb/serial", line: 9, column: 15, msg: "control",
 		},
 		{
 			name: "driverName too long",
-			src:  minimalYAML + "device:\n  driverName: " + strings.Repeat("x", 256) + "\n",
-			path: "/device/driverName", line: 4, column: 15, msg: "255",
+			src:  minimalYAML + printer + "    driverName: " + strings.Repeat("x", 256) + "\n",
+			path: "/printers/0/driverName", line: 6, column: 17, msg: "255",
 		},
 		{
 			name: "driverName with a control character",
-			src:  minimalYAML + "device:\n  driverName: \"a\\tb\"\n",
-			path: "/device/driverName", line: 4, column: 15, msg: "control",
+			src:  minimalYAML + printer + "    driverName: \"a\\tb\"\n",
+			path: "/printers/0/driverName", line: 6, column: 17, msg: "control",
 		},
 		{
 			name: "missing name",
-			src:  "apiVersion: pagewire/v1\nlocation: x\n",
+			src:  "apiVersion: pagewire/v2\nprinters: []\n",
 			path: "/name", line: 1, column: 1, msg: "required",
 		},
 		{
 			name: "wrong apiVersion",
-			src:  "apiVersion: pagewire/v2\nname: x\n",
-			path: "/apiVersion", line: 1, column: 13, msg: "pagewire/v1",
+			src:  "apiVersion: pagewire/v3\nname: x\n",
+			path: "/apiVersion", line: 1, column: 13, msg: "pagewire/v2",
 		},
 		{
 			name: "control character in name",
-			src:  "apiVersion: pagewire/v1\nname: \"bad\\tname\"\n",
+			src:  "apiVersion: pagewire/v2\nname: \"bad\\tname\"\n",
 			path: "/name", line: 2, column: 7, msg: "control",
 		},
 		{
 			name: "name too long",
-			src:  "apiVersion: pagewire/v1\nname: " + strings.Repeat("x", 64) + "\n",
+			src:  "apiVersion: pagewire/v2\nname: " + strings.Repeat("x", 64) + "\n",
 			path: "/name", line: 2, column: 7, msg: "63",
 		},
 		{
@@ -285,7 +437,7 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "syntax error",
-			src:  "apiVersion: pagewire/v1\nname: [unclosed\n",
+			src:  "apiVersion: pagewire/v2\nname: [unclosed\n",
 			path: "", line: 2, column: 7, msg: "",
 		},
 	}
@@ -332,26 +484,48 @@ func TestParseRejectsMultipleDocuments(t *testing.T) {
 func TestEnumsAccepted(t *testing.T) {
 	// Every enum value the schema lists must also pass Parse (the validate and
 	// jsonschema tags are two sources of truth; internal/schema checks the other side).
-	for _, src := range []string{
-		"device:\n  mode: simulated\n", "device:\n  mode: usb\n",
-		"device:\n  driver: auto\n", "device:\n  driver: ipp-usb\n", "device:\n  driver: ps\n",
-		"device:\n  driver: hplip\n", "device:\n  driver: gutenprint\n", "device:\n  driver: ghostscript\n",
-		"device:\n  driver: legacy\n", "device:\n  driverName: samsung--scx-4300--2-0-0-en\n",
-		"device:\n  scanner: auto\n", "device:\n  scanner: ipp-usb\n", "device:\n  scanner: airsane\n", "device:\n  scanner: none\n",
-		"print:\n  defaults:\n    sides: one-sided\n", "print:\n  defaults:\n    sides: two-sided-long-edge\n", "print:\n  defaults:\n    sides: two-sided-short-edge\n",
-		"print:\n  defaults:\n    colorMode: auto\n", "print:\n  defaults:\n    colorMode: color\n", "print:\n  defaults:\n    colorMode: monochrome\n",
-		"print:\n  defaults:\n    quality: draft\n", "print:\n  defaults:\n    quality: normal\n", "print:\n  defaults:\n    quality: high\n",
-		"scan:\n  defaults:\n    source: platen\n", "scan:\n  defaults:\n    source: adf\n", "scan:\n  defaults:\n    source: adf-duplex\n",
-		"scan:\n  defaults:\n    colorMode: color\n", "scan:\n  defaults:\n    colorMode: grayscale\n", "scan:\n  defaults:\n    colorMode: blackandwhite\n",
-		"scan:\n  defaults:\n    format: pdf\n", "scan:\n  defaults:\n    format: jpeg\n",
-		"scan:\n  defaults:\n    resolution: 75\n", "scan:\n  defaults:\n    resolution: 1200\n",
-		"scan:\n  retentionDays: 3650\n", "print:\n  maxUploadMiB: 1\n",
-	} {
+	scanner := "scanners:\n  - id: s\n    name: S\n"
+	var srcs []string
+	add := func(prefix, key string, values ...string) {
+		for _, v := range values {
+			srcs = append(srcs, prefix+key+": "+v+"\n")
+		}
+	}
+	add(printer+"    ", "mode", "usb", "simulated")
+	add(printer+"    ", "driver", "auto", "ipp-usb", "ps", "hplip", "gutenprint", "ghostscript", "legacy")
+	add(printer+"    ", "driverName", "samsung--scx-4300--2-0-0-en")
+	pd := printer + "    defaults:\n      "
+	add(pd, "sides", "one-sided", "two-sided-long-edge", "two-sided-short-edge")
+	add(pd, "colorMode", "auto", "color", "monochrome")
+	add(pd, "quality", "draft", "normal", "high")
+	add(pd, "contentOptimize", "auto", "graphic", "photo", "text", "text-and-graphic")
+	add(pd, "orientation", "portrait", "landscape", "reverse-landscape", "reverse-portrait")
+	add(pd, "printScaling", "auto", "auto-fit", "fill", "fit", "none")
+	add(pd, "resolution", "75", "2400")
+	add(pd, "numberUp", "1", "16")
+	add(scanner+"    ", "mode", "usb", "simulated")
+	add(scanner+"    ", "backend", "auto", "ipp-usb", "airsane")
+	sd := scanner + "    defaults:\n      "
+	add(sd, "source", "platen", "adf", "adf-duplex")
+	add(sd, "colorMode", "color", "grayscale", "blackandwhite")
+	add(sd, "intent", "document", "text-and-graphic", "photo", "preview", "object", "business-card")
+	add(sd, "format", "pdf", "jpeg")
+	add(sd, "resolution", "75", "1200")
+	add("ignoredDevices:\n  - vendorId: \"046d\"\n    productId: \"c31c\"\n    ", "roles", "[printer]", "[scanner]", "[printer, scanner]")
+	add("scan:\n  ", "retentionDays", "3650")
+	add("print:\n  ", "maxUploadMiB", "1")
+	for _, src := range srcs {
 		if _, err := Parse([]byte(minimalYAML + src)); err != nil {
 			t.Errorf("%q: %v", src, err)
 		}
 	}
-	if _, err := Parse([]byte("apiVersion: pagewire/v1\nname: " + strings.Repeat("ü", 63) + "\n")); err != nil {
-		t.Errorf("63-rune name: %v", err)
+	for _, src := range []string{
+		"apiVersion: pagewire/v2\nname: " + strings.Repeat("ü", 63) + "\n",
+		minimalYAML + "printers:\n  - id: " + strings.Repeat("a", 32) + "\n    name: P\n",
+		minimalYAML + "printers:\n  - id: a\n    name: P\n  - id: a-1\n    name: Q\n",
+	} {
+		if _, err := Parse([]byte(src)); err != nil {
+			t.Errorf("%q: %v", src, err)
+		}
 	}
 }

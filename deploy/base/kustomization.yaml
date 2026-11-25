@@ -10,6 +10,10 @@ resources:
   - serviceaccount.yaml
   - role.yaml
   - rolebinding.yaml
+  # Optional: only for USB devices on more than one node; remove both to run one
+  # device workload.
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml

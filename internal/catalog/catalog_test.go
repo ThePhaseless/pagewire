@@ -187,21 +187,24 @@ func TestConfigEnumsInCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dt := reflect.TypeFor[config.Device]()
-	for field, have := range map[string]func(string) bool{
-		"Driver": func(id string) bool { _, ok := c.Printer(id); return ok },
-		"Scanner": func(id string) bool {
+	for _, tc := range []struct {
+		typ   reflect.Type
+		field string
+		have  func(string) bool
+	}{
+		{reflect.TypeFor[config.Printer](), "Driver", func(id string) bool { _, ok := c.Printer(id); return ok }},
+		{reflect.TypeFor[config.Scanner](), "Backend", func(id string) bool {
 			return slices.ContainsFunc(c.Scanners, func(s Scanner) bool { return s.ID == id })
-		},
+		}},
 	} {
-		f, _ := dt.FieldByName(field)
+		f, _ := tc.typ.FieldByName(tc.field)
 		_, list, ok := strings.Cut(f.Tag.Get("validate"), "oneof=")
 		if !ok {
-			t.Fatalf("config.Device.%s has no oneof", field)
+			t.Fatalf("config.%s.%s has no oneof", tc.typ.Name(), tc.field)
 		}
 		for _, v := range strings.Fields(list) {
-			if v != config.Auto && v != config.ScannerNone && !have(v) {
-				t.Errorf("config.Device.%s value %q is not in the catalog", field, v)
+			if v != config.Auto && !tc.have(v) {
+				t.Errorf("config.%s.%s value %q is not in the catalog", tc.typ.Name(), tc.field, v)
 			}
 		}
 	}
@@ -276,6 +279,7 @@ var fixtureNames = []string{
 	"ippusb-mfp", "hp-legacy-mfp", "generic-postscript", "brother-pcl-laser",
 	"epson-inkjet-mfp", "canon-pixma-mfp", "unknown-printer", "no-printer",
 	"samsung-scx4300-mfp", "postscript-unlisted", "epson-stylus-photo",
+	"office", "canon-lide-scanner",
 }
 
 func TestFixturesStrict(t *testing.T) {
@@ -308,7 +312,7 @@ func TestFixturesStrict(t *testing.T) {
 				t.Error("Fixture() differs from the strict decode")
 			}
 			for _, d := range inv.Devices {
-				if !hasPrinterClass(d) {
+				if printer, _ := Default().Roles(d); !printer {
 					continue
 				}
 				id := device.ParseDeviceID(d.DeviceID)

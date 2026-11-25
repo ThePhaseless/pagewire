@@ -1,101 +1,109 @@
-// Copy for Settings and its ConflictDialog. Shared words (Save, Cancel, Loading) come from ../strings.
-import { setupStrings } from "./Setup.strings";
+// Copy for Settings and its ConflictDialog. Shared words (Save, Cancel, Loading) and the device
+// copy (families) come from ../strings; option titles and values from ../lib/labels.
+import { strings } from "../strings";
 
-const d = setupStrings.defaults;
+type Role = "printer" | "scanner";
 
 export const settingsStrings = {
   description:
-    "Change the printer's name, driver and defaults. Saving updates pagewire's settings file.",
+    "Change your printers, scanners and their defaults. Saving updates pagewire's settings file.",
   loadFailed: "Could not load the settings.",
   missing: {
     title: "pagewire is not set up yet",
     body: "Finish setup to create the settings file.",
     action: "Go to setup",
   },
+  detect: "Detect and add devices",
   sections: {
     general: "General",
-    device: "Device",
-    printing: "Printing",
-    scanning: "Scanning",
+    printers: "Printers",
+    scanners: "Scanners",
+    ignored: "Ignored devices",
     licences: "Licences",
   },
   fields: {
+    title: "Title",
+    titleHint: "Shown at the top of every page.",
+    maxUpload: "Upload limit (MB)",
+    maxUploadHint: "The largest file the Print page accepts, 1 to 500 MB.",
+    retention: "Keep scans for (days)",
+    retentionHint: "0 keeps scans forever.",
     name: "Name",
-    nameHint:
-      "Shown at the top of every page. Computers and phones may show the printer's own name instead.",
+    nameHint: (role: Role) =>
+      role === "printer"
+        ? "Computers and phones may show the printer's own name instead."
+        : "Shown in pagewire. Computers may show the scanner's own name instead.",
     location: "Location",
     locationHint: "Optional, for example Living room.",
-    mode: "Device",
-    modeOptions: { usb: "USB printer", simulated: "Simulated printer and scanner" } as Record<
-      string,
-      string
-    >,
+    enabled: "In use",
+    mode: "Connection",
+    modeOptions: (role: Role): Record<string, string> =>
+      role === "printer"
+        ? { usb: "USB printer", simulated: "Simulated printer" }
+        : { usb: "USB scanner", simulated: "Simulated scanner" },
+    usb: "USB device",
+    usbHint: "The device this entry uses. Plug it in to see it in the list.",
+    anyDevice: "Any device not used by another entry",
+    notDetected: (label: string) => `${label} (not plugged in)`,
     driver: "Printer driver",
     driverName: "Driver name",
     driverNameHint:
       "Exact driver name from the printer application; leave empty to choose automatically.",
-    scanner: "Scanner driver",
+    backend: "Scanner driver",
     automatic: "Automatic",
-    families: setupStrings.families,
-    usbSelector: "Use a specific USB device",
-    usbSelectorHint: "Only needed when several USB printers are plugged in.",
-    vendorId: "Vendor ID",
-    productId: "Product ID",
-    usbIdHint: "Four hexadecimal digits, for example 03f0.",
-    serial: "Serial number",
-    serialHint: "Optional.",
-    media: d.media,
-    mediaOptions: d.mediaOptions,
-    sides: d.sides,
-    sidesOptions: d.sidesOptions,
-    printColor: "Colour",
-    printColorOptions: {
-      auto: "Automatic",
-      color: "Colour",
-      monochrome: "Black and white",
-    } as Record<string, string>,
-    quality: "Quality",
-    qualityOptions: { draft: "Draft", normal: "Normal", high: "High" } as Record<string, string>,
-    maxUpload: "Upload limit (MB)",
-    maxUploadHint: "The largest file the Print page accepts, 1 to 500 MB.",
-    source: d.source,
-    sourceOptions: d.sourceOptions,
-    resolution: d.resolution,
-    dpi: d.dpi,
-    scanColor: d.colorMode,
-    scanColorOptions: d.colorOptions,
-    format: d.format,
-    formatOptions: d.formatOptions,
-    retention: "Keep scans for (days)",
-    retentionHint: "0 keeps scans forever.",
+    families: strings.device.families,
+    defaults: "Defaults",
   },
+  edit: "Edit",
+  done: "Done",
+  remove: {
+    action: "Remove",
+    title: (name: string) => `Remove ${name}?`,
+    body: "pagewire stops serving it once you save. You can add the device again with Detect and add devices.",
+    confirm: "Remove",
+  },
+  unnamed: "Unnamed",
+  noPrinters: "No printers yet.",
+  noScanners: "No scanners yet.",
+  noIgnored: "Setup offers every device it detects.",
+  ignoredHint: "Setup does not offer these devices.",
+  ignoredRoles: (roles: readonly string[]) =>
+    roles.includes("printer") && roles.includes("scanner")
+      ? "As printer and scanner"
+      : roles.includes("printer")
+        ? "As printer"
+        : "As scanner",
+  offerAgain: "Offer again",
   /** Labels for JSON pointers, used for field errors and in the conflict dialog. */
   paths: {
-    "/name": "Name",
-    "/location": "Location",
-    "/device/mode": "Device",
-    "/device/driver": "Printer driver",
-    "/device/driverName": "Driver name",
-    "/device/scanner": "Scanner driver",
-    "/device/usb": "USB device",
-    "/device/usb/vendorId": "USB vendor ID",
-    "/device/usb/productId": "USB product ID",
-    "/device/usb/serial": "USB serial number",
-    "/print/defaults/media": "Paper size",
-    "/print/defaults/sides": "Sides",
-    "/print/defaults/colorMode": "Print colour",
-    "/print/defaults/quality": "Print quality",
+    "/name": "Title",
+    "/printers": "Printers",
+    "/scanners": "Scanners",
+    "/ignoredDevices": "Ignored devices",
     "/print/maxUploadMiB": "Upload limit",
-    "/scan/defaults/source": "Scan from",
-    "/scan/defaults/resolution": "Scan resolution",
-    "/scan/defaults/colorMode": "Scan colour",
-    "/scan/defaults/format": "Scan file type",
     "/scan/retentionDays": "Keep scans for",
     "/licenses/acceptedEulas": "Accepted licences",
   } as Record<string, string>,
+  /** Labels of the fields inside one printer or scanner, keyed by the pointer below the entry. */
+  entryPaths: {
+    name: "Name",
+    location: "Location",
+    enabled: "In use",
+    mode: "Connection",
+    usb: "USB device",
+    "usb/vendorId": "USB vendor ID",
+    "usb/productId": "USB product ID",
+    "usb/serial": "USB serial number",
+    driver: "Printer driver",
+    driverName: "Driver name",
+    backend: "Scanner driver",
+  } as Record<string, string>,
+  entryPath: (entry: string, field: string) => `${entry}, ${field}`,
+  /** A disabled entry in the conflict dialog's lists. */
+  off: (name: string) => `${name} (off)`,
   notSet: "Not set",
   none: "None",
-  noLicences: "This printer needs no vendor files.",
+  noLicences: "No device needs vendor files.",
   blob: {
     installed: "Installed",
     missing: "Not downloaded",

@@ -3,10 +3,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Text } from "react-aria-components";
 import { api, problemMessage, uploadPrint } from "../api/client";
-import { useConnected, useJobs, usePrinterNotFound, useStatus } from "../api/events";
+import {
+  useConnected,
+  useEnabledPrinters,
+  useJobs,
+  useNothingFound,
+  useStatus,
+} from "../api/events";
+import { DevicePicker } from "../components/DevicePicker";
+import { OptionField } from "../components/OptionField";
 import {
   Button,
   Card,
+  Disclosure,
   DropZone,
   EmptyState,
   FileTrigger,
@@ -16,27 +25,30 @@ import {
   NumberField,
   PageHeader,
   ProgressBar,
-  Select,
   StatusBadge,
   type Tone,
   toast,
 } from "../components/ui";
-import type { Config, Job, PrintOptions } from "../gen/api";
+import type { Config, Job, PrinterCaps, PrintOptions } from "../gen/api";
+import { useDeviceChoice } from "../lib/devices";
+import { optionLabel, warningText } from "../lib/labels";
+import {
+  copiesLimit,
+  type OptionGroup,
+  optionState,
+  type PrintKind,
+  printerGroups,
+  toRequest,
+} from "../lib/options";
 import { strings } from "../strings";
 import { printStrings as t } from "./Print.strings";
 import "./Print.css";
 
-// Mirrors config.Default: what the server applies when the file leaves print defaults out.
-const fallback: { options: PrintOptions; maxUploadMiB: number } = {
-  options: {
-    copies: 1,
-    sides: "one-sided",
-    colorMode: "auto",
-    media: "iso_a4_210x297mm",
-    quality: "normal",
-  },
-  maxUploadMiB: 50,
-};
+// Mirrors config.Default: the upload limit while the config is not loaded.
+const fallbackMaxUploadMiB = 50;
+
+// Paper and Printing stay open; Layout and Output sit under "More options".
+const MORE = new Set(["layout", "output"]);
 
 // Mirrors internal/printing.Detect: the server decides by content, never by name or file.type.
 const UNKNOWN = "application/octet-stream";
@@ -83,23 +95,6 @@ export function formatAccepted(detected: string, supported: string[]): boolean {
 }
 
 const formatName = (mime: string) => t.formats[mime] ?? mime;
-
-const PWG_MEDIA = /^([a-z0-9-]+)_([a-z0-9.-]+)_([0-9.]+)x([0-9.]+)(mm|in)$/;
-
-/** "iso_a4_210x297mm" → "A4"; anything unparsable is shown as is. */
-function mediaName(pwg: string): string {
-  const [, cls = "", name = ""] = PWG_MEDIA.exec(pwg) ?? [];
-  if (!name) return pwg;
-  return cls === "iso" || cls === "jis"
-    ? name.toUpperCase()
-    : name.charAt(0).toUpperCase() + name.slice(1);
-}
-
-/** "iso_a4_210x297mm" → "A4 (210 × 297 mm)"; anything unparsable is shown as is. */
-export function mediaLabel(pwg: string): string {
-  const [, , , w = "", h = "", unit = ""] = PWG_MEDIA.exec(pwg) ?? [];
-  return unit ? t.options.mediaSize(mediaName(pwg), w, h, unit) : pwg;
-}
 
 const OFFICE = /\.(docx?|odt|rtf|pages|xlsx?|ods|numbers|pptx?|odp|key)$/i;
 const PHOTO = /\.(heic|heif|webp|avif|gif|tiff?|bmp|dng|raw|png|jpe?g)$/i;
@@ -177,14 +172,14 @@ function usePrintConfig(etag: string | undefined, state: string | undefined) {
   return config;
 }
 
-function JobList({ available }: { available: boolean }) {
-  const { jobs, error } = useJobs();
+function JobList({ printerId, available }: { printerId: string | undefined; available: boolean }) {
+  const { jobs, error } = useJobs(printerId);
   const [canceling, setCanceling] = useState<Set<number>>(new Set());
 
   async function cancel(job: Job) {
     setCanceling((s) => new Set(s).add(job.id));
     try {
-      await api.cancelJob(job.id);
+      await api.cancelJob(job.printer, job.id);
     } catch (err) {
       toast({
         title: t.jobs.cancelFailed(job.name),
@@ -236,29 +231,73 @@ function JobList({ available }: { available: boolean }) {
   );
 }
 
+/** One option group's shown controls, or nothing when the printer lets you change none of them. */
+function Group({
+  group,
+  caps,
+  chosen,
+  set,
+}: {
+  group: OptionGroup<PrintKind>;
+  caps: PrinterCaps | undefined;
+  chosen: PrintOptions;
+  set: (patch: Partial<PrintOptions>) => void;
+}) {
+  const kinds = group.kinds.filter((k) => optionState(k, caps, "printer").reason === null);
+  if (kinds.length === 0) return null;
+  return (
+    <section className="print-group">
+      <h3 className="print-group-title">{group.title}</h3>
+      {kinds.map((kind) => (
+        <OptionField
+          key={kind}
+          kind={kind}
+          device="printer"
+          mode="job"
+          state={optionState(kind, caps, "printer")}
+          value={chosen[kind]}
+          onChange={(v) => set({ [kind]: v })}
+        />
+      ))}
+    </section>
+  );
+}
+
+const shows = (g: OptionGroup<PrintKind>, caps: PrinterCaps | undefined) =>
+  g.kinds.some((k) => optionState(k, caps, "printer").reason === null);
+
 export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } = {}) {
   const status = useStatus();
   const connected = useConnected();
-  const notFound = usePrinterNotFound();
-  const printer = status?.printer;
+  const notFound = useNothingFound();
+  const printers = useEnabledPrinters();
+  const [printer, choose] = useDeviceChoice("printer", printers);
+  const id = printer?.id;
   const available = printer?.available ?? false;
+  // Unknown until the printer is connected, so nothing is offered then.
+  const caps = available ? printer?.capabilities : undefined;
   // What the printer takes as is, plus what pagewire converts for it.
   const formats = [
     ...(printer?.formats ?? []),
     ...(printer?.convertedFormats ?? []).map((c) => c.from),
   ];
   const config = usePrintConfig(status?.config.etag, status?.config.state);
-  const maxUploadMiB = config?.print.maxUploadMiB ?? fallback.maxUploadMiB;
+  const maxUploadMiB = config?.print.maxUploadMiB ?? fallbackMaxUploadMiB;
+  const configured = config?.printers.find((p) => p.id === id)?.defaults;
 
-  const [overrides, setOverrides] = useState<Partial<PrintOptions>>({});
-  const options: PrintOptions = {
-    ...fallback.options,
-    ...config?.print.defaults,
-    ...overrides,
+  // Choices are kept per printer, so switching printers recomputes every control from its own.
+  const [overrides, setOverrides] = useState<Record<string, PrintOptions>>({});
+  const mine = (id && overrides[id]) || {};
+  const chosen: PrintOptions = { ...configured, ...mine };
+  const set = (patch: Partial<PrintOptions>) => {
+    if (id) setOverrides((o) => ({ ...o, [id]: { ...o[id], ...patch } }));
   };
-  const set = (patch: Partial<PrintOptions>) => setOverrides((o) => ({ ...o, ...patch }));
+  const copiesMax = copiesLimit(caps);
+  const copies = mine.copies ?? 1;
   const copiesValid =
-    Number.isInteger(options.copies) && options.copies >= 1 && options.copies <= 99;
+    copiesMax === 0 || (Number.isInteger(copies) && copies >= 1 && copies <= copiesMax);
+  const request = toRequest("printer", caps, chosen);
+  const sentCopies = request.copies ?? 1;
 
   const [items, setItems] = useState<Item[]>([]);
   const [sending, setSending] = useState(false);
@@ -294,16 +333,22 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
   const canPrint = available && connected && copiesValid && !checking && printable.length > 0;
 
   async function printAll() {
+    if (!id) return;
     setSending(true);
-    const opts = options;
     // One job per file, one upload at a time.
     for (const item of printable) {
       update(item.key, { progress: 0, error: null });
       try {
-        await upload(item.file, opts, (f) => update(item.key, { progress: f }));
+        const { warnings } = await upload(id, item.file, request, (f) =>
+          update(item.key, { progress: f }),
+        );
         // The job event adds the job to the list below; the file row is done.
         setItems((list) => list.filter((i) => i.key !== item.key));
-        toast({ title: t.sent(item.file.name), tone: "ok" });
+        toast({
+          title: t.sent(item.file.name),
+          description: warnings.map((w) => warningText(w, "printer")).join(" ") || undefined,
+          tone: "ok",
+        });
       } catch (err) {
         update(item.key, { progress: null, error: problemMessage(err) });
         toast({
@@ -316,12 +361,18 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
     setSending(false);
   }
 
-  const mediaIds = [...new Set([...(printer?.media ?? []), options.media])];
   const accepted = [...new Set(formats.map(baseType).filter((f) => f !== UNKNOWN))].map(formatName);
+  const open = printerGroups.filter((g) => !MORE.has(g.id));
+  const more = printerGroups.filter((g) => MORE.has(g.id));
+  const summary = [
+    request.media && optionLabel("media", request.media, "printer"),
+    request.sides && optionLabel("sides", request.sides, "printer").toLowerCase(),
+  ].filter((x) => x !== undefined);
 
   return (
     <div className="print-view">
       <PageHeader title={strings.nav.print} description={t.description} />
+      <DevicePicker kind="printer" devices={printers} selected={id} onSelect={choose} />
 
       {!available && (
         <Card className="print-unavailable">
@@ -337,7 +388,7 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
                 </LinkButton>
               }
             >
-              <p>{status.device.message || t.unavailable.waiting}</p>
+              <p>{printer?.message || t.unavailable.waiting}</p>
               {notFound && <p>{strings.plugInHint}</p>}
             </EmptyState>
           )}
@@ -425,58 +476,36 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
         </Card>
 
         <Card title={t.options.title} className="print-options">
-          <NumberField
-            label={t.options.copies}
-            minValue={1}
-            maxValue={99}
-            step={1}
-            value={options.copies}
-            onChange={(v) => set({ copies: v })}
-            errorMessage={copiesValid ? undefined : t.options.copiesError}
-          />
-          <Select
-            label={t.options.media}
-            selectedKey={options.media}
-            onSelectionChange={(k) => set({ media: String(k) })}
-            options={mediaIds.map((id) => ({ id, label: mediaLabel(id) }))}
-          />
-          <Select
-            label={t.options.sides.label}
-            selectedKey={options.sides}
-            onSelectionChange={(k) => set({ sides: k as PrintOptions["sides"] })}
-            options={(["one-sided", "two-sided-long-edge", "two-sided-short-edge"] as const).map(
-              (id) => ({ id, label: t.options.sides[id] }),
-            )}
-          />
-          <Select
-            label={t.options.colorMode.label}
-            selectedKey={options.colorMode}
-            onSelectionChange={(k) => set({ colorMode: k as PrintOptions["colorMode"] })}
-            options={(["auto", "color", "monochrome"] as const).map((id) => ({
-              id,
-              label: t.options.colorMode[id],
-            }))}
-          />
-          <Select
-            label={t.options.quality.label}
-            selectedKey={options.quality}
-            onSelectionChange={(k) => set({ quality: k as PrintOptions["quality"] })}
-            options={(["draft", "normal", "high"] as const).map((id) => ({
-              id,
-              label: t.options.quality[id],
-            }))}
-          />
+          {copiesMax > 0 && (
+            <NumberField
+              label={t.options.copies}
+              minValue={1}
+              maxValue={copiesMax}
+              step={1}
+              value={copies}
+              onChange={(v) => set({ copies: v })}
+              errorMessage={copiesValid ? undefined : t.options.copiesError(copiesMax)}
+            />
+          )}
+          {open.map((g) => (
+            <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
+          ))}
+          {more.some((g) => shows(g, caps)) && (
+            <Disclosure title={t.options.more}>
+              {more.map((g) => (
+                <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
+              ))}
+            </Disclosure>
+          )}
+          {status !== null && !caps && <p className="print-subtle">{t.options.unknown}</p>}
+          {caps && copiesMax === 0 && !printerGroups.some((g) => shows(g, caps)) && (
+            <p className="print-subtle">{t.options.none}</p>
+          )}
         </Card>
       </div>
 
       <div className="print-submit">
-        <p className="print-subtle">
-          {t.summary(
-            copiesValid ? options.copies : 1,
-            mediaName(options.media),
-            t.options.sides[options.sides].toLowerCase(),
-          )}
-        </p>
+        <p className="print-subtle">{t.summary(sentCopies, summary)}</p>
         <Button
           variant="primary"
           isDisabled={!canPrint && !sending}
@@ -484,11 +513,11 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
           onPress={() => void printAll()}
         >
           <Icon name="print" size={18} />
-          {t.submit(printable.length, items.length, copiesValid ? options.copies : 1)}
+          {t.submit(printable.length, items.length, sentCopies)}
         </Button>
       </div>
 
-      <JobList available={available} />
+      <JobList printerId={id} available={available} />
     </div>
   );
 }

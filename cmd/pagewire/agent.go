@@ -45,7 +45,7 @@ func agentCmd(ctx context.Context, args []string) error {
 		if sel.VendorID != "" || sel.ProductID != "" {
 			selp = &sel
 		}
-		return agent.WriteJSON(*out, agent.Probe(*sysRoot, *devRoot, selp))
+		return agent.WriteJSON(*out, agent.ProbeFile{Inventory: agent.Probe(*sysRoot, *devRoot, selp), Nodes: agent.ProbeNodes(*devRoot)})
 	case "fetch":
 		var c agent.FetchConfig
 		fl.StringVar(&c.Dir, "dir", "", "blob volume")
@@ -65,11 +65,11 @@ func agentCmd(ctx context.Context, args []string) error {
 		fl.StringVar(&c.ControlPlaneURL, "control-plane-url", "", "control-plane internal URL")
 		fl.StringVar(&c.TokenFile, "token-file", "", "bearer token file")
 		fl.StringVar(&c.PodUID, "pod-uid", "", "this pod's UID")
+		fl.StringVar(&c.Workload, strings.TrimPrefix(device.AgentWorkloadArg, "--"), "", "this workload's node name (Spec.Node); empty for a single workload")
 		fl.StringVar(&c.InventoryFile, "inventory", "", "inventory JSON from agent probe")
 		fl.StringVar(&c.BlobStatusFile, "blob-status", "", "blob status JSON from agent fetch, re-read every cycle")
 		fl.StringVar(&c.BlobDir, "blob-dir", "", "blob volume where vendor archives are staged to show their licence text; empty: licence texts report failed")
 		fl.StringVar(&c.SysRoot, "sys-root", "/sys", "sysfs root")
-		fl.StringVar(&c.PAPPLURL, "pappl-url", "", "PAPPL system URI, e.g. ipp://127.0.0.1:8001/ipp/system")
 		fl.StringVar(&c.DBusAddress, "dbus-address", device.DBusAddress, "D-Bus system bus for Avahi; empty disables DNS-SD browsing")
 		fl.DurationVar(&c.Interval, "interval", 0, "report interval (default 5s)")
 		if err := parseAgentFlags(fl, args[1:]); err != nil {

@@ -408,13 +408,15 @@
         "--token-file",
         "/var/run/pagewire/token",
         "--pod-uid",
-        "docker-d4aad576b417",
+        "docker-b8bf3459fc74",
         "--dbus-address",
         "unix:path=/run/dbus/system_bus_socket",
         "--inventory",
         "/run/pagewire/inventory.json",
         "--blob-status",
-        "/run/pagewire/blobs.json"
+        "/run/pagewire/blobs.json",
+        "--workload",
+        ""
       ],
       "Healthcheck": {
         "Test": [
@@ -541,7 +543,7 @@
     }
   },
   {
-    "name": "sim-printer",
+    "name": "sim-printer-0",
     "runOnce": false,
     "config": {
       "Hostname": "",
@@ -575,7 +577,7 @@
         "/usr/sbin/ippeveprinter"
       ],
       "Labels": {
-        "io.github.thephaseless.pagewire.container": "sim-printer",
+        "io.github.thephaseless.pagewire.container": "sim-printer-0",
         "io.github.thephaseless.pagewire.init": "false",
         "io.github.thephaseless.pagewire.managed-by": "pagewire"
       },

@@ -1,0 +1,376 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: pagewire-device-1
+  namespace: printing
+  labels:
+    app.kubernetes.io/managed-by: pagewire
+    app.kubernetes.io/name: pagewire-device-1
+    pagewire.thephaseless.github.io/device-workload: "true"
+  annotations:
+    ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
+    ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
+    pagewire.thephaseless.github.io/node: node-b
+    pagewire.thephaseless.github.io/spec-hash: c1eb90a1cffa14d2f105a62e51f15fe60546b7a12668e1aad384444792e7c23a
+    reloader.stakater.com/auto: "false"
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: pagewire
+    uid: 00000000-0000-0000-0000-000000000001
+    controller: true
+    blockOwnerDeletion: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pagewire-device-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: pagewire
+        app.kubernetes.io/name: pagewire-device-1
+        pagewire.thephaseless.github.io/device-workload: "true"
+      annotations:
+        pagewire.thephaseless.github.io/config-hash: 492b2e4eed3f28d3aeb0ef41a8b4da2b3239a07fdb59a3b7e71197b9abc725a2
+        pagewire.thephaseless.github.io/spec-hash: c1eb90a1cffa14d2f105a62e51f15fe60546b7a12668e1aad384444792e7c23a
+    spec:
+      volumes:
+      - name: run-pagewire
+        emptyDir: {}
+      - name: run-dbus
+        emptyDir: {}
+      - name: run-avahi
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: agent-token
+        secret:
+          secretName: pagewire-agent-token
+      - name: ipp-usb-conf
+        configMap:
+          name: pagewire-device-1
+          items:
+          - key: ipp-usb.conf
+            path: ipp-usb.conf
+      - name: ipp-usb-state
+        emptyDir: {}
+      - name: ipp-usb-log
+        emptyDir: {}
+      - name: app-state
+        emptyDir: {}
+      - name: app-spool
+        emptyDir: {}
+      - name: app-run
+        emptyDir: {}
+      - name: app-ssl
+        emptyDir: {}
+      - name: app-fontconfig
+        emptyDir: {}
+      - name: airsane-conf
+        configMap:
+          name: pagewire-device-1
+          items:
+          - key: options.conf
+            path: options.conf
+          - key: ignore.conf
+            path: ignore.conf
+          - key: access.conf
+            path: access.conf
+      - name: sane-conf
+        configMap:
+          name: pagewire-device-1
+          items:
+          - key: dll.conf
+            path: dll.conf
+      initContainers:
+      - name: probe
+        image: ghcr.io/thephaseless/pagewire:0.0.0-test
+        command:
+        - /pagewire
+        args:
+        - agent
+        - probe
+        - --out
+        - /run/pagewire/inventory.json
+        resources:
+          limits:
+            cpu: 200m
+            devic.es/printer: "1"
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            devic.es/printer: "1"
+            memory: 16Mi
+        volumeMounts:
+        - name: run-pagewire
+          mountPath: /run/pagewire
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: dbus
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
+        command:
+        - /usr/bin/dbus-daemon
+        args:
+        - --config-file=/etc/pagewire/dbus.conf
+        - --nofork
+        - --nopidfile
+        resources:
+          limits:
+            cpu: 100m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 101
+          runAsGroup: 101
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: avahi
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
+        command:
+        - /usr/sbin/avahi-daemon
+        args:
+        - --no-drop-root
+        - --no-chroot
+        - --no-rlimits
+        - -f
+        - /etc/pagewire/avahi-daemon.conf
+        resources:
+          limits:
+            cpu: 100m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: run-avahi
+          mountPath: /run
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 102
+          runAsGroup: 102
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: agent
+        image: ghcr.io/thephaseless/pagewire:0.0.0-test
+        command:
+        - /pagewire
+        args:
+        - agent
+        - run
+        - --control-plane-url
+        - http://pagewire.printing.svc:8081
+        - --token-file
+        - /var/run/pagewire/token
+        - --pod-uid
+        - $(POD_UID)
+        - --dbus-address
+        - unix:path=/run/dbus/system_bus_socket
+        - --inventory
+        - /run/pagewire/inventory.json
+        - --blob-status
+        - /run/pagewire/blobs.json
+        - --workload
+        - node-b
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        restartPolicy: Always
+        volumeMounts:
+        - name: agent-token
+          readOnly: true
+          mountPath: /var/run/pagewire
+        - name: run-pagewire
+          readOnly: true
+          mountPath: /run/pagewire
+        - name: run-dbus
+          mountPath: /run/dbus
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 65532
+          runAsGroup: 65532
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      containers:
+      - name: ipp-usb
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
+        command:
+        - /usr/local/sbin/ipp-usb
+        args:
+        - standalone
+        resources:
+          limits:
+            cpu: 500m
+            devic.es/printer: "1"
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            devic.es/printer: "1"
+            memory: 32Mi
+        volumeMounts:
+        - name: ipp-usb-conf
+          readOnly: true
+          mountPath: /etc/ipp-usb
+        - name: run-dbus
+          mountPath: /run/dbus
+        - name: ipp-usb-state
+          mountPath: /var/ipp-usb
+        - name: ipp-usb-log
+          mountPath: /var/log/ipp-usb
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: printer-app-legacy
+        image: ghcr.io/thephaseless/pagewire-driver-legacy:0.0.0-test
+        command:
+        - /usr/local/bin/legacy-printer-app
+        args:
+        - -o
+        - server-port=8005
+        - -o
+        - log-file=-
+        - server
+        resources:
+          limits:
+            cpu: "2"
+            devic.es/printer: "1"
+            memory: 1Gi
+          requests:
+            cpu: 50m
+            devic.es/printer: "1"
+            memory: 64Mi
+        volumeMounts:
+        - name: app-run
+          mountPath: /run
+          subPath: legacy
+        - name: run-dbus
+          mountPath: /run/dbus
+        - name: app-state
+          mountPath: /var/lib/legacy-printer-app
+          subPath: legacy
+        - name: app-spool
+          mountPath: /var/spool/legacy-printer-app
+          subPath: legacy
+        - name: tmp
+          mountPath: /tmp
+        - name: app-ssl
+          mountPath: /etc/cups/ssl
+          subPath: legacy
+        - name: app-fontconfig
+          mountPath: /var/cache/fontconfig
+          subPath: legacy
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: airsane
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
+        command:
+        - /usr/local/bin/airsaned
+        args:
+        - --listen-port=8090
+        - --hotplug=false
+        - --options-file=/etc/pagewire/airsane/options.conf
+        - --ignore-list=/etc/pagewire/airsane/ignore.conf
+        - --access-file=/etc/pagewire/airsane/access.conf
+        env:
+        - name: SANE_CONFIG_DIR
+          value: "/etc/pagewire/sane.d:"
+        resources:
+          limits:
+            cpu: "1"
+            devic.es/printer: "1"
+            memory: 512Mi
+          requests:
+            cpu: 20m
+            devic.es/printer: "1"
+            memory: 32Mi
+        volumeMounts:
+        - name: airsane-conf
+          readOnly: true
+          mountPath: /etc/pagewire/airsane
+        - name: sane-conf
+          readOnly: true
+          mountPath: /etc/pagewire/sane.d
+        - name: run-dbus
+          mountPath: /run/dbus
+        - name: tmp
+          mountPath: /tmp
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      terminationGracePeriodSeconds: 10
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      hostNetwork: true
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                - node-b
+      enableServiceLinks: false
+  strategy:
+    type: Recreate

@@ -20,25 +20,15 @@ export const BlobStatusSchema = z.strictObject({
 });
 export type BlobStatus = z.infer<typeof BlobStatusSchema>;
 
-export const USBSchema = z.strictObject({
+export const IgnoredDeviceSchema = z.strictObject({
   vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
   productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
   /** USB serial number, at most 126 characters, no control characters. */
   serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** printer, scanner or both. */
+  roles: z.array(z.enum(["printer","scanner"])).min(1).refine((a) => new Set(a.map((v) => JSON.stringify(v))).size === a.length, { message: "Items must be unique" }),
 });
-export type USB = z.infer<typeof USBSchema>;
-
-export const DeviceSchema = z.strictObject({
-  /** usb, or simulated (test printer and SANE test scanner, no USB resource). */
-  mode: z.enum(["usb","simulated"]),
-  /** Optional selector when several USB devices are visible. Only allowed with mode usb. */
-  usb: USBSchema.optional(),
-  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript","legacy"]),
-  /** Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the device degraded. Not allowed with driver ipp-usb or mode simulated. */
-  driverName: z.string().max(255).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
-  scanner: z.enum(["auto","ipp-usb","airsane","none"]),
-});
-export type Device = z.infer<typeof DeviceSchema>;
+export type IgnoredDevice = z.infer<typeof IgnoredDeviceSchema>;
 
 export const EULARefSchema = z.strictObject({
   id: z.string(),
@@ -54,43 +44,107 @@ export const LicensesSchema = z.strictObject({
 });
 export type Licenses = z.infer<typeof LicensesSchema>;
 
-export const PrintDefaultsSchema = z.strictObject({
-  /** PWG self-describing media name. */
-  media: z.string().regex(new RegExp("^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$", "u")),
-  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]),
-  colorMode: z.enum(["auto","color","monochrome"]),
-  quality: z.enum(["draft","normal","high"]),
-});
-export type PrintDefaults = z.infer<typeof PrintDefaultsSchema>;
-
 export const PrintConfigSchema = z.strictObject({
-  defaults: PrintDefaultsSchema,
   maxUploadMiB: z.int().min(1).max(500),
 });
 export type PrintConfig = z.infer<typeof PrintConfigSchema>;
 
-export const ScanDefaultsSchema = z.strictObject({
-  source: z.enum(["platen","adf","adf-duplex"]),
-  resolution: z.int().min(75).max(1200),
-  colorMode: z.enum(["color","grayscale","blackandwhite"]),
-  format: z.enum(["pdf","jpeg"]),
+export const PrintDefaultsSchema = z.strictObject({
+  /** PWG self-describing media name, such as iso_a4_210x297mm. */
+  media: z.string().regex(new RegExp("^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$", "u")).optional(),
+  /** Tray keyword the printer reports, such as auto, main, tray-1 or manual. */
+  mediaSource: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  /** Media type keyword the printer reports, such as stationery or photographic-glossy. */
+  mediaType: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]).optional(),
+  colorMode: z.enum(["auto","color","monochrome"]).optional(),
+  quality: z.enum(["draft","normal","high"]).optional(),
+  /** Dots per inch. */
+  resolution: z.int().min(75).max(2400).optional(),
+  contentOptimize: z.enum(["auto","graphic","photo","text","text-and-graphic"]).optional(),
+  orientation: z.enum(["portrait","landscape","reverse-landscape","reverse-portrait"]).optional(),
+  /** Pages per sheet. */
+  numberUp: z.int().min(1).max(16).optional(),
+  printScaling: z.enum(["auto","auto-fit","fill","fit","none"]).optional(),
+  /** Output bin keyword the printer reports, such as face-down or top. */
+  outputBin: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  /** One IANA finishings keyword, such as none, staple or punch. */
+  finishings: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
 });
-export type ScanDefaults = z.infer<typeof ScanDefaultsSchema>;
+export type PrintDefaults = z.infer<typeof PrintDefaultsSchema>;
+
+export const USBSchema = z.strictObject({
+  vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
+  productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
+  /** USB serial number, at most 126 characters, no control characters. */
+  serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+});
+export type USB = z.infer<typeof USBSchema>;
+
+export const PrinterSchema = z.strictObject({
+  /** Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners. */
+  id: z.string().regex(new RegExp("^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -, unique among printers (ignoring case). The queue and DNS-SD name of PAPPL and simulated printers; ipp-usb and AirSane advertise the device's own names. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** printer-location, 0 to 127 characters. */
+  location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** false keeps the entry but does not serve the printer (default true). */
+  enabled: z.boolean(),
+  /** usb, or simulated (a test printer, no USB resource). */
+  mode: z.enum(["usb","simulated"]),
+  /** Selects the USB device. Only allowed with mode usb; at most one usb printer may leave it out. */
+  usb: USBSchema.optional(),
+  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript","legacy"]),
+  /** Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the printer degraded. Not allowed with driver ipp-usb or mode simulated. */
+  driverName: z.string().max(255).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
+  defaults: PrintDefaultsSchema,
+});
+export type Printer = z.infer<typeof PrinterSchema>;
 
 export const ScanConfigSchema = z.strictObject({
-  defaults: ScanDefaultsSchema,
   /** Days to keep scans; 0 keeps them forever. */
   retentionDays: z.int().min(0).max(3650),
 });
 export type ScanConfig = z.infer<typeof ScanConfigSchema>;
 
-export const ConfigSchema = z.strictObject({
-  apiVersion: z.literal("pagewire/v1"),
-  /** Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
+export const ScanDefaultsSchema = z.strictObject({
+  source: z.enum(["platen","adf","adf-duplex"]).optional(),
+  /** Dots per inch. */
+  resolution: z.int().min(75).max(1200).optional(),
+  colorMode: z.enum(["color","grayscale","blackandwhite"]).optional(),
+  intent: z.enum(["document","text-and-graphic","photo","preview","object","business-card"]).optional(),
+  format: z.enum(["pdf","jpeg"]).optional(),
+});
+export type ScanDefaults = z.infer<typeof ScanDefaultsSchema>;
+
+export const ScannerSchema = z.strictObject({
+  /** Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners. */
+  id: z.string().regex(new RegExp("^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. The scanner's name in the UI; ipp-usb and AirSane advertise the device's own name. */
   name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
-  /** printer-location, 0 to 127 characters. */
+  /** 0 to 127 characters. */
   location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
-  device: DeviceSchema,
+  /** false keeps the entry but does not serve the scanner (default true). */
+  enabled: z.boolean(),
+  /** usb, or simulated (the SANE test scanner, no USB resource). At most one scanner may be simulated. */
+  mode: z.enum(["usb","simulated"]),
+  /** Selects the USB device. Only allowed with mode usb; at most one usb scanner may leave it out. */
+  usb: USBSchema.optional(),
+  backend: z.enum(["auto","ipp-usb","airsane"]),
+  defaults: ScanDefaultsSchema,
+});
+export type Scanner = z.infer<typeof ScannerSchema>;
+
+export const ConfigSchema = z.strictObject({
+  apiVersion: z.literal("pagewire/v2"),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. The UI title. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** Printers pagewire serves (default []). */
+  printers: z.array(PrinterSchema),
+  /** Scanners pagewire serves (default []). */
+  scanners: z.array(ScannerSchema),
+  /** USB devices the setup wizard does not offer again (default []). */
+  ignoredDevices: z.array(IgnoredDeviceSchema),
   print: PrintConfigSchema,
   scan: ScanConfigSchema,
   licenses: LicensesSchema,
@@ -119,13 +173,6 @@ export const ConfigResponseSchema = z.strictObject({
 });
 export type ConfigResponse = z.infer<typeof ConfigResponseSchema>;
 
-export const ConnectSchema = z.strictObject({
-  dnssdName: z.string(),
-  ippUris: z.array(z.string()),
-  esclUrls: z.array(z.string()),
-});
-export type Connect = z.infer<typeof ConnectSchema>;
-
 export const USBInterfaceSchema = z.strictObject({
   class: z.int(),
   subClass: z.int(),
@@ -146,18 +193,39 @@ export const USBDeviceSchema = z.strictObject({
 });
 export type USBDevice = z.infer<typeof USBDeviceSchema>;
 
-export const DecisionSchema = z.strictObject({
-  printer: z.string(),
+export const PrinterDecisionSchema = z.strictObject({
+  family: z.string(),
   driver: z.string(),
   driverDescription: z.string(),
-  scanner: z.string(),
-  saneBackends: z.array(z.string()),
   requiredEulas: z.array(z.string()),
   optionalEulas: z.array(z.string()),
   rule: z.enum(["ipp-over-usb","model","command-set","override","none","simulated"]),
   device: USBDeviceSchema.nullable(),
 });
-export type Decision = z.infer<typeof DecisionSchema>;
+export type PrinterDecision = z.infer<typeof PrinterDecisionSchema>;
+
+export const ScannerDecisionSchema = z.strictObject({
+  family: z.string(),
+  saneBackends: z.array(z.string()),
+  rule: z.enum(["ipp-over-usb","sane-index","still-image","override","simulated"]),
+  device: USBDeviceSchema.nullable(),
+});
+export type ScannerDecision = z.infer<typeof ScannerDecisionSchema>;
+
+export const DetectedDeviceSchema = z.strictObject({
+  device: USBDeviceSchema,
+  node: z.string(),
+  canPrint: z.boolean(),
+  canScan: z.boolean(),
+  printerId: z.string(),
+  scannerId: z.string(),
+  ignored: z.array(z.enum(["printer","scanner"])),
+  suggestedPrinter: PrinterSchema.nullable(),
+  suggestedScanner: ScannerSchema.nullable(),
+  printerDecision: PrinterDecisionSchema.nullable(),
+  scannerDecision: ScannerDecisionSchema.nullable(),
+});
+export type DetectedDevice = z.infer<typeof DetectedDeviceSchema>;
 
 export const EULASchema = z.strictObject({
   id: z.string(),
@@ -178,15 +246,9 @@ export const FormatConversionSchema = z.strictObject({
 });
 export type FormatConversion = z.infer<typeof FormatConversionSchema>;
 
-export const InventorySchema = z.strictObject({
-  devices: z.array(USBDeviceSchema),
-  probedAt: z.iso.datetime({ offset: true }),
-  simulated: z.boolean(),
-});
-export type Inventory = z.infer<typeof InventorySchema>;
-
 export const JobSchema = z.strictObject({
   id: z.int(),
+  printer: z.string(),
   name: z.string(),
   state: z.enum(["pending","processing","completed","canceled","aborted","held","stopped"]),
   reasons: z.array(z.string()),
@@ -202,13 +264,74 @@ export const MarkerSchema = z.strictObject({
 export type Marker = z.infer<typeof MarkerSchema>;
 
 export const PrintOptionsSchema = z.strictObject({
-  copies: z.int().min(1).max(99),
-  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]),
-  colorMode: z.enum(["auto","color","monochrome"]),
-  media: z.string(),
-  quality: z.enum(["draft","normal","high"]),
+  copies: z.int().min(0).max(99).optional(),
+  media: z.string().regex(new RegExp("^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$", "u")).optional(),
+  mediaSource: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  mediaType: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]).optional(),
+  colorMode: z.enum(["auto","color","monochrome"]).optional(),
+  quality: z.enum(["draft","normal","high"]).optional(),
+  resolution: z.int().min(75).max(2400).optional(),
+  contentOptimize: z.enum(["auto","graphic","photo","text","text-and-graphic"]).optional(),
+  orientation: z.enum(["portrait","landscape","reverse-landscape","reverse-portrait"]).optional(),
+  numberUp: z.int().min(1).max(16).optional(),
+  printScaling: z.enum(["auto","auto-fit","fill","fit","none"]).optional(),
+  outputBin: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  finishings: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
 });
 export type PrintOptions = z.infer<typeof PrintOptionsSchema>;
+
+export const WarningSchema = z.strictObject({
+  option: z.enum(["media","mediaSource","mediaType","sides","colorMode","quality","resolution","contentOptimize","orientation","numberUp","printScaling","outputBin","finishings","copies","source","intent","format","other"]),
+  value: z.string(),
+  using: z.string(),
+  message: z.string(),
+});
+export type Warning = z.infer<typeof WarningSchema>;
+
+export const PrintResultSchema = z.strictObject({
+  job: JobSchema,
+  warnings: z.array(WarningSchema),
+});
+export type PrintResult = z.infer<typeof PrintResultSchema>;
+
+export const PrinterCapsSchema = z.strictObject({
+  media: z.array(z.string()),
+  mediaSources: z.array(z.string()),
+  mediaTypes: z.array(z.string()),
+  sides: z.array(z.string()),
+  colorModes: z.array(z.string()),
+  qualities: z.array(z.string()),
+  contentOptimize: z.array(z.string()),
+  orientations: z.array(z.string()),
+  printScalings: z.array(z.string()),
+  outputBins: z.array(z.string()),
+  finishings: z.array(z.string()),
+  formats: z.array(z.string()),
+  resolutions: z.array(z.int()),
+  numberUp: z.array(z.int()),
+  copiesMax: z.int(),
+  mediaDefault: z.string(),
+  mediaSourceDefault: z.string(),
+  mediaTypeDefault: z.string(),
+  sidesDefault: z.string(),
+  colorModeDefault: z.string(),
+  qualityDefault: z.string(),
+  contentOptimizeDefault: z.string(),
+  orientationDefault: z.string(),
+  printScalingDefault: z.string(),
+  outputBinDefault: z.string(),
+  finishingsDefault: z.string(),
+  resolutionDefault: z.int(),
+  numberUpDefault: z.int(),
+});
+export type PrinterCaps = z.infer<typeof PrinterCapsSchema>;
+
+export const PrinterConnectSchema = z.strictObject({
+  dnssdName: z.string(),
+  ippUris: z.array(z.string()),
+});
+export type PrinterConnect = z.infer<typeof PrinterConnectSchema>;
 
 export const ProblemSchema = z.strictObject({
   type: z.string(),
@@ -228,15 +351,18 @@ export const ReconcileItemSchema = z.strictObject({
 export type ReconcileItem = z.infer<typeof ReconcileItemSchema>;
 
 export const ScanSettingsSchema = z.strictObject({
+  scanner: z.string(),
   source: z.enum(["platen","adf","adf-duplex"]),
   resolution: z.int().min(75).max(1200),
   colorMode: z.enum(["color","grayscale","blackandwhite"]),
   format: z.enum(["pdf","jpeg"]),
+  intent: z.enum(["document","text-and-graphic","photo","preview","object","business-card"]).optional(),
 });
 export type ScanSettings = z.infer<typeof ScanSettingsSchema>;
 
 export const ScanSchema = z.strictObject({
   id: z.string(),
+  scanner: z.string(),
   state: z.enum(["scanning","completed","failed","canceled"]),
   createdAt: z.iso.datetime({ offset: true }),
   pages: z.int(),
@@ -252,8 +378,15 @@ export const ScannerCapsSchema = z.strictObject({
   colorModes: z.array(z.string()),
   adf: z.boolean(),
   duplex: z.boolean(),
+  intents: z.array(z.string()),
 });
 export type ScannerCaps = z.infer<typeof ScannerCapsSchema>;
+
+export const ScannerConnectSchema = z.strictObject({
+  dnssdName: z.string(),
+  esclUrls: z.array(z.string()),
+});
+export type ScannerConnect = z.infer<typeof ScannerConnectSchema>;
 
 export const SetupEULASchema = z.strictObject({
   id: z.string(),
@@ -271,8 +404,7 @@ export const SetupSchema = z.strictObject({
   required: z.boolean(),
   backend: z.enum(["k8s","docker","sim"]),
   usbResourceConfigured: z.boolean(),
-  inventory: InventorySchema.nullable(),
-  decision: DecisionSchema.nullable(),
+  devices: z.array(DetectedDeviceSchema),
   eulas: z.array(SetupEULASchema),
   suggested: ConfigSchema,
 });
@@ -287,18 +419,16 @@ export const StatusConfigSchema = z.strictObject({
 });
 export type StatusConfig = z.infer<typeof StatusConfigSchema>;
 
-export const StatusDeviceSchema = z.strictObject({
-  phase: z.enum(["none","probing","deploying","ready","degraded","error"]),
-  mode: z.enum(["none","usb","simulated","probe"]),
-  decision: DecisionSchema.nullable(),
-  inventory: InventorySchema.nullable(),
-  message: z.string(),
-  advertised: z.array(AdvertisedServiceSchema),
-  blobs: z.array(BlobStatusSchema),
-});
-export type StatusDevice = z.infer<typeof StatusDeviceSchema>;
-
 export const StatusPrinterSchema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  location: z.string(),
+  enabled: z.boolean(),
+  phase: z.enum(["none","probing","deploying","ready","degraded","error"]),
+  message: z.string(),
+  warnings: z.array(WarningSchema),
+  decision: PrinterDecisionSchema.nullable(),
+  device: USBDeviceSchema.nullable(),
   available: z.boolean(),
   uri: z.string(),
   state: z.enum(["idle","processing","stopped","unknown"]),
@@ -307,22 +437,47 @@ export const StatusPrinterSchema = z.strictObject({
   convertedFormats: z.array(FormatConversionSchema),
   media: z.array(z.string()),
   markers: z.array(MarkerSchema),
+  capabilities: PrinterCapsSchema,
+  connect: PrinterConnectSchema,
 });
 export type StatusPrinter = z.infer<typeof StatusPrinterSchema>;
 
 export const StatusScannerSchema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  location: z.string(),
+  enabled: z.boolean(),
+  phase: z.enum(["none","probing","deploying","ready","degraded","error"]),
+  message: z.string(),
+  warnings: z.array(WarningSchema),
+  decision: ScannerDecisionSchema.nullable(),
+  device: USBDeviceSchema.nullable(),
   available: z.boolean(),
   url: z.string(),
   state: z.enum(["idle","processing","stopped","unknown"]),
+  capabilities: ScannerCapsSchema,
+  connect: ScannerConnectSchema,
 });
 export type StatusScanner = z.infer<typeof StatusScannerSchema>;
 
+export const StatusWorkloadSchema = z.strictObject({
+  node: z.string(),
+  phase: z.enum(["absent","pending","running","failed"]),
+  mode: z.enum(["none","usb","simulated","probe"]),
+  message: z.string(),
+  advertised: z.array(AdvertisedServiceSchema),
+  blobs: z.array(BlobStatusSchema),
+});
+export type StatusWorkload = z.infer<typeof StatusWorkloadSchema>;
+
 export const StatusSchema = z.strictObject({
   config: StatusConfigSchema,
-  device: StatusDeviceSchema,
-  printer: StatusPrinterSchema,
-  scanner: StatusScannerSchema,
+  phase: z.enum(["none","probing","deploying","ready","degraded","error"]),
+  message: z.string(),
+  printers: z.array(StatusPrinterSchema),
+  scanners: z.array(StatusScannerSchema),
+  workloads: z.array(StatusWorkloadSchema),
+  devices: z.array(DetectedDeviceSchema),
   reconcile: z.array(ReconcileItemSchema),
-  connect: ConnectSchema,
 });
 export type Status = z.infer<typeof StatusSchema>;

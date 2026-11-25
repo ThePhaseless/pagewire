@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,8 +22,8 @@ import (
 
 const testHostIP = "192.0.2.10"
 
-// sysfs builds a fake /sys with one USB device: a printer when printer is
-// true, else a keyboard.
+// sysfs builds a fake /sys with one USB device at bus 1 address 7: the HP
+// printer of keyHP when printer is true, else a keyboard.
 func sysfs(t *testing.T, printer bool) string {
 	t.Helper()
 	root := t.TempDir()
@@ -32,11 +33,18 @@ func sysfs(t *testing.T, printer bool) string {
 
 func setPrinter(t *testing.T, root string, printer bool) {
 	t.Helper()
-	dev := filepath.Join(root, "bus", "usb", "devices", "1-1")
-	class := "03"
 	if printer {
-		class = "07"
+		addUSB(t, root, "1-1", keyHP, 7, "07")
+		return
 	}
+	addUSB(t, root, "1-1", device.USBKey{VendorID: "046d", ProductID: "c31c"}, 7, "03")
+}
+
+// addUSB writes (or rewrites) sysfs device dir with key k at bus 1 address
+// devnum and one interface of class (hex).
+func addUSB(t *testing.T, root, dir string, k device.USBKey, devnum int, class string) {
+	t.Helper()
+	dev := filepath.Join(root, "bus", "usb", "devices", dir)
 	write := func(dir string, attrs map[string]string) {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
@@ -47,8 +55,8 @@ func setPrinter(t *testing.T, root string, printer bool) {
 			}
 		}
 	}
-	write(dev, map[string]string{"idVendor": "03f0", "idProduct": "2b17", "busnum": "1", "devnum": "7"})
-	write(filepath.Join(dev, "1-1:1.0"), map[string]string{
+	write(dev, map[string]string{"idVendor": k.VendorID, "idProduct": k.ProductID, "serial": k.Serial, "busnum": "1", "devnum": strconv.Itoa(devnum)})
+	write(filepath.Join(dev, dir+":1.0"), map[string]string{
 		"bInterfaceNumber": "00", "bInterfaceClass": class, "bInterfaceSubClass": "01", "bInterfaceProtocol": "02",
 	})
 }
@@ -61,14 +69,14 @@ func testParams(t *testing.T) Params {
 	}
 }
 
-// testPrinter is the controller's matched device for the printer in sysfs(t, true).
-func testPrinter() *device.USBDevice {
-	return &device.USBDevice{VendorID: "03f0", ProductID: "2b17", Bus: 1, Address: 7}
+// testPrinter is the controller's bound device for the printer in sysfs(t, true).
+func testPrinter() device.USBDevice {
+	return device.USBDevice{VendorID: keyHP.VendorID, ProductID: keyHP.ProductID, Serial: keyHP.Serial, Bus: 1, Address: 7}
 }
 
 func newTestBackend(f *fakeEngine, p Params) *Backend {
 	b := New(f, p)
-	b.SetUSBDevice(testPrinter(), false)
+	b.SetUSBDevices([]device.USBDevice{testPrinter()}, false)
 	b.healthTimeout, b.healthPoll = 50*time.Millisecond, 2*time.Millisecond
 	return b
 }
@@ -85,7 +93,11 @@ func ippusbSpec() *device.Spec { return goldenSpecs()["ippusb"] }
 
 func mustApply(t *testing.T, b *Backend, s *device.Spec) {
 	t.Helper()
-	if err := b.Apply(t.Context(), s); err != nil {
+	var specs []*device.Spec
+	if s != nil {
+		specs = append(specs, s)
+	}
+	if err := b.Apply(t.Context(), specs); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -102,11 +114,14 @@ func converge(t *testing.T, b *Backend) {
 
 func observe(t *testing.T, b *Backend) device.Observation {
 	t.Helper()
-	o, err := b.Observe(t.Context())
+	obs, err := b.Observe(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return o
+	if len(obs) != 1 || obs[0].Workload != "" {
+		t.Fatalf("observations %+v, want one for workload \"\"", obs)
+	}
+	return obs[0]
 }
 
 func wantPhase(t *testing.T, b *Backend, phase string) device.Observation {
@@ -212,7 +227,7 @@ func TestFirstRollout(t *testing.T) {
 	mustApply(t, b, usbSpec())
 	converge(t, b)
 	o := wantPhase(t, b, device.PhaseRunning)
-	if o.HostIP != testHostIP || o.Unschedulable || o.Endpoints != (device.Endpoints{}) {
+	if o.HostIP != testHostIP || o.Unschedulable || len(o.Endpoints) != 0 {
 		t.Errorf("observation %+v", o)
 	}
 
@@ -244,8 +259,8 @@ func TestFirstRollout(t *testing.T) {
 	before("ContainerStart pagewire-device-avahi", "ContainerInspect pagewire-device-avahi")
 	before("ContainerInspect pagewire-device-avahi", "ContainerStart pagewire-device-agent")
 	before("ContainerStart pagewire-device-agent", "ContainerStart pagewire-device-fetch-blobs")
-	before("ContainerWait pagewire-device-fetch-blobs", "ContainerStart pagewire-device-printer-app")
-	before("ContainerStart pagewire-device-printer-app", "ContainerStart pagewire-device-airsane")
+	before("ContainerWait pagewire-device-fetch-blobs", "ContainerStart pagewire-device-printer-app-hplip")
+	before("ContainerStart pagewire-device-printer-app-hplip", "ContainerStart pagewire-device-airsane")
 
 	cfg := f.volume(ConfigVolume).files
 	for _, name := range []string{"ipp-usb.conf", "dll.conf", "options.conf", "ignore.conf", "access.conf"} {
@@ -307,7 +322,7 @@ func TestHealthGate(t *testing.T) {
 			if o.Phase != device.PhaseRunning {
 				t.Fatalf("observation %+v, want Running", o)
 			}
-			if err := b.RestartPod(t.Context()); err != nil {
+			if err := b.RestartPod(t.Context(), ""); err != nil {
 				t.Fatal(err)
 			}
 			converge(t, b)
@@ -342,7 +357,7 @@ func TestFailedFirstApply(t *testing.T) {
 		b := newTestBackend(f, p)
 		runBackend(t, b)
 		f.setErr("ContainerInspect pagewire", errors.New("engine down"))
-		if err := b.Apply(t.Context(), usbSpec()); err == nil || !strings.Contains(err.Error(), "engine down") {
+		if err := b.Apply(t.Context(), []*device.Spec{usbSpec()}); err == nil || !strings.Contains(err.Error(), "engine down") {
 			t.Fatalf("Apply = %v, want the inspect error", err)
 		}
 		checkAdoptsAfterFailure(t, f, b)
@@ -361,7 +376,7 @@ func TestFailedFirstApply(t *testing.T) {
 		p.TokenFile, p.Resync = filepath.Join(dir, "agent-token"), 20*time.Millisecond
 		b := newTestBackend(f, p)
 		runBackend(t, b)
-		if err := b.Apply(t.Context(), usbSpec()); err == nil {
+		if err := b.Apply(t.Context(), []*device.Spec{usbSpec()}); err == nil {
 			t.Fatal("Apply succeeded with an unwritable token directory")
 		}
 		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // test directory
@@ -392,7 +407,7 @@ func TestRebootObservesAbsent(t *testing.T) {
 	f := newFakeWithSelf()
 	p := testParams(t)
 	rolledOut(t, f, p, usbSpec())
-	for _, n := range []string{"dbus", "avahi", "agent", "printer-app", "airsane"} {
+	for _, n := range []string{"dbus", "avahi", "agent", "printer-app-hplip", "airsane"} {
 		f.setState(Prefix+n, container.StateExited, 0)
 	}
 	b := newTestBackend(f, p)
@@ -451,7 +466,7 @@ func TestUpgradeRolls(t *testing.T) {
 		b := newTestBackend(f, p)
 		mustApply(t, b, usbSpec())
 		converge(t, b)
-		if countCalls(f, "ContainerCreate pagewire-device-printer-app") != 1 {
+		if countCalls(f, "ContainerCreate pagewire-device-printer-app-hplip") != 1 {
 			t.Errorf("new tag did not roll the workload: %q", mutations(f))
 		}
 		wantPhase(t, b, device.PhaseRunning)
@@ -469,10 +484,10 @@ func TestSpecChangeAndOwnership(t *testing.T) {
 	mustApply(t, b, simSpec())
 	converge(t, b)
 	wantPhase(t, b, device.PhaseRunning)
-	if countCalls(f, "ContainerRemove pagewire-device-printer-app") != 1 || slices.Contains(f.names(), Prefix+"printer-app") {
+	if countCalls(f, "ContainerRemove pagewire-device-printer-app-hplip") != 1 || slices.Contains(f.names(), Prefix+"printer-app-hplip") {
 		t.Error("old printer-app not removed")
 	}
-	if countCalls(f, "ContainerCreate pagewire-device-sim-printer") != 1 {
+	if countCalls(f, "ContainerCreate pagewire-device-sim-printer-0") != 1 {
 		t.Error("sim-printer not created")
 	}
 	if got := f.anonVolumes(); got != 2 || anonBefore == 2 { // sim-printer and airsane /tmp
@@ -646,7 +661,7 @@ func TestRestartPodPendingNotAbsent(t *testing.T) {
 	f.resetCalls()
 
 	entered, release := blockPulls(f)
-	if err := b.RestartPod(t.Context()); err != nil {
+	if err := b.RestartPod(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
 	done := convergeAsync(t, b)
@@ -757,7 +772,7 @@ func TestPulls(t *testing.T) {
 		t.Error("image ID pulled or inspected")
 	}
 	f.resetCalls()
-	if err := b.RestartPod(t.Context()); err != nil {
+	if err := b.RestartPod(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
 	converge(t, b)
@@ -821,7 +836,7 @@ func TestSelfImage(t *testing.T) {
 	f3 := newFakeWithSelf()
 	f3.setErr("ContainerInspect pagewire", errors.New("boom"))
 	b3 := newTestBackend(f3, testParams(t))
-	if err := b3.Apply(t.Context(), simSpec()); err == nil {
+	if err := b3.Apply(t.Context(), []*device.Spec{simSpec()}); err == nil {
 		t.Fatal("Apply succeeded")
 	}
 	b3.mu.Lock()
@@ -876,7 +891,7 @@ func TestApplyCancelsBlockedRollout(t *testing.T) {
 		o := observe(t, b)
 		return o.Phase == device.PhaseRunning
 	})
-	if !slices.Contains(f.names(), Prefix+"sim-printer") || slices.Contains(f.names(), Prefix+"printer-app") {
+	if !slices.Contains(f.names(), Prefix+"sim-printer-0") || slices.Contains(f.names(), Prefix+"printer-app-hplip") {
 		t.Errorf("containers %v", f.names())
 	}
 	r, _ := f.ContainerList(t.Context(), listOwned)
@@ -896,12 +911,12 @@ func TestObserveMapping(t *testing.T) {
 	if o := wantPhase(t, b, device.PhaseRunning); o.HostIP != testHostIP || o.Message != "" {
 		t.Errorf("observation %+v", o)
 	}
-	f.setState(Prefix+"sim-printer", container.StateRestarting, 0)
-	if o := wantPhase(t, b, device.PhasePending); o.Message != "sim-printer: restarting" {
+	f.setState(Prefix+"sim-printer-0", container.StateRestarting, 0)
+	if o := wantPhase(t, b, device.PhasePending); o.Message != "sim-printer-0: restarting" {
 		t.Errorf("message %q", o.Message)
 	}
-	f.setState(Prefix+"sim-printer", container.StateExited, 137)
-	if o := wantPhase(t, b, device.PhasePending); o.Message != "sim-printer: exited (exit 137)" {
+	f.setState(Prefix+"sim-printer-0", container.StateExited, 137)
+	if o := wantPhase(t, b, device.PhasePending); o.Message != "sim-printer-0: exited (exit 137)" {
 		t.Errorf("message %q", o.Message)
 	}
 	f.setErr("ContainerList ", errors.New("socket gone"))
@@ -956,7 +971,7 @@ func TestRestartPodSurvivesFailedConverge(t *testing.T) {
 	mustApply(t, b, simSpec())
 	converge(t, b)
 	f.resetCalls()
-	if err := b.RestartPod(t.Context()); err != nil {
+	if err := b.RestartPod(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
 	f.setErr("ContainerList ", errors.New("socket gone"))
@@ -974,7 +989,7 @@ func TestRestartPodBeforeFirstApply(t *testing.T) {
 	p := testParams(t)
 	rolledOut(t, f, p, simSpec())
 	b := newTestBackend(f, p)
-	if err := b.RestartPod(t.Context()); err != nil {
+	if err := b.RestartPod(t.Context(), ""); err != nil {
 		t.Fatal(err)
 	}
 	converge(t, b)
@@ -1019,7 +1034,7 @@ func TestTokenUnreadableNotReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := newTestBackend(newFakeWithSelf(), p)
-	if err := b.Apply(t.Context(), simSpec()); err == nil {
+	if err := b.Apply(t.Context(), []*device.Spec{simSpec()}); err == nil {
 		t.Fatal("Apply succeeded with an unreadable token file")
 	}
 	if err := os.Chmod(p.TokenFile, 0o600); err != nil {
@@ -1106,7 +1121,7 @@ func TestUSBDeviceNode(t *testing.T) {
 	})
 	t.Run("RestartPod after a replug uses the new node", func(t *testing.T) {
 		setDevnum(t, p.SysRoot, "11")
-		if err := b.RestartPod(t.Context()); err != nil {
+		if err := b.RestartPod(t.Context(), ""); err != nil {
 			t.Fatal(err)
 		}
 		converge(t, b)
@@ -1124,7 +1139,7 @@ func TestUSBDeviceNode(t *testing.T) {
 		if slices.Contains(f.names(), Prefix+"ipp-usb") {
 			t.Fatalf("containers %v: ipp-usb runs on one of two identical printers", f.names())
 		}
-		if o := wantPhase(t, b, device.PhasePending); o.Message != msgNoDevice {
+		if o := wantPhase(t, b, device.PhasePending); o.Message != msgNoDevice+"printer, scanner" {
 			t.Errorf("observation %+v", o)
 		}
 		if err := os.RemoveAll(twin); err != nil {
@@ -1133,65 +1148,274 @@ func TestUSBDeviceNode(t *testing.T) {
 		converge(t, b)
 		wantNode(t, f, "/dev/bus/usb/001/011")
 	})
-	t.Run("another printer: daemons left out until the controller matches it", func(t *testing.T) {
-		dir := filepath.Join(p.SysRoot, "bus", "usb", "devices", "1-1")
-		if err := os.WriteFile(filepath.Join(dir, "idProduct"), []byte("1234\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	t.Run("no bound device", func(t *testing.T) {
+		b.SetUSBDevices(nil, false)
 		converge(t, b)
 		if slices.Contains(f.names(), Prefix+"ipp-usb") || !slices.Contains(f.names(), Prefix+"agent") {
 			t.Fatalf("containers %v: want the agent and no ipp-usb", f.names())
 		}
-		if o := wantPhase(t, b, device.PhasePending); o.Unschedulable || o.Message != msgNoDevice {
+		if o := wantPhase(t, b, device.PhasePending); o.Unschedulable || o.Message != msgNoDevice+"printer, scanner" {
 			t.Errorf("observation %+v", o)
 		}
-		b.SetUSBDevice(&device.USBDevice{VendorID: "03f0", ProductID: "1234", Bus: 1, Address: 11}, false)
+		b.SetUSBDevices([]device.USBDevice{{VendorID: keyHP.VendorID, ProductID: keyHP.ProductID, Serial: keyHP.Serial, Bus: 1, Address: 11}}, false)
 		converge(t, b)
 		wantPhase(t, b, device.PhaseRunning)
 		wantNode(t, f, "/dev/bus/usb/001/011")
 	})
-	t.Run("no matched device", func(t *testing.T) {
-		b.SetUSBDevice(nil, false)
-		converge(t, b)
-		if slices.Contains(f.names(), Prefix+"ipp-usb") {
-			t.Fatal("ipp-usb runs without a matched device")
-		}
-		wantPhase(t, b, device.PhasePending)
-	})
 }
 
-// TestUSBDeviceStagedForApply: a device passed before an Apply reaches the
+// TestUSBDeviceStagedForApply: devices passed before an Apply reach the
 // worker with that Apply's spec, never with the old one, and a failing Apply
-// leaves it out.
+// leaves them out.
 func TestUSBDeviceStagedForApply(t *testing.T) {
 	f := newFakeWithSelf()
 	b := newTestBackend(f, testParams(t))
 	<-b.wake
-	other := &device.USBDevice{VendorID: "03f0", ProductID: "1234", Bus: 1, Address: 11}
-	current := func() *device.USBDevice {
+	other := testPrinter()
+	other.Address = 11
+	current := func() []device.USBDevice {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		return b.usbDev
+		return b.usbDevs
 	}
-	b.SetUSBDevice(other, true)
-	if d := current(); d == nil || d.Address != 7 || len(b.wake) != 0 {
-		t.Fatalf("staged device taken or worker woken: %+v, %d wakes", d, len(b.wake))
+	b.SetUSBDevices([]device.USBDevice{other}, true)
+	if d := current(); len(d) != 1 || d[0].Address != 7 || len(b.wake) != 0 {
+		t.Fatalf("staged devices taken or worker woken: %+v, %d wakes", d, len(b.wake))
 	}
 	f.setErr("ContainerInspect pagewire", errors.New("engine down"))
-	if err := b.Apply(t.Context(), ippusbSpec()); err == nil {
+	if err := b.Apply(t.Context(), []*device.Spec{ippusbSpec()}); err == nil {
 		t.Fatal("Apply succeeded with the engine down")
 	}
-	if d := current(); d.Address != 7 {
-		t.Fatalf("failing Apply took the staged device %+v", d)
+	if d := current(); d[0].Address != 7 {
+		t.Fatalf("failing Apply took the staged devices %+v", d)
 	}
 	f.setErr("ContainerInspect pagewire", nil)
 	mustApply(t, b, ippusbSpec())
-	if d := current(); d.Address != 11 {
-		t.Fatalf("Apply did not take the staged device: %+v", d)
+	if d := current(); d[0].Address != 11 {
+		t.Fatalf("Apply did not take the staged devices: %+v", d)
 	}
 	<-b.wake
-	b.SetUSBDevice(testPrinter(), false)
-	if d := current(); d.Address != 7 || len(b.wake) != 1 {
-		t.Fatalf("device %+v, %d wakes: want it taken at once", d, len(b.wake))
+	b.SetUSBDevices([]device.USBDevice{testPrinter()}, false)
+	if d := current(); d[0].Address != 7 || len(b.wake) != 1 {
+		t.Fatalf("devices %+v, %d wakes: want them taken at once", d, len(b.wake))
+	}
+}
+
+// lideDevice is the controller's bound device for the LiDE at addUSB's 1-2.
+func lideDevice(addr int) device.USBDevice {
+	return device.USBDevice{VendorID: keyLiDE.VendorID, ProductID: keyLiDE.ProductID, Serial: keyLiDE.Serial, Bus: 1, Address: addr}
+}
+
+// hpAndLiDE is an IPP-over-USB MFP beside a standalone scanner.
+func hpAndLiDE() *device.Spec {
+	return withHash(&device.Spec{
+		Mode:     device.ModeUSB,
+		Printers: []device.PrinterSpec{{ID: "hp", Family: "ipp-usb", USB: keyHP}},
+		Scanners: []device.ScannerSpec{
+			{ID: "hp-scanner", Family: "ipp-usb", USB: keyHP},
+			{ID: "lide", Family: "airsane", SaneBackends: []string{"genesys"}, USB: keyLiDE},
+		},
+	})
+}
+
+func nodesOf(f *fakeEngine, name string) []string {
+	var out []string
+	for _, d := range usbDevices(f, name) {
+		out = append(out, d.PathOnHost)
+	}
+	return out
+}
+
+// TestTwoDevices: one workload serves two devices, each daemon with only its
+// own device's node; a replug of one rolls the workload onto its new node; a
+// device that goes away leaves only its daemon out, and the workload runs.
+func TestTwoDevices(t *testing.T) {
+	f := newFakeWithSelf()
+	p := testParams(t)
+	addUSB(t, p.SysRoot, "1-2", keyLiDE, 11, "ff")
+	b := newTestBackend(f, p)
+	b.SetUSBDevices([]device.USBDevice{lideDevice(11), testPrinter()}, false)
+	mustApply(t, b, hpAndLiDE())
+	converge(t, b)
+	if o := wantPhase(t, b, device.PhaseRunning); o.Message != "" {
+		t.Errorf("observation %+v", o)
+	}
+	if got := nodesOf(f, "ipp-usb"); !slices.Equal(got, []string{testNode}) {
+		t.Errorf("ipp-usb nodes %v, want the HP's alone", got)
+	}
+	if got := nodesOf(f, "airsane"); !slices.Equal(got, []string{"/dev/bus/usb/001/011"}) {
+		t.Errorf("airsane nodes %v, want the LiDE's alone", got)
+	}
+
+	f.resetCalls()
+	addUSB(t, p.SysRoot, "1-2", keyLiDE, 12, "ff")
+	converge(t, b)
+	wantPhase(t, b, device.PhaseRunning)
+	if got := nodesOf(f, "airsane"); !slices.Equal(got, []string{"/dev/bus/usb/001/012"}) {
+		t.Errorf("airsane nodes after the replug %v", got)
+	}
+	if got := nodesOf(f, "ipp-usb"); !slices.Equal(got, []string{testNode}) {
+		t.Errorf("ipp-usb nodes after the LiDE's replug %v", got)
+	}
+	if countCalls(f, "ContainerCreate pagewire-device-ipp-usb") != 1 || countCalls(f, "ContainerCreate pagewire-device-airsane") != 1 {
+		t.Errorf("replug did not recreate the workload: %q", mutations(f))
+	}
+
+	if err := os.RemoveAll(filepath.Join(p.SysRoot, "bus", "usb", "devices", "1-2")); err != nil {
+		t.Fatal(err)
+	}
+	converge(t, b)
+	if slices.Contains(f.names(), Prefix+"airsane") || !slices.Contains(f.names(), Prefix+"ipp-usb") {
+		t.Fatalf("containers %v: want ipp-usb and no airsane", f.names())
+	}
+	if o := wantPhase(t, b, device.PhaseRunning); o.Message != msgNoDevice+"lide" {
+		t.Errorf("observation %+v", o)
+	}
+}
+
+// TestGateWantedDevice: the gate opens for any device the spec serves, a
+// standalone scanner included, and in probe mode for any device that can be a
+// printer or scanner; a keyboard alone keeps it closed.
+func TestGateWantedDevice(t *testing.T) {
+	scannerOnly := withHash(&device.Spec{
+		Mode:     device.ModeUSB,
+		Scanners: []device.ScannerSpec{{ID: "lide", Family: "airsane", SaneBackends: []string{"genesys"}, USB: keyLiDE}},
+	})
+	lide := func(t *testing.T) Params {
+		p := testParams(t)
+		p.SysRoot = t.TempDir()
+		addUSB(t, p.SysRoot, "1-2", keyLiDE, 11, "ff")
+		return p
+	}
+	t.Run("standalone scanner", func(t *testing.T) {
+		f := newFakeWithSelf()
+		b := newTestBackend(f, lide(t))
+		b.SetUSBDevices([]device.USBDevice{lideDevice(11)}, false)
+		mustApply(t, b, scannerOnly)
+		converge(t, b)
+		if o := wantPhase(t, b, device.PhaseRunning); o.Unschedulable {
+			t.Errorf("observation %+v", o)
+		}
+		if got := nodesOf(f, "airsane"); !slices.Equal(got, []string{"/dev/bus/usb/001/011"}) {
+			t.Errorf("airsane nodes %v", got)
+		}
+	})
+	t.Run("probe with a scanner", func(t *testing.T) {
+		f := newFakeWithSelf()
+		b := newTestBackend(f, lide(t))
+		mustApply(t, b, goldenSpecs()["probe"])
+		converge(t, b)
+		if o := wantPhase(t, b, device.PhaseRunning); o.Unschedulable {
+			t.Errorf("observation %+v", o)
+		}
+	})
+	t.Run("a device the spec does not serve", func(t *testing.T) {
+		f := newFakeWithSelf()
+		b := newTestBackend(f, lide(t))
+		mustApply(t, b, ippusbSpec())
+		converge(t, b)
+		if o := wantPhase(t, b, device.PhasePending); !o.Unschedulable || o.Message != msgNoPrinter {
+			t.Errorf("observation %+v", o)
+		}
+	})
+	t.Run("probe with a keyboard", func(t *testing.T) {
+		f := newFakeWithSelf()
+		p := testParams(t)
+		p.SysRoot = sysfs(t, false)
+		b := newTestBackend(f, p)
+		mustApply(t, b, goldenSpecs()["probe"])
+		converge(t, b)
+		if c := countCalls(f, "ContainerCreate"); c != 0 {
+			t.Errorf("%d containers created for a keyboard", c)
+		}
+		if o := wantPhase(t, b, device.PhasePending); !o.Unschedulable || o.Message != msgNoPrinter {
+			t.Errorf("observation %+v", o)
+		}
+	})
+}
+
+// TestOneWorkload: the host runs one node-less workload. More specs, a spec
+// naming a node, or a restart of a named workload are errors that change
+// nothing.
+func TestOneWorkload(t *testing.T) {
+	f := newFakeWithSelf()
+	b := newTestBackend(f, testParams(t))
+	mustApply(t, b, simSpec())
+	<-b.wake
+	pinned := simSpec()
+	pinned.Node = "n1"
+	for what, specs := range map[string][]*device.Spec{
+		"two specs": {simSpec(), ippusbSpec()},
+		"a node":    {pinned},
+		"nil spec":  {nil},
+	} {
+		if err := b.Apply(t.Context(), specs); err == nil {
+			t.Errorf("%s: Apply succeeded", what)
+		}
+	}
+	if err := b.RestartPod(t.Context(), "n1"); err == nil {
+		t.Error("RestartPod of a named workload succeeded")
+	}
+	b.mu.Lock()
+	h, restart := b.want.hash, b.restart
+	b.mu.Unlock()
+	want, err := workloadHashOf(t, b, simSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != want || restart || len(b.wake) != 0 {
+		t.Errorf("a failing call changed the backend: hash %s, restart %v, %d wakes", h, restart, len(b.wake))
+	}
+}
+
+// workloadHashOf is the workload hash a fresh backend records for s.
+func workloadHashOf(t *testing.T, b *Backend, s *device.Spec) (string, error) {
+	t.Helper()
+	b2 := newTestBackend(newFakeWithSelf(), b.p)
+	if err := b2.Apply(t.Context(), []*device.Spec{s}); err != nil {
+		return "", err
+	}
+	return b2.want.hash, nil
+}
+
+// TestSetUSBDevicesOrder: the same devices in another order are no change, so
+// the controller's every-step call does not wake the worker.
+func TestSetUSBDevicesOrder(t *testing.T) {
+	b := newTestBackend(newFakeWithSelf(), testParams(t))
+	b.SetUSBDevices([]device.USBDevice{lideDevice(11), testPrinter()}, false)
+	<-b.wake
+	b.SetUSBDevices([]device.USBDevice{testPrinter(), lideDevice(11)}, false)
+	if len(b.wake) != 0 {
+		t.Error("reordered devices woke the worker")
+	}
+	b.SetUSBDevices(nil, false)
+	<-b.wake
+	b.SetUSBDevices([]device.USBDevice{}, false)
+	if len(b.wake) != 0 {
+		t.Error("empty after nil woke the worker")
+	}
+}
+
+// TestIdenticalTwins: two bound devices with one key (no serial to tell them
+// apart) at their recorded addresses give their daemon both nodes.
+func TestIdenticalTwins(t *testing.T) {
+	f := newFakeWithSelf()
+	p := testParams(t)
+	addUSB(t, p.SysRoot, "1-2", keyHP, 12, "07")
+	b := newTestBackend(f, p)
+	twin := testPrinter()
+	twin.Address = 12
+	b.SetUSBDevices([]device.USBDevice{twin, testPrinter()}, false)
+	mustApply(t, b, ippusbSpec())
+	converge(t, b)
+	wantPhase(t, b, device.PhaseRunning)
+	if got := nodesOf(f, "ipp-usb"); !slices.Equal(got, []string{testNode, "/dev/bus/usb/001/012"}) {
+		t.Errorf("ipp-usb nodes %v, want both twins", got)
+	}
+	f.mu.Lock()
+	label := f.containers[Prefix+"ipp-usb"].opts.Config.Labels[LabelUSBDevice]
+	f.mu.Unlock()
+	if label != testNode+",/dev/bus/usb/001/012" {
+		t.Errorf("label %q", label)
 	}
 }

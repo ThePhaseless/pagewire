@@ -30,9 +30,9 @@ const (
 	browseWait       = 2 * time.Second
 	reconcileTimeout = 30 * time.Second
 
-	// MsgNoPAPPLURL is the QueueResult message when a Queue is desired but the
-	// agent was started without --pappl-url.
-	MsgNoPAPPLURL = "agent has no --pappl-url"
+	// MsgNoSystemURI is the QueueResult message for a desired queue whose
+	// SystemURI is empty, or that Core.SystemURL translates to "".
+	MsgNoSystemURI = "queue has no system URI"
 )
 
 // Browser browses DNS-SD for the given service types.
@@ -43,24 +43,36 @@ type Browser func(ctx context.Context, types []string) ([]device.DNSSDService, e
 // before calling Loop; they must not change afterwards.
 type Core struct {
 	PodUID    string
+	Workload  string // reported as AgentReport.Workload (Spec.Node)
 	Inventory device.Inventory
-	Present   func() bool                // nil: the device is always present
-	Blobs     func() []device.BlobStatus // nil: no blob reporting; called from the Loop goroutine
-	PAPPLURL  func() string              // nil or "": a desired Queue is reported as MsgNoPAPPLURL
-	Browse    Browser                    // nil: no DNS-SD browsing
-	Interval  time.Duration              // wait between successful cycles; 0: 5 s
+	// Attached lists the USB devices attached now (sysfs); nil: not reported.
+	// Called from the Loop goroutine.
+	Attached   func() []device.USBDevice
+	ProbeNodes []string                   // the probe's usbfs nodes, copied into every report; nil: unknown
+	Blobs      func() []device.BlobStatus // nil: no blob reporting; called from the Loop goroutine
+	// SystemURL translates a queue's SystemURI to the URL the agent connects
+	// to; "" reports the queue as MsgNoSystemURI. nil is identity, which k8s,
+	// docker and compose use: the printer applications listen on their
+	// catalog ports. The sim sets it to reach its fakes on random ports.
+	// Called from the Loop goroutine.
+	SystemURL func(systemURI string) string
+	Browse    Browser       // nil: no DNS-SD browsing
+	Interval  time.Duration // wait between successful cycles; 0: 5 s
 	// Stage is called every cycle with the desired StageEULAs (nil before the
 	// first DesiredState) and returns their current texts; nil: none reported.
 	// It must not block on downloads (Stager.Stage does not).
 	Stage func(ctx context.Context, refs []device.EULARef) []device.EULAText
 
-	minBackoff  time.Duration
-	maxBackoff  time.Duration
-	papplClient *pappl.Client // reused while PAPPLURL stays the same: it remembers the last Find-Devices choice
-	after       func(time.Duration) <-chan time.Time
-	wake        chan struct{}
-	desired     *device.DesiredState
-	failing     map[string]bool
+	minBackoff time.Duration
+	maxBackoff time.Duration
+	// papplClients are keyed by resolved system URL, made on first use and
+	// kept for the agent's life: each remembers its Find-Devices choices.
+	// shortcut: clients of URLs no longer desired (sim re-Applies) stay; bounded by the re-Applies of one session.
+	papplClients map[string]*pappl.Client
+	after        func(time.Duration) <-chan time.Time
+	wake         chan struct{}
+	desired      *device.DesiredState
+	failing      map[string]bool
 }
 
 // NewCore returns a Core reporting inv as pod podUID every 5 s.
@@ -69,6 +81,7 @@ func NewCore(podUID string, inv device.Inventory) *Core {
 		PodUID: podUID, Inventory: inv,
 		minBackoff: minBackoff, maxBackoff: maxBackoff,
 		after: time.After, wake: make(chan struct{}, 1), failing: map[string]bool{},
+		papplClients: map[string]*pappl.Client{},
 	}
 }
 
@@ -119,18 +132,19 @@ func (c *Core) Loop(ctx context.Context, report device.ReportFunc) {
 	}
 }
 
-// cycle checks presence, re-reads blob statuses, collects staged EULA texts,
-// browses DNS-SD and reconciles the desired PAPPL queue, in that order.
+// cycle lists the attached devices, re-reads blob statuses, collects staged
+// EULA texts, browses DNS-SD and reconciles the desired PAPPL queues, in that
+// order.
 func (c *Core) cycle(ctx context.Context) device.AgentReport {
 	r := device.AgentReport{
-		PodUID: c.PodUID, Inventory: c.Inventory, DevicePresent: true,
-		Services: []device.DNSSDService{}, Blobs: []device.BlobStatus{}, EULAs: []device.EULAText{},
+		PodUID: c.PodUID, Workload: c.Workload, Inventory: c.Inventory, ProbeNodes: c.ProbeNodes,
+		Services: []device.DNSSDService{}, Queues: []device.QueueResult{}, Blobs: []device.BlobStatus{}, EULAs: []device.EULAText{},
 	}
 	if r.Inventory.Devices == nil {
 		r.Inventory.Devices = []device.USBDevice{}
 	}
-	if c.Present != nil {
-		r.DevicePresent = c.Present()
+	if c.Attached != nil {
+		r.Attached = c.Attached()
 	}
 	if c.Blobs != nil {
 		if b := c.Blobs(); b != nil {
@@ -154,27 +168,51 @@ func (c *Core) cycle(ctx context.Context) device.AgentReport {
 			r.Services = s
 		}
 	}
-	if c.desired != nil && c.desired.Queue != nil {
-		q := c.reconcile(ctx, *c.desired.Queue)
-		r.Queue = &q
+	if c.desired != nil {
+		r.Queues = c.reconcile(ctx, c.desired.Queues)
 	}
 	return r
 }
 
-func (c *Core) reconcile(ctx context.Context, q device.QueueSpec) device.QueueResult {
-	url := ""
-	if c.PAPPLURL != nil {
-		url = c.PAPPLURL()
+// reconcile groups the queues by printer application (resolved system URL)
+// and reconciles each group with its own timeout. The results come back in
+// the order of qs.
+func (c *Core) reconcile(ctx context.Context, qs []device.QueueSpec) []device.QueueResult {
+	out := make([]device.QueueResult, len(qs))
+	groups := map[string][]int{}
+	var urls []string
+	for i, q := range qs {
+		url := q.SystemURI
+		if url != "" && c.SystemURL != nil {
+			url = c.SystemURL(url)
+		}
+		if url == "" {
+			out[i] = device.QueueResult{ID: q.ID, State: device.QueueError, Message: MsgNoSystemURI}
+			continue
+		}
+		if _, ok := groups[url]; !ok {
+			urls = append(urls, url)
+		}
+		groups[url] = append(groups[url], i)
 	}
-	if url == "" {
-		return device.QueueResult{State: device.QueueError, Message: MsgNoPAPPLURL}
+	for _, url := range urls {
+		cl := c.papplClients[url]
+		if cl == nil {
+			cl = pappl.New(url)
+			c.papplClients[url] = cl
+		}
+		wants := make([]device.QueueSpec, 0, len(groups[url]))
+		for _, i := range groups[url] {
+			wants = append(wants, qs[i])
+		}
+		rctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+		res := pappl.Reconcile(rctx, cl, wants)
+		cancel()
+		for j, i := range groups[url] {
+			out[i] = res[j]
+		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
-	defer cancel()
-	if c.papplClient == nil || c.papplClient.URI() != url {
-		c.papplClient = pappl.New(url)
-	}
-	return pappl.Reconcile(ctx, c.papplClient, q, c.Inventory)
+	return out
 }
 
 // problem logs a recurring failure only when it starts and when it ends, so a
@@ -195,11 +233,11 @@ type Config struct {
 	ControlPlaneURL string        // --control-plane-url
 	TokenFile       string        // --token-file, re-read on every report
 	PodUID          string        // --pod-uid
-	InventoryFile   string        // --inventory; "": empty inventory, always present
+	Workload        string        // --workload
+	InventoryFile   string        // --inventory (a ProbeFile); "": empty inventory, nothing attached reported
 	BlobStatusFile  string        // --blob-status, re-read every cycle; "": no blob reporting
 	BlobDir         string        // --blob-dir, where EULA texts are staged; "": every EULA fails with MsgNoBlobVolume
 	SysRoot         string        // --sys-root; "": /sys
-	PAPPLURL        string        // --pappl-url
 	DBusAddress     string        // --dbus-address; "": no DNS-SD browsing
 	Interval        time.Duration // --interval; 0: 5 s
 	Browse          Browser       // nil: Avahi over DBusAddress
@@ -221,31 +259,35 @@ func newRun(cfg Config) (*Core, device.ReportFunc, error) {
 	if cfg.ControlPlaneURL == "" || cfg.TokenFile == "" {
 		return nil, nil, errors.New("agent run needs --control-plane-url and --token-file")
 	}
-	inv := device.Inventory{Devices: []device.USBDevice{}}
+	var pf ProbeFile
 	if cfg.InventoryFile != "" {
 		b, err := os.ReadFile(cfg.InventoryFile)
 		if err != nil {
 			return nil, nil, fmt.Errorf("read inventory: %w", err)
 		}
-		if err := json.Unmarshal(b, &inv); err != nil {
+		if err := json.Unmarshal(b, &pf); err != nil {
 			return nil, nil, fmt.Errorf("read inventory %s: %w", cfg.InventoryFile, err)
 		}
 	}
-	core := NewCore(cfg.PodUID, inv)
+	if pf.Devices == nil {
+		pf.Devices = []device.USBDevice{}
+	}
+	core := NewCore(cfg.PodUID, pf.Inventory)
+	core.Workload = cfg.Workload
 	core.Interval = cfg.Interval
+	core.ProbeNodes = pf.Nodes
 	if cfg.InventoryFile != "" {
 		sysRoot := cfg.SysRoot
 		if sysRoot == "" {
 			sysRoot = "/sys"
 		}
-		// The printer is the first printer-class device, as Decide and the PAPPL
-		// reconcile pick it without a selector; with none, nothing can vanish.
-		// shortcut: a device.usb selector that picks another printer is not
-		// followed (the agent protocol carries no selector); send it in
-		// DesiredState if multi-printer hosts need loss detection.
-		if d := printerDevice(inv); d != nil {
-			dev := *d
-			core.Present = func() bool { return usb.Present(sysRoot, dev) }
+		// The control plane follows moved, gone and new devices through this list.
+		core.Attached = func() []device.USBDevice {
+			devs, err := usb.Enumerate(sysRoot)
+			if err != nil {
+				return nil
+			}
+			return devs
 		}
 	}
 	if cfg.BlobStatusFile != "" {
@@ -257,9 +299,6 @@ func newRun(cfg Config) (*Core, device.ReportFunc, error) {
 	}
 	stager := &Stager{Dir: cfg.BlobDir, Wake: core.Wake}
 	core.Stage = stager.Stage
-	if cfg.PAPPLURL != "" {
-		core.PAPPLURL = func() string { return cfg.PAPPLURL }
-	}
 	core.Browse = cfg.Browse
 	if core.Browse == nil && cfg.DBusAddress != "" {
 		core.Browse = avahiBrowser(cfg.DBusAddress)

@@ -6,10 +6,11 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: pagewire
     app.kubernetes.io/name: pagewire-device
+    pagewire.thephaseless.github.io/device-workload: "true"
   annotations:
     ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
     ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
-    pagewire.thephaseless.github.io/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
+    pagewire.thephaseless.github.io/spec-hash: b611a22ac7911e7a3a91b70669388f3d3a4025aab64203f2eab7e4b09bc7f390
     reloader.stakater.com/auto: "false"
   ownerReferences:
   - apiVersion: apps/v1
@@ -28,9 +29,10 @@ spec:
       labels:
         app.kubernetes.io/managed-by: pagewire
         app.kubernetes.io/name: pagewire-device
+        pagewire.thephaseless.github.io/device-workload: "true"
       annotations:
         pagewire.thephaseless.github.io/config-hash: 2a267da95715153768ef8607c02e9577bf23e6836338cbe4e2a678677b04f157
-        pagewire.thephaseless.github.io/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
+        pagewire.thephaseless.github.io/spec-hash: b611a22ac7911e7a3a91b70669388f3d3a4025aab64203f2eab7e4b09bc7f390
     spec:
       volumes:
       - name: run-pagewire
@@ -167,6 +169,8 @@ spec:
         - /run/pagewire/inventory.json
         - --blob-status
         - /run/pagewire/blobs.json
+        - --workload
+        - ""
         - --blob-dir
         - /blobs
         env:

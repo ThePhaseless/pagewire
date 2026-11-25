@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -72,20 +73,46 @@ func TestProbe(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "inventory.json")
-	if err := WriteJSON(out, inv); err != nil {
+	if err := WriteJSON(out, ProbeFile{Inventory: inv, Nodes: []string{"001/005"}}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(out) //nolint:gosec // test temp dir
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{`"vendorId":"03f0"`, `"deviceId":""`, `"productId"`} {
+	for _, key := range []string{`"vendorId":"03f0"`, `"deviceId":""`, `"productId"`, `"nodes":["001/005"]`} {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("probe JSON lacks %s: %s", key, raw)
 		}
 	}
 	if fi, _ := os.Stat(out); fi.Mode().Perm() != 0o644 {
 		t.Errorf("mode = %v, want 0644", fi.Mode().Perm())
+	}
+}
+
+func TestProbeNodes(t *testing.T) {
+	dev := t.TempDir()
+	for _, n := range []string{"002/001", "001/005"} {
+		p := filepath.Join(dev, "bus", "usb", n)
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := ProbeNodes(dev); !reflect.DeepEqual(got, []string{"001/005", "002/001"}) {
+		t.Errorf("ProbeNodes = %q, want [001/005 002/001]", got)
+	}
+	if got := ProbeNodes(t.TempDir()); got != nil {
+		t.Errorf("no bus/usb: ProbeNodes = %#v, want nil (unknown)", got)
+	}
+	empty := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(empty, "bus", "usb"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProbeNodes(empty); got == nil || len(got) != 0 {
+		t.Errorf("empty bus/usb: ProbeNodes = %#v, want empty non-nil", got)
 	}
 }
 
@@ -348,6 +375,9 @@ func hpInventory() device.Inventory {
 	}}}
 }
 
+// hpDevice is the HP printer of hpInventory, the device a queue is bound to.
+func hpDevice() device.USBDevice { return hpInventory().Devices[0] }
+
 func newPAPPL(t *testing.T) (*papplfake.System, string) {
 	t.Helper()
 	fake := papplfake.New(papplfake.Options{
@@ -359,11 +389,24 @@ func newPAPPL(t *testing.T) (*papplfake.System, string) {
 	return fake, "ipp://" + srv.Listener.Addr().String() + "/ipp/system"
 }
 
-func queue(media string) *device.QueueSpec {
-	return &device.QueueSpec{
-		Name: "Printer", Location: "Hall", Driver: "auto", Schemes: []string{"usb"},
-		Media: media, Sides: "one-sided", ColorMode: "auto", Quality: "normal",
+func queue(systemURI, media string) device.QueueSpec {
+	return device.QueueSpec{
+		ID: "printer", Name: "Printer", Location: "Hall", Driver: "auto", Schemes: []string{"usb"},
+		SystemURI: systemURI, Device: hpDevice(),
+		Defaults: device.PrintSettings{Media: media, Sides: "one-sided", ColorMode: "auto", Quality: "normal"},
 	}
+}
+
+// queuesOK reports whether r has one OK result per id, in order.
+func queuesOK(r device.AgentReport, ids ...string) bool {
+	got := make([]string, 0, len(r.Queues))
+	for _, q := range r.Queues {
+		if q.State != device.QueueOK {
+			return false
+		}
+		got = append(got, q.ID)
+	}
+	return slices.Equal(got, ids)
 }
 
 func TestRunHTTPToken(t *testing.T) {
@@ -390,14 +433,14 @@ func TestRunHTTPToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	core, report, err := newRun(Config{ControlPlaneURL: srv.URL, TokenFile: tokenFile, PodUID: "pod-1"})
+	core, report, err := newRun(Config{ControlPlaneURL: srv.URL, TokenFile: tokenFile, PodUID: "pod-1", Workload: "n1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	start(t, core, report)
 	first := waitReport(t, got, "pod uid", func(r device.AgentReport) bool { return true })
-	if first.PodUID != "pod-1" || !first.DevicePresent || first.AppliedHash != "" {
-		t.Errorf("first report = %+v, want pod-1, present, no applied hash", first)
+	if first.PodUID != "pod-1" || first.Workload != "n1" || first.AppliedHash != "" {
+		t.Errorf("first report = %+v, want pod-1 on workload n1, no applied hash", first)
 	}
 	waitReport(t, got, "applied hash h1", func(r device.AgentReport) bool { return r.AppliedHash == "h1" })
 
@@ -419,32 +462,37 @@ func TestReportJSONShape(t *testing.T) {
 	start(t, NewCore("pod", device.Inventory{}), p.report)
 	r := waitReport(t, p.reports, "any", func(device.AgentReport) bool { return true })
 	raw, _ := json.Marshal(r)
-	for _, want := range []string{`"devices":[]`, `"services":[]`, `"blobs":[]`, `"eulas":[]`, `"devicePresent":true`, `"queue":null`} {
+	for _, want := range []string{
+		`"devices":[]`, `"services":[]`, `"blobs":[]`, `"eulas":[]`, `"queues":[]`,
+		`"workload":""`, `"attached":null`, `"probeNodes":null`,
+	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("report JSON lacks %s: %s", want, raw)
 		}
+	}
+	// The key is built so the repo-wide leftover grep for the removed field stays empty.
+	if gone := "device" + "Present"; strings.Contains(string(raw), gone) {
+		t.Errorf("report JSON still has %s: %s", gone, raw)
 	}
 }
 
 func TestQueueReconcile(t *testing.T) {
 	fake, url := newPAPPL(t)
-	p := newPlane(device.DesiredState{Hash: "h", Queue: queue("iso_a4_210x297mm"), Browse: device.BrowseTypes})
-	core := NewCore("pod", hpInventory())
-	core.PAPPLURL = func() string { return url }
-	start(t, core, p.report)
+	p := newPlane(device.DesiredState{Hash: "h", Queues: []device.QueueSpec{queue(url, "iso_a4_210x297mm")}, Browse: device.BrowseTypes})
+	start(t, NewCore("pod", hpInventory()), p.report)
 
-	r := waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return r.Queue != nil && r.Queue.State == device.QueueOK })
-	if !strings.HasPrefix(r.Queue.PrinterURI, "ipp://127.0.0.1:") || r.Queue.DeviceURI != "cups:usb://HP/LaserJet%201020?serial=ABC123" {
-		t.Errorf("queue result = %+v", r.Queue)
+	r := waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return queuesOK(r, "printer") })
+	if q := r.Queues[0]; !strings.HasPrefix(q.PrinterURI, "ipp://127.0.0.1:") || q.DeviceURI != "cups:usb://HP/LaserJet%201020?serial=ABC123" {
+		t.Errorf("queue result = %+v", q)
 	}
-	if ps := fake.Printers(); len(ps) != 1 || ps[0].Media != "iso_a4_210x297mm" || ps[0].Location != "Hall" {
+	if ps := fake.Printers(); len(ps) != 1 || ps[0].Defaults.Media != "iso_a4_210x297mm" || ps[0].Location != "Hall" || ps[0].DeviceID != hpID {
 		t.Fatalf("printers = %+v", ps)
 	}
 
-	p.set(func(p *plane) { p.desired.Queue = queue("na_letter_8.5x11in") })
+	p.set(func(p *plane) { p.desired.Queues = []device.QueueSpec{queue(url, "na_letter_8.5x11in")} })
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if ps := fake.Printers(); len(ps) == 1 && ps[0].Media == "na_letter_8.5x11in" {
+		if ps := fake.Printers(); len(ps) == 1 && ps[0].Defaults.Media == "na_letter_8.5x11in" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -454,45 +502,114 @@ func TestQueueReconcile(t *testing.T) {
 	}
 }
 
-// The agent keeps one PAPPL client, so a queue settled on the only listed,
-// lesser scheme asks Find-Devices once, not every cycle.
+// The agent keeps one PAPPL client per system URL, so a queue settled on the
+// only listed, lesser scheme asks Find-Devices once, not every cycle.
 func TestQueueLesserSchemeAsksFindDevicesOnce(t *testing.T) {
 	fake, url := newPAPPL(t)
-	q := queue("iso_a4_210x297mm")
+	q := queue(url, "iso_a4_210x297mm")
 	q.Schemes = []string{"hp", "usb"}
-	p := newPlane(device.DesiredState{Queue: q})
-	core := NewCore("pod", hpInventory())
-	core.PAPPLURL = func() string { return url }
-	start(t, core, p.report)
+	p := newPlane(device.DesiredState{Queues: []device.QueueSpec{q}})
+	start(t, NewCore("pod", hpInventory()), p.report)
 	for range 3 {
-		waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return r.Queue != nil && r.Queue.State == device.QueueOK })
+		waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return queuesOK(r, "printer") })
 	}
 	if n := fake.FindDevicesCalls(); n != 1 {
 		t.Errorf("Find-Devices calls = %d, want 1", n)
 	}
 }
 
-func TestQueueReconcileError(t *testing.T) {
-	_, url := newPAPPL(t)
-	q := queue("iso_a4_210x297mm")
-	q.DeviceURI, q.Driver = "ipp://127.0.0.1:1/ipp/print", "hp_laserjet_1020" // the fake only takes cups: URIs
-	p := newPlane(device.DesiredState{Queue: q})
-	core := NewCore("pod", hpInventory())
-	core.PAPPLURL = func() string { return url }
-	start(t, core, p.report)
-	r := waitReport(t, p.reports, "queue error", func(r device.AgentReport) bool { return r.Queue != nil })
-	if r.Queue.State != device.QueueError || r.Queue.Message == "" {
-		t.Errorf("queue result = %+v, want an error with a message", r.Queue)
+// Two printer applications get a client each; each is asked Find-Devices once.
+func TestTwoAppsAskFindDevicesOnceEach(t *testing.T) {
+	fakeA, urlA := newPAPPL(t)
+	fakeB, urlB := newPAPPL(t)
+	a, b := queue(urlA, "iso_a4_210x297mm"), queue(urlB, "iso_a4_210x297mm")
+	b.ID, b.Name = "other", "Other"
+	p := newPlane(device.DesiredState{Queues: []device.QueueSpec{a, b}})
+	start(t, NewCore("pod", hpInventory()), p.report)
+	for range 3 {
+		waitReport(t, p.reports, "both queues ok", func(r device.AgentReport) bool { return queuesOK(r, "printer", "other") })
+	}
+	for name, fake := range map[string]*papplfake.System{"A": fakeA, "B": fakeB} {
+		if n := fake.FindDevicesCalls(); n != 1 {
+			t.Errorf("app %s: Find-Devices calls = %d, want 1", name, n)
+		}
+		if ps := fake.Printers(); len(ps) != 1 {
+			t.Errorf("app %s: printers = %+v, want one", name, ps)
+		}
 	}
 }
 
-func TestQueueWithoutPAPPLURL(t *testing.T) {
-	p := newPlane(device.DesiredState{Queue: queue("iso_a4_210x297mm")})
+// The sim maps the controller's fixed system URI to its fake's random port,
+// and a re-Apply moves the fake: the agent follows with a new client.
+func TestSystemURLHook(t *testing.T) {
+	fake1, url1 := newPAPPL(t)
+	fake2, url2 := newPAPPL(t)
+	var mu sync.Mutex
+	target := url1
+	sys := device.PAPPLSystemURI(8005)
+	core := NewCore("pod", hpInventory())
+	core.SystemURL = func(u string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if u != sys {
+			return ""
+		}
+		return target
+	}
+	p := newPlane(device.DesiredState{Queues: []device.QueueSpec{queue(sys, "iso_a4_210x297mm")}})
+	start(t, core, p.report)
+	waitReport(t, p.reports, "queue ok on the first fake", func(r device.AgentReport) bool { return queuesOK(r, "printer") })
+	if len(fake1.Printers()) != 1 {
+		t.Fatalf("first fake printers = %+v, want one", fake1.Printers())
+	}
+
+	mu.Lock()
+	target = url2
+	mu.Unlock()
+	waitReport(t, p.reports, "queue ok on the second fake", func(r device.AgentReport) bool {
+		return queuesOK(r, "printer") && len(fake2.Printers()) == 1
+	})
+	for range 3 {
+		waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return queuesOK(r, "printer") })
+	}
+	if n1, n2 := fake1.FindDevicesCalls(), fake2.FindDevicesCalls(); n1 != 1 || n2 != 1 {
+		t.Errorf("Find-Devices calls = %d, %d, want 1 on each fake", n1, n2)
+	}
+}
+
+func TestQueueReconcileError(t *testing.T) {
+	_, url := newPAPPL(t)
+	q := queue(url, "iso_a4_210x297mm")
+	q.DeviceURI, q.Driver = "ipp://127.0.0.1:1/ipp/print", "hp_laserjet_1020" // the fake only takes cups: URIs
+	p := newPlane(device.DesiredState{Queues: []device.QueueSpec{q}})
 	start(t, NewCore("pod", hpInventory()), p.report)
-	for i := range 3 { // the loop keeps going
-		r := waitReport(t, p.reports, "queue", func(r device.AgentReport) bool { return r.Queue != nil })
-		if *r.Queue != (device.QueueResult{State: device.QueueError, Message: "agent has no --pappl-url"}) {
-			t.Fatalf("report %d queue = %+v", i, r.Queue)
+	r := waitReport(t, p.reports, "queue error", func(r device.AgentReport) bool { return len(r.Queues) == 1 })
+	if q := r.Queues[0]; q.ID != "printer" || q.State != device.QueueError || q.Message == "" {
+		t.Errorf("queue result = %+v, want an error with a message", q)
+	}
+}
+
+// A queue without a system URI, or one the hook cannot translate, is an error
+// beside the others, and the loop keeps going.
+func TestQueueWithoutSystemURI(t *testing.T) {
+	_, url := newPAPPL(t)
+	none, unknown, ok := queue("", "iso_a4_210x297mm"), queue("ipp://127.0.0.1:1/ipp/system", "iso_a4_210x297mm"), queue(url, "iso_a4_210x297mm")
+	none.ID, unknown.ID, unknown.Name = "none", "unknown", "Unknown"
+	p := newPlane(device.DesiredState{Queues: []device.QueueSpec{none, unknown, ok}})
+	core := NewCore("pod", hpInventory())
+	core.SystemURL = func(u string) string {
+		if u == url {
+			return u
+		}
+		return ""
+	}
+	start(t, core, p.report)
+	for i := range 3 {
+		r := waitReport(t, p.reports, "queues", func(r device.AgentReport) bool { return len(r.Queues) == 3 && r.Queues[2].State == device.QueueOK })
+		for j, id := range []string{"none", "unknown"} {
+			if q := r.Queues[j]; q.ID != id || q.State != device.QueueError || q.Message != MsgNoSystemURI {
+				t.Fatalf("report %d queue %d = %+v, want %s", i, j, q, MsgNoSystemURI)
+			}
 		}
 	}
 }
@@ -500,7 +617,7 @@ func TestQueueWithoutPAPPLURL(t *testing.T) {
 func TestDeviceVanishes(t *testing.T) {
 	root, printerDir := sysfs(t)
 	invFile := filepath.Join(t.TempDir(), "inventory.json")
-	if err := WriteJSON(invFile, Probe(root, t.TempDir(), nil)); err != nil {
+	if err := WriteJSON(invFile, ProbeFile{Inventory: Probe(root, t.TempDir(), nil)}); err != nil {
 		t.Fatal(err)
 	}
 	core, _, err := newRun(Config{ControlPlaneURL: "http://unused", TokenFile: "unused", InventoryFile: invFile, SysRoot: root})
@@ -509,17 +626,70 @@ func TestDeviceVanishes(t *testing.T) {
 	}
 	p := newPlane(device.DesiredState{})
 	start(t, core, p.report)
-	r := waitReport(t, p.reports, "present", func(r device.AgentReport) bool { return r.DevicePresent })
+	hasPrinter := func(r device.AgentReport) bool {
+		return slices.ContainsFunc(r.Attached, func(d device.USBDevice) bool { return d.VendorID == "03f0" })
+	}
+	r := waitReport(t, p.reports, "printer attached", hasPrinter)
 	if len(r.Inventory.Devices) != 2 {
 		t.Errorf("inventory = %+v, want the probed devices", r.Inventory.Devices)
 	}
 	if err := os.RemoveAll(printerDir); err != nil {
 		t.Fatal(err)
 	}
-	waitReport(t, p.reports, "device gone", func(r device.AgentReport) bool { return !r.DevicePresent })
+	r = waitReport(t, p.reports, "printer gone from attached", func(r device.AgentReport) bool { return r.Attached != nil && !hasPrinter(r) })
+	if len(r.Inventory.Devices) != 2 || len(r.Attached) != 1 {
+		t.Errorf("inventory = %+v, attached = %+v, want the inventory unchanged and only the keyboard attached", r.Inventory.Devices, r.Attached)
+	}
 
 	if _, _, err := newRun(Config{ControlPlaneURL: "x", TokenFile: "x", InventoryFile: filepath.Join(root, "missing")}); err == nil {
 		t.Error("newRun with a missing inventory file succeeded")
+	}
+}
+
+// A replugged printer shows at its new address in Attached; the probe's nodes
+// are reported as written.
+func TestAttachedReported(t *testing.T) {
+	root, printerDir := sysfs(t)
+	invFile := filepath.Join(t.TempDir(), "inventory.json")
+	if err := WriteJSON(invFile, ProbeFile{Inventory: Probe(root, t.TempDir(), nil), Nodes: []string{"001/005"}}); err != nil {
+		t.Fatal(err)
+	}
+	core, _, err := newRun(Config{ControlPlaneURL: "x", TokenFile: "x", InventoryFile: invFile, SysRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPlane(device.DesiredState{})
+	start(t, core, p.report)
+	printerAt := func(r device.AgentReport, addr int) bool {
+		return slices.ContainsFunc(r.Attached, func(d device.USBDevice) bool { return d.VendorID == "03f0" && d.Address == addr })
+	}
+	r := waitReport(t, p.reports, "printer at address 5", func(r device.AgentReport) bool { return printerAt(r, 5) })
+	if len(r.Attached) != 2 || !reflect.DeepEqual(r.ProbeNodes, []string{"001/005"}) {
+		t.Errorf("attached = %+v, probe nodes = %q, want both devices and [001/005]", r.Attached, r.ProbeNodes)
+	}
+	if err := os.WriteFile(filepath.Join(printerDir, "devnum"), []byte("6\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitReport(t, p.reports, "printer at address 6", func(r device.AgentReport) bool { return printerAt(r, 6) })
+}
+
+// An inventory file from an older probe (bare Inventory, no nodes) gives nil
+// ProbeNodes: unknown, not "none".
+func TestOldInventoryFormatNoProbeNodes(t *testing.T) {
+	root, _ := sysfs(t)
+	invFile := filepath.Join(t.TempDir(), "inventory.json")
+	if err := WriteJSON(invFile, Probe(root, t.TempDir(), nil)); err != nil {
+		t.Fatal(err)
+	}
+	core, _, err := newRun(Config{ControlPlaneURL: "x", TokenFile: "x", InventoryFile: invFile, SysRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPlane(device.DesiredState{})
+	start(t, core, p.report)
+	r := waitReport(t, p.reports, "any", func(device.AgentReport) bool { return true })
+	if r.ProbeNodes != nil || len(r.Inventory.Devices) != 2 {
+		t.Errorf("probe nodes = %#v, inventory = %+v, want nil and the two devices", r.ProbeNodes, r.Inventory.Devices)
 	}
 }
 

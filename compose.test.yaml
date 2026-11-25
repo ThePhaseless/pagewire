@@ -115,8 +115,9 @@ services:
       - "http://127.0.0.1:18081"
       - "--token-file"
       - "/run/secrets/token"
-      - "--pappl-url"
-      - "ipp://127.0.0.1:18001/ipp/system"
+      # The printer app's system URI comes with each queue in the test's
+      # desired state; the agent uses it as is (no SystemURL hook).
+      - "--workload="
       - "--dbus-address"
       - "unix:path=/run/dbus/system_bus_socket"
       - "--pod-uid"

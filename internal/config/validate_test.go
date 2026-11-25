@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -21,7 +23,8 @@ func TestValidate(t *testing.T) {
 		path   string // "" means valid
 		msg    string
 	}{
-		{name: "default is valid", change: func(*Config) {}},
+		{name: "default is valid", change: func(c *Config) { *c = Default("Home") }},
+		{name: "a usb printer and scanner are valid", change: func(*Config) {}},
 		{
 			name: "accepted known EULA",
 			change: func(c *Config) {
@@ -76,66 +79,160 @@ func TestValidate(t *testing.T) {
 			path: "/licenses/acceptedEulas/1", msg: "duplicate",
 		},
 		{
-			name: "usb selector with simulated mode",
-			change: func(c *Config) {
-				c.Device.Mode = ModeSimulated
-				c.Device.USB = &USB{VendorID: "03f0", ProductID: "2b17"}
-			},
-			path: "/device/usb", msg: "mode: usb",
+			name:   "usb selector with simulated mode",
+			change: func(c *Config) { c.Printers[0].Mode = ModeSimulated },
+			path:   "/printers/0/usb", msg: "mode: usb",
 		},
 		{
-			name:   "usb selector with usb mode",
-			change: func(c *Config) { c.Device.USB = &USB{VendorID: "03f0", ProductID: "2b17"} },
+			name:   "scanner usb selector with simulated mode",
+			change: func(c *Config) { c.Scanners[0].Mode = ModeSimulated },
+			path:   "/scanners/0/usb", msg: "mode: usb",
+		},
+		{
+			name:   "one usb printer and one usb scanner without selectors",
+			change: func(c *Config) { c.Printers[0].USB, c.Scanners[0].USB = nil, nil },
+		},
+		{
+			name: "second usb printer without a selector",
+			change: func(c *Config) {
+				c.Printers[0].USB = nil
+				c.Printers = append(c.Printers, Printer{ID: "q", Name: "Q", Mode: ModeUSB, Driver: Auto})
+			},
+			path: "/printers/1", msg: "/printers/0 already has none",
+		},
+		{
+			name: "second usb scanner without a selector",
+			change: func(c *Config) {
+				c.Scanners[0].USB = nil
+				c.Scanners = append(c.Scanners, Scanner{ID: "t", Name: "T", Mode: ModeUSB, Backend: BackendAuto})
+			},
+			path: "/scanners/1", msg: "only one usb scanner",
+		},
+		{
+			name: "simulated printers need no selector",
+			change: func(c *Config) {
+				c.Printers = append(c.Printers, Printer{ID: "q", Name: "Q", Mode: ModeSimulated, Driver: Auto}, Printer{ID: "r", Name: "R", Mode: ModeSimulated, Driver: Auto})
+			},
+		},
+		{
+			name: "two printers with the same selector",
+			change: func(c *Config) {
+				c.Printers = append(c.Printers, Printer{ID: "q", Name: "Q", Mode: ModeUSB, Driver: Auto, USB: &USB{VendorID: "03f0", ProductID: "2b17"}})
+			},
+			path: "/printers/1/usb", msg: "/printers/0",
+		},
+		{
+			name: "two printers of one model told apart by serial",
+			change: func(c *Config) {
+				c.Printers = append(c.Printers, Printer{ID: "q", Name: "Q", Mode: ModeUSB, Driver: Auto, USB: &USB{VendorID: "03f0", ProductID: "2b17", Serial: "B"}})
+			},
+		},
+		{
+			name: "two scanners with the same selector",
+			change: func(c *Config) {
+				c.Scanners = append(c.Scanners, Scanner{ID: "t", Name: "T", Mode: ModeUSB, Backend: BackendAuto, USB: &USB{VendorID: "03f0", ProductID: "2b17"}})
+			},
+			path: "/scanners/1/usb", msg: "/scanners/0",
+		},
+		{
+			name:   "duplicate id across printers and scanners",
+			change: func(c *Config) { c.Scanners[0].ID = "p" },
+			path:   "/scanners/0/id", msg: "duplicate id p: also /printers/0",
+		},
+		{
+			name: "duplicate printer name ignoring case",
+			change: func(c *Config) {
+				c.Printers = append(c.Printers, Printer{ID: "q", Name: "p", Mode: ModeSimulated, Driver: Auto})
+			},
+			path: "/printers/1/name", msg: "/printers/0",
+		},
+		{
+			name:   "a scanner may share the printer's name",
+			change: func(c *Config) { c.Scanners[0].Name = "P" },
+		},
+		{
+			name:   "one simulated scanner",
+			change: func(c *Config) { c.Scanners[0].Mode, c.Scanners[0].USB = ModeSimulated, nil },
+		},
+		{
+			name: "two simulated scanners",
+			change: func(c *Config) {
+				c.Scanners = []Scanner{
+					{ID: "s", Name: "S", Mode: ModeSimulated, Backend: BackendAuto},
+					{ID: "t", Name: "T", Mode: ModeSimulated, Backend: BackendAuto},
+				}
+			},
+			path: "/scanners/1/mode", msg: "only one simulated scanner is supported",
 		},
 		{
 			name:   "driver unknown to the catalog",
-			change: func(c *Config) { c.Device.Driver = "brlaser" },
-			path:   "/device/driver", msg: "brlaser",
+			change: func(c *Config) { c.Printers[0].Driver = "brlaser" },
+			path:   "/printers/0/driver", msg: "brlaser",
 		},
 		{
 			name:   "known driver",
-			change: func(c *Config) { c.Device.Driver = "hplip" },
+			change: func(c *Config) { c.Printers[0].Driver = "hplip" },
 		},
 		{
 			name:   "driverName with driver auto",
-			change: func(c *Config) { c.Device.DriverName = "samsung--scx-4300--2-0-0-en" },
+			change: func(c *Config) { c.Printers[0].DriverName = "samsung--scx-4300--2-0-0-en" },
 		},
 		{
 			name: "driverName its family lists",
 			change: func(c *Config) {
-				c.Device.Driver, c.Device.DriverName = "ps", "generic--postscript-printer--en"
+				c.Printers[0].Driver, c.Printers[0].DriverName = "ps", "generic--postscript-printer--en"
 			},
 		},
 		// The index follows image updates, so a name no app lists only degrades
-		// the device (the controller reports it); the config stays valid.
+		// the printer (the controller reports it); the config stays valid.
 		{
 			name:   "driverName nobody lists",
-			change: func(c *Config) { c.Device.DriverName = "acme--x-en" },
+			change: func(c *Config) { c.Printers[0].DriverName = "acme--x-en" },
 		},
 		{
 			name: "driverName another family lists",
 			change: func(c *Config) {
-				c.Device.Driver, c.Device.DriverName = "gutenprint", "samsung--scx-4300--2-0-0-en"
+				c.Printers[0].Driver, c.Printers[0].DriverName = "gutenprint", "samsung--scx-4300--2-0-0-en"
 			},
 		},
 		{
 			name: "driverName with driver ipp-usb",
 			change: func(c *Config) {
-				c.Device.Driver, c.Device.DriverName = "ipp-usb", "samsung--scx-4300--2-0-0-en"
+				c.Printers[0].Driver, c.Printers[0].DriverName = "ipp-usb", "samsung--scx-4300--2-0-0-en"
 			},
-			path: "/device/driverName", msg: "ipp-usb",
+			path: "/printers/0/driverName", msg: "ipp-usb",
 		},
 		{
 			name: "driverName with mode simulated",
 			change: func(c *Config) {
-				c.Device.Mode, c.Device.DriverName = ModeSimulated, "samsung--scx-4300--2-0-0-en"
+				c.Printers[0].Mode, c.Printers[0].USB, c.Printers[0].DriverName = ModeSimulated, nil, "samsung--scx-4300--2-0-0-en"
 			},
-			path: "/device/driverName", msg: "simulated",
+			path: "/printers/0/driverName", msg: "simulated",
+		},
+		{
+			name: "ignored device nobody uses",
+			change: func(c *Config) {
+				c.IgnoredDevices = []IgnoredDevice{{VendorID: "046d", ProductID: "c31c", Roles: []string{RolePrinter, RoleScanner}}}
+			},
+		},
+		{
+			name: "ignored scanner role of the printer's device",
+			change: func(c *Config) {
+				c.Scanners = []Scanner{}
+				c.IgnoredDevices = []IgnoredDevice{{VendorID: "03f0", ProductID: "2b17", Roles: []string{RoleScanner}}}
+			},
+		},
+		{
+			name: "ignored scanner role in use",
+			change: func(c *Config) {
+				c.IgnoredDevices = []IgnoredDevice{{VendorID: "03f0", ProductID: "2b17", Roles: []string{RoleScanner}}}
+			},
+			path: "/ignoredDevices/0", msg: "is ignored and used: remove one (/scanners/0)",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := Default("Printer")
+			c := devices()
 			tt.change(&c)
 			err := Validate(&c, testKnown)
 			if tt.path == "" {
@@ -182,15 +279,48 @@ func TestCheckLocatesMissingTextSHA(t *testing.T) {
 	}
 }
 
+func TestCheckLocatesEntryErrors(t *testing.T) {
+	src := minimalYAML + "scanners:\n  - id: s\n    name: S\n    mode: simulated\n  - id: t\n    name: T\n    mode: simulated\n"
+	_, err := Check([]byte(src), testKnown)
+	var el *ErrorList
+	if !errors.As(err, &el) {
+		t.Fatalf("error %T %v is not *ErrorList", err, err)
+	}
+	e := findError(t, el.Errors, "/scanners/1/mode")
+	if e.Line != 9 || e.Column != 11 {
+		t.Errorf("position %d:%d, want 9:11", e.Line, e.Column)
+	}
+}
+
 func TestCheck(t *testing.T) {
 	c, err := Check([]byte(fullYAML), testKnown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Name != "Living room printer" {
+	if c.Name != "Home" {
 		t.Errorf("name %q", c.Name)
 	}
-	if _, err := Check([]byte("apiVersion: pagewire/v1\n"), testKnown); err == nil {
+	if _, err := Check([]byte("apiVersion: pagewire/v2\n"), testKnown); err == nil {
 		t.Error("Check accepted a file without name")
+	}
+}
+
+// TestExamplesValid checks every example config against the catalog's families.
+func TestExamplesValid(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "examples", "*.yaml"))
+	if err != nil || len(files) < 2 {
+		t.Fatalf("examples: %v %v", files, err)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f) //nolint:gosec // fixed test inputs
+		if err != nil {
+			t.Fatal(err)
+		}
+		if IsV1(raw) {
+			t.Errorf("%s is still pagewire/v1", f)
+		}
+		if _, err := Check(raw, testKnown); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
 	}
 }

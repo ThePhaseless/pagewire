@@ -26,12 +26,13 @@ const goldenSelf = "sha256:self"
 // self image and the docker pod UID rule.
 func goldenParams(s *device.Spec) k8s.Params {
 	return k8s.Params{
-		Registry:  "ghcr.io/thephaseless",
-		Tag:       "0.0.0-test",
-		AgentURL:  "http://pagewire.printing.svc:8081",
-		BlobPVC:   BlobVolume,
-		SelfImage: goldenSelf,
-		PodUID:    "docker-" + s.Hash[:12],
+		Registry:     "ghcr.io/thephaseless",
+		Tag:          "0.0.0-test",
+		AgentURL:     "http://pagewire.printing.svc:8081",
+		BlobPVC:      BlobVolume,
+		SelfImage:    goldenSelf,
+		PodUID:       "docker-" + s.Hash[:12],
+		BlobWorkload: true,
 	}
 }
 
@@ -42,18 +43,47 @@ func withHash(s *device.Spec) *device.Spec {
 
 const goldenTextSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// USB keys of the office fixture's devices, as render_test.go has them.
+var (
+	keyHP      = device.USBKey{VendorID: "03f0", ProductID: "2754", Serial: "FAKE0005"}
+	keySamsung = device.USBKey{VendorID: "04e8", ProductID: "342e", Serial: "FAKE0008"}
+	keyLiDE    = device.USBKey{VendorID: "04a9", ProductID: "1904", Serial: "FAKE0011"}
+)
+
 func goldenSpecs() map[string]*device.Spec {
 	return map[string]*device.Spec{
-		"probe":  withHash(&device.Spec{Mode: device.ModeProbe}),
-		"ippusb": withHash(&device.Spec{Mode: device.ModeUSB, Printer: "ipp-usb", Scanner: "ipp-usb"}),
+		"probe": withHash(&device.Spec{Mode: device.ModeProbe}),
+		"ippusb": withHash(&device.Spec{
+			Mode:     device.ModeUSB,
+			Printers: []device.PrinterSpec{{ID: "printer", Family: "ipp-usb", USB: keyHP}},
+			Scanners: []device.ScannerSpec{{ID: "scanner", Family: "ipp-usb", USB: keyHP}},
+		}),
 		"hplip-airsane-blob": withHash(&device.Spec{
-			Mode: device.ModeUSB, Printer: "hplip", Scanner: "airsane", SaneBackends: []string{"hpaio"},
+			Mode:          device.ModeUSB,
+			Printers:      []device.PrinterSpec{{ID: "printer", Family: "hplip", USB: keyHP}},
+			Scanners:      []device.ScannerSpec{{ID: "scanner", Family: "airsane", SaneBackends: []string{"hpaio"}, USB: keyHP}},
 			Blobs:         []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}},
 			AcceptedEULAs: []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: goldenTextSHA}},
 		}),
 		"simulated": withHash(&device.Spec{
-			Mode: device.ModeSimulated, Printer: "sim", Scanner: "sim",
-			Name: "Living room printer", Location: "Living room",
+			Mode: device.ModeSimulated,
+			Printers: []device.PrinterSpec{{
+				ID: "printer", Family: "sim", Name: "Living room printer", Location: "Living room", Port: 8631,
+			}},
+			Scanners: []device.ScannerSpec{{ID: "scanner", Family: "sim"}},
+		}),
+		// The office fixture's devices on the host's one workload.
+		"multi": withHash(&device.Spec{
+			Mode: device.ModeUSB,
+			Printers: []device.PrinterSpec{
+				{ID: "hp", Family: "ipp-usb", USB: keyHP},
+				{ID: "samsung", Family: "legacy", USB: keySamsung},
+			},
+			Scanners: []device.ScannerSpec{
+				{ID: "hp-scanner", Family: "ipp-usb", USB: keyHP},
+				{ID: "lide", Family: "airsane", SaneBackends: []string{"genesys"}, USB: keyLiDE},
+				{ID: "samsung-scanner", Family: "airsane", SaneBackends: []string{"xerox_mfp"}, USB: keySamsung},
+			},
 		}),
 	}
 }
@@ -61,7 +91,14 @@ func goldenSpecs() map[string]*device.Spec {
 // testNode is the usbfs node of the printer in sysfs(t, true).
 const testNode = "/dev/bus/usb/001/007"
 
-// planned translates s as it runs with the printer at testNode.
+// goldenNodes are the office devices' usbfs nodes: the HP at testNode.
+var goldenNodes = map[device.USBKey][]string{
+	keyHP:      {testNode},
+	keySamsung: {"/dev/bus/usb/001/009"},
+	keyLiDE:    {"/dev/bus/usb/001/011"},
+}
+
+// planned translates s as it runs with the devices at goldenNodes.
 func planned(t *testing.T, s *device.Spec) ([]plannedContainer, k8s.Pod) {
 	t.Helper()
 	pod, err := k8s.Plan(s, goldenParams(s))
@@ -72,7 +109,7 @@ func planned(t *testing.T, s *device.Spec) ([]plannedContainer, k8s.Pod) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return withDevice(cs, testNode), pod
+	return withDevice(cs, goldenNodes), pod
 }
 
 func allPlanned(t *testing.T) map[string][]plannedContainer {
@@ -155,8 +192,9 @@ func TestUIDRule(t *testing.T) {
 	// Writers of run-pagewire or blobs run as root (named volumes have no
 	// fsGroup); in usb and probe modes the agent stages EULA texts on blobs.
 	want := map[string]map[string]string{
-		"simulated":          {"probe": "0:0", "agent": "65532:65532", "dbus": "101:101", "avahi": "102:102", "sim-printer": "65532:65532", "airsane": "65532:65532"},
-		"hplip-airsane-blob": {"probe": "0:0", "agent": "0:0", "fetch-blobs": "0:0", "dbus": "101:101", "printer-app": "0:0", "airsane": "0:0"},
+		"simulated":          {"probe": "0:0", "agent": "65532:65532", "dbus": "101:101", "avahi": "102:102", "sim-printer-0": "65532:65532", "airsane": "65532:65532"},
+		"hplip-airsane-blob": {"probe": "0:0", "agent": "0:0", "fetch-blobs": "0:0", "dbus": "101:101", "printer-app-hplip": "0:0", "airsane": "0:0"},
+		"multi":              {"probe": "0:0", "agent": "0:0", "ipp-usb": "0:0", "printer-app-legacy": "0:0", "airsane": "0:0"},
 		"probe":              {"probe": "0:0", "agent": "0:0"},
 	}
 	all := allPlanned(t)
@@ -171,67 +209,106 @@ func TestUIDRule(t *testing.T) {
 }
 
 // TestUSBContainers: the probe reads the whole bus through a read-only bind
-// and a cgroup rule without mknod; each LAN-facing USB daemon gets only the
-// matched printer's node; nothing else touches USB.
+// and a cgroup rule without mknod; each LAN-facing USB daemon gets the nodes
+// of its own devices and no others; nothing else touches USB.
 func TestUSBContainers(t *testing.T) {
-	wantDev := []container.DeviceMapping{{PathOnHost: testNode, PathInContainer: testNode, CgroupPermissions: "rw"}}
 	daemons := 0
 	for spec, s := range goldenSpecs() {
 		cs, pod := planned(t, s)
-		usb := map[string]bool{}
+		all, keys := map[string]bool{}, map[string][]device.USBKey{}
 		for _, c := range append(slices.Clone(pod.Inits), pod.Mains...) {
-			usb[c.Name] = c.USB
+			all[c.Name], keys[c.Name] = c.USBAll, c.USB
 		}
 		for _, c := range cs {
 			hc := c.Opts.HostConfig
 			id := spec + "/" + c.Name
+			var nodes []string
+			for _, k := range keys[c.Name] {
+				nodes = append(nodes, goldenNodes[k]...)
+			}
+			slices.Sort(nodes)
+			var wantDev []container.DeviceMapping
+			for _, n := range nodes {
+				wantDev = append(wantDev, container.DeviceMapping{PathOnHost: n, PathInContainer: n, CgroupPermissions: "rw"})
+			}
 			hasBind := slices.ContainsFunc(hc.Mounts, func(m mount.Mount) bool {
 				return m.Type == mount.TypeBind && m.Source == "/dev/bus/usb" && m.Target == "/dev/bus/usb" && m.ReadOnly
 			})
 			hasRule := slices.Equal(hc.DeviceCgroupRules, []string{"c 189:* rw"})
-			hasDev := slices.Equal(hc.Devices, wantDev) && c.Opts.Config.Labels[LabelUSBDevice] == testNode
-			probe := usb[c.Name] && c.RunOnce
-			daemon := usb[c.Name] && !c.RunOnce
+			probe := all[c.Name] && c.RunOnce
+			daemon := len(keys[c.Name]) > 0 && !c.RunOnce
 			if daemon {
 				daemons++
 			}
-			if hasBind != probe || hasRule != probe || hasDev != daemon || hc.Privileged {
-				t.Errorf("%s: usb %v, bind %v, cgroup rule %v, devices %+v, privileged %v", id, usb[c.Name], hasBind, hasRule, hc.Devices, hc.Privileged)
+			if hasBind != probe || hasRule != probe || hc.Privileged {
+				t.Errorf("%s: bind %v, cgroup rule %v, privileged %v", id, hasBind, hasRule, hc.Privileged)
 			}
-			if !daemon && (len(hc.Devices) > 0 || c.Opts.Config.Labels[LabelUSBDevice] != "") {
-				t.Errorf("%s: devices %+v", id, hc.Devices)
+			if !slices.Equal(hc.Devices, wantDev) || c.Opts.Config.Labels[LabelUSBDevice] != strings.Join(nodes, ",") {
+				t.Errorf("%s: devices %+v, label %q; want %v", id, hc.Devices, c.Opts.Config.Labels[LabelUSBDevice], nodes)
 			}
 		}
 	}
-	if daemons != 3 { // ippusb: ipp-usb; hplip-airsane-blob: printer-app, airsane
-		t.Errorf("%d USB daemons, want 3", daemons)
+	// ippusb: ipp-usb; hplip-airsane-blob: printer-app-hplip, airsane;
+	// multi: ipp-usb, printer-app-legacy, airsane.
+	if daemons != 6 {
+		t.Errorf("%d USB daemons, want 6", daemons)
+	}
+	multi := byName(allPlanned(t)["multi"])
+	for name, want := range map[string]string{
+		"ipp-usb":            testNode,
+		"printer-app-legacy": "/dev/bus/usb/001/009",
+		"airsane":            "/dev/bus/usb/001/009,/dev/bus/usb/001/011",
+	} {
+		if got := multi[name].Opts.Config.Labels[LabelUSBDevice]; got != want {
+			t.Errorf("multi/%s: nodes %q, want %q", name, got, want)
+		}
 	}
 }
 
-// TestNoDeviceLeavesDaemonsOut: without the printer's node the USB daemons are
-// not planned at all, never given the whole bus; the plan itself is unchanged.
-func TestNoDeviceLeavesDaemonsOut(t *testing.T) {
-	s := goldenSpecs()["hplip-airsane-blob"]
-	pod, err := k8s.Plan(s, goldenParams(s))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs, err := translate(pod)
-	if err != nil {
-		t.Fatal(err)
-	}
+func containerNames(cs []plannedContainer) []string {
 	var names []string
-	for _, c := range withDevice(cs, "") {
+	for _, c := range cs {
 		names = append(names, c.Name)
 	}
-	if want := []string{"probe", "dbus", "avahi", "agent", "fetch-blobs"}; !slices.Equal(names, want) {
-		t.Errorf("containers %v, want %v", names, want)
+	return names
+}
+
+// TestNoDeviceLeavesDaemonsOut: a USB daemon none of whose devices has a node
+// is not planned at all, never given the whole bus; one with some keeps only
+// those; the plan itself is unchanged.
+func TestNoDeviceLeavesDaemonsOut(t *testing.T) {
+	translated := func(name string) []plannedContainer {
+		t.Helper()
+		s := goldenSpecs()[name]
+		pod, err := k8s.Plan(s, goldenParams(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs, err := translate(pod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cs
 	}
-	withDevice(cs, testNode)
+	cs := translated("hplip-airsane-blob")
+	if got, want := containerNames(withDevice(cs, nil)), []string{"probe", "dbus", "avahi", "agent", "fetch-blobs"}; !slices.Equal(got, want) {
+		t.Errorf("containers %v, want %v", got, want)
+	}
+	withDevice(cs, goldenNodes)
 	for _, c := range cs {
 		if len(c.Opts.HostConfig.Devices) > 0 || c.Opts.Config.Labels[LabelUSBDevice] != "" {
 			t.Errorf("%s: withDevice changed its input", c.Name)
 		}
+	}
+
+	// The Samsung off: ipp-usb keeps the HP, AirSane keeps the LiDE.
+	multi := translated("multi")
+	part := withDevice(multi, map[device.USBKey][]string{keyHP: goldenNodes[keyHP], keyLiDE: goldenNodes[keyLiDE]})
+	if got, want := containerNames(part), []string{"probe", "dbus", "avahi", "agent", "ipp-usb", "airsane"}; !slices.Equal(got, want) {
+		t.Errorf("containers %v, want %v", got, want)
+	}
+	if got := byName(part)["airsane"].Opts.Config.Labels[LabelUSBDevice]; got != "/dev/bus/usb/001/011" {
+		t.Errorf("airsane nodes %q, want the LiDE's alone", got)
 	}
 }
 
@@ -284,7 +361,7 @@ func TestHardening(t *testing.T) {
 
 func TestDiskBackedScratch(t *testing.T) {
 	cs, _ := planned(t, goldenSpecs()["hplip-airsane-blob"])
-	app := byName(cs)["printer-app"].Opts.HostConfig
+	app := byName(cs)["printer-app-hplip"].Opts.HostConfig
 	anon := map[string]*mount.VolumeOptions{}
 	for _, m := range app.Mounts {
 		if m.Type == mount.TypeVolume && m.Source == "" {
@@ -407,7 +484,7 @@ func TestRestartPolicies(t *testing.T) {
 	want := map[string]container.RestartPolicyMode{
 		"probe": "no", "fetch-blobs": "no",
 		"dbus": "on-failure", "avahi": "on-failure", "agent": "on-failure",
-		"printer-app": "on-failure", "airsane": "on-failure",
+		"printer-app-hplip": "on-failure", "airsane": "on-failure",
 	}
 	for _, c := range cs {
 		if got := c.Opts.HostConfig.RestartPolicy.Name; got != want[c.Name] {

@@ -1,20 +1,25 @@
-// Package controller turns the config, the agent's reports and the backend's
-// observations into the desired device workload (device.Spec), applies it, and
-// aggregates everything into the API's Status and Setup DTOs.
+// Package controller turns the config, the agents' reports and the backend's
+// observations into the desired device workloads (one device.Spec per node),
+// applies them, and aggregates everything into the API's Status and Setup DTOs.
 //
 // Concurrency: the loop is one goroutine. It holds mu only to read or write
-// its own fields, never across backend.Apply, Observe, RestartPod or the
-// printer and scanner queries. AgentReport never calls the backend.
+// its own fields, never across a backend call (USBNodes, Observe, Apply,
+// SetUSBDevices, RestartPod) or a printer or scanner query. AgentReport never
+// calls the backend.
 package controller
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,29 +32,21 @@ import (
 )
 
 const (
-	resync       = 30 * time.Second // resync, apply retry, agent gap, start-up grace and device-loss delay
+	resync       = 30 * time.Second // resync, apply retry, agent gap, start-up grace and replug delay
 	pendingWait  = 5 * time.Minute  // how long a pending or running pod is waited for before the first report
 	queryTimeout = 5 * time.Second
 	applyTimeout = time.Minute
 )
-
-// msgNoDriver is the degraded message while no printer driver matches the device (rule none).
-const msgNoDriver = "No printer driver matches this device. Choose a driver in Settings."
-
-// msgDriverNotListed is the degraded message while device.driverName names a
-// driver the driver index does not list for the chosen family (an image update
-// dropped it, a typo, or a driver that needs hpijs). With a family override,
-// pagewire's own choice is that family's match.
-const msgDriverNotListed = "Driver %s is not in pagewire's driver index for this printer application, so pagewire's own choice is used. Choose another driver in Settings."
 
 // PrinterObserver reads a printer's state (printing.Client implements it).
 type PrinterObserver interface {
 	Attributes(ctx context.Context) (printing.Attributes, error)
 }
 
-// ScannerObserver reads a scanner's state (scanning.Scanner implements it).
+// ScannerObserver reads a scanner's state and capabilities (scanning.Scanner implements it).
 type ScannerObserver interface {
 	Status(ctx context.Context) (scanning.State, error)
+	Capabilities(ctx context.Context) (scanning.Caps, error)
 }
 
 // Options configure New.
@@ -58,11 +55,32 @@ type Options struct {
 	BackendName    string           // BackendK8s, BackendDocker or BackendSim
 	Catalog        *catalog.Catalog // nil: catalog.Default()
 	USBAvailable   bool             // k8s: --usb-resource set; docker: always; sim: --sim-device != none
-	USBUnavailable string           // k8s without --usb-resource: why mode usb cannot run; else ""
+	USBUnavailable string           // k8s without --usb-resource: why usb entries cannot run; else ""
 	Printer        func(uri string) PrinterObserver
 	Scanner        func(url string) ScannerObserver
 	Publish        func(apitypes.Status) // optional; called (without locks) when Status changes
 	Now            func() time.Time
+}
+
+// reportState is the latest report of one workload.
+type reportState struct {
+	r       device.AgentReport
+	at      time.Time // when it arrived
+	firstAt time.Time // the first report of r.PodUID
+}
+
+// lossState is one entry's replug restart key (A8): key is lossKey's result,
+// since when it was first seen, restartedKey the key RestartPod was last called for.
+type lossState struct {
+	workload, key, restartedKey string
+	since                       time.Time
+}
+
+// scanCaps is a cached ScannerObserver.Capabilities result.
+type scanCaps struct {
+	caps apitypes.ScannerCaps
+	ok   bool
+	at   time.Time
 }
 
 // Controller is the control loop. Create it with New and run Run in a goroutine.
@@ -80,15 +98,22 @@ type Controller struct {
 	wake           chan struct{}
 
 	// Touched only by the loop goroutine.
-	applied     bool // a successful Apply of appliedHash happened
-	appliedHash string
-	failed      bool // the last Apply (of failHash, at failAt) failed with failMsg
+	applied     bool              // a successful Apply of appliedHash happened
+	appliedHash string            // combined hash (combinedHash) of the applied specs
+	appliedBy   map[string]string // workload -> spec hash of the last successful Apply
+	failed      bool              // the last Apply (of failHash, at failAt) failed: failMsg for every workload, or failW per workload
 	failHash    string
 	failAt      time.Time
 	failMsg     string
+	failW       map[string]string   // workload -> its Apply error, from device.WorkloadErrors
+	failLogged  string              // the last Apply error logged, so a failure that repeats each resync logs once
+	nodesFailed bool                // the nodes reconcile item is false
+	nodesBlip   bool                // the node list failed transiently (logged once per streak)
+	itemsFailed map[string]bool     // workload items last set false
+	caps        map[string]scanCaps // scanner caps by eSCL URL
 
 	mu          sync.Mutex
-	cfgRead     bool // a Config* input has arrived; until then the spec is left alone
+	cfgRead     bool // a Config* input has arrived; until then the specs are left alone
 	cfgState    string
 	cfg         *config.Config // applied config
 	lastGood    *config.Config // last-known-good while the file is invalid
@@ -96,15 +121,18 @@ type Controller struct {
 	appliedEtag string
 	cfgErrors   []config.FieldError
 	changedAt   time.Time
-	report      *device.AgentReport        // latest report since start
+	reports     map[string]*reportState    // by workload
+	reported    map[string]bool            // workloads that reported since start; never pruned
+	idCache     map[device.USBKey]string   // IEEE-1284 device ID of every device a probe read one for
+	loss        map[string]*lossState      // by entry id
 	eulaTexts   map[string]device.EULAText // latest agent EULA text by id; in memory only
-	reportAt    time.Time
-	inventory   *device.Inventory
-	absentSince time.Time // first DevicePresent=false report of the current loss
-	restarted   bool      // RestartPod already called for the current loss
-	spec        *device.Spec
-	status      apitypes.Status // device, printer, scanner and connect parts from the loop
-	published   apitypes.Status // the last Status sent to Publish and subscribers
+	workloads   []string                   // the last step's workload set
+	alias       string                     // the node the legacy unpinned workload "" stands for (legacyAlias), "" none
+	specs       map[string]*device.Spec    // desired spec by workload
+	placed      map[string]catalog.Placed  // entry id -> its device (bound now or sticky), DeviceID filled
+	detectAt    time.Time                  // the last Detect that restarted pods
+	status      apitypes.Status            // the loop's parts of Status
+	published   apitypes.Status            // the last Status sent to Publish and subscribers
 	reconcile   []apitypes.ReconcileItem
 	subs        map[chan apitypes.Status]struct{}
 }
@@ -116,6 +144,9 @@ func New(o Options) *Controller {
 		usbAvailable: o.USBAvailable, usbUnavailable: o.USBUnavailable,
 		printer: o.Printer, scanner: o.Scanner, publish: o.Publish, now: o.Now,
 		wake: make(chan struct{}, 1), cfgState: apitypes.ConfigMissing, cfgErrors: []config.FieldError{},
+		appliedBy: map[string]string{}, caps: map[string]scanCaps{}, itemsFailed: map[string]bool{}, reported: map[string]bool{},
+		reports: map[string]*reportState{}, idCache: map[device.USBKey]string{}, loss: map[string]*lossState{},
+		specs: map[string]*device.Spec{}, placed: map[string]catalog.Placed{},
 		status: initialStatus(), published: initialStatus(), reconcile: []apitypes.ReconcileItem{}, subs: map[chan apitypes.Status]struct{}{},
 	}
 	if c.cat == nil {
@@ -144,6 +175,10 @@ type errScanner struct{ err error }
 
 func (e errScanner) Status(context.Context) (scanning.State, error) {
 	return scanning.StateUnknown, e.err
+}
+
+func (e errScanner) Capabilities(context.Context) (scanning.Caps, error) {
+	return scanning.Caps{}, e.err
 }
 
 // Run runs the loop until ctx is done: at once, after every input and every 30 s.
@@ -200,7 +235,7 @@ func (c *Controller) ConfigMissing() {
 	c.poke()
 }
 
-// effective is the config the spec is built from: applied, else last-known-good. Callers hold mu.
+// effective is the config the specs are built from: applied, else last-known-good. Callers hold mu.
 func (c *Controller) effective() *config.Config {
 	if c.cfg != nil {
 		return c.cfg
@@ -219,32 +254,199 @@ func (c *Controller) Config() config.Config {
 	return config.Default(defaultName)
 }
 
-// AgentReport handles an agent report (a device.ReportFunc). It never calls the backend.
+// AgentReport handles an agent report (a device.ReportFunc): it stores the
+// report, learns the probe's device IDs, updates the replug keys of the
+// entries on the report's workload and returns that workload's desired state.
+// It never calls the backend.
 func (c *Controller) AgentReport(_ context.Context, r device.AgentReport) (device.DesiredState, error) {
 	c.mu.Lock()
+	if r.Workload == "" && c.alias != "" {
+		r.Workload = c.alias // the legacy agent of the unpinned workload (legacyAlias)
+	}
 	now := c.now()
-	c.report, c.reportAt = &r, now
-	inv := r.Inventory
-	c.inventory = &inv
+	first := now
+	if old := c.reports[r.Workload]; old != nil && old.r.PodUID == r.PodUID {
+		first = old.firstAt
+	}
+	c.reports[r.Workload] = &reportState{r: r, at: now, firstAt: first}
+	c.reported[r.Workload] = true
+	for _, d := range r.Inventory.Devices {
+		if d.DeviceID != "" {
+			c.idCache[d.Key()] = d.DeviceID
+		}
+	}
 	c.storeTexts(r.EULAs)
-	if r.DevicePresent {
-		c.absentSince, c.restarted = time.Time{}, false
-	} else if c.absentSince.IsZero() {
-		c.absentSince = now
-	}
 	cfg := c.effective()
-	sel, acc := config.Default(defaultName).Device, []config.EULARef{}
-	if cfg != nil {
-		sel, acc = cfg.Device, cfg.Licenses.AcceptedEULAs
+	set := c.workloads
+	if len(set) == 0 {
+		set = []string{r.Workload}
 	}
-	dec := decisionFor(c.cat, sel, &inv)
-	ds := device.DesiredState{
-		Hash: device.SpecHash(c.spec), Queue: c.queueFor(c.spec, cfg, dec), Browse: slices.Clone(device.BrowseTypes),
-		StageEULAs: stageEULAs(c.cat, dec, acc),
+	v := c.view(set, c.reports)
+	if slices.Contains(set, r.Workload) {
+		c.updateLoss(cfg, v, &r, now)
 	}
+	ds := c.desiredState(r.Workload, cfg, v)
 	c.mu.Unlock()
 	c.poke()
 	return ds, nil
+}
+
+// updateLoss recomputes the replug key of every entry bound on r's workload
+// and clears the keys of entries no longer bound there. Callers hold mu.
+func (c *Controller) updateLoss(cfg *config.Config, v view, r *device.AgentReport, now time.Time) {
+	seen := map[string]bool{}
+	if cfg != nil {
+		k8s, docker := c.backendName == BackendK8s, c.backendName == BackendDocker
+		check := func(id string, p catalog.Placed, ok, printer bool) {
+			if !ok || p.Node != r.Workload {
+				return
+			}
+			seen[id] = true
+			_, idKnown := c.idCache[p.Device.Key()]
+			k := lossKey(k8s, docker, printer, p.Device.Key(), r, idKnown)
+			st := c.loss[id]
+			switch {
+			case k == "":
+				delete(c.loss, id)
+			case st == nil:
+				c.loss[id] = &lossState{workload: r.Workload, key: k, since: now}
+			case st.key != k:
+				st.workload, st.key, st.since = r.Workload, k, now
+			}
+		}
+		for _, p := range cfg.Printers {
+			pl, ok := v.printers[p.ID]
+			check(p.ID, pl, ok, true)
+		}
+		for _, s := range cfg.Scanners {
+			pl, ok := v.scanners[s.ID]
+			check(s.ID, pl, ok, false)
+		}
+	}
+	for id, st := range c.loss {
+		if st.workload == r.Workload && !seen[id] {
+			delete(c.loss, id)
+		}
+	}
+}
+
+// lossKey is A8's replug key for the device key bound to an entry, from the
+// report of its workload: "moved BBB/DDD" or "unallocated BBB/DDD" (k8s), or
+// "appeared BBB/DDD" (k8s; docker only for a printer without a known device
+// ID). "" means nothing to restart for. Old agents (Attached nil) give "".
+func lossKey(k8s, docker, printer bool, key device.USBKey, r *device.AgentReport, idKnown bool) string {
+	if r.Attached == nil {
+		return ""
+	}
+	var att []device.USBDevice
+	for _, d := range r.Attached {
+		if d.Key() == key {
+			att = append(att, d)
+		}
+	}
+	i := slices.IndexFunc(r.Inventory.Devices, func(d device.USBDevice) bool { return d.Key() == key })
+	switch {
+	case k8s && i >= 0:
+		inv := r.Inventory.Devices[i]
+		if r.ProbeNodes != nil && !slices.Contains(r.ProbeNodes, inv.Node()) {
+			return "unallocated " + inv.Node()
+		}
+		if !slices.ContainsFunc(att, func(d device.USBDevice) bool { return d.Node() == inv.Node() }) && len(att) == 1 {
+			return "moved " + att[0].Node()
+		}
+	case k8s && len(att) > 0:
+		return "appeared " + att[0].Node()
+	case docker && printer && i < 0 && !idKnown && len(att) > 0:
+		return "appeared " + att[0].Node()
+	}
+	return ""
+}
+
+// lossKind is the first word of a loss key.
+func lossKind(key string) string {
+	k, _, _ := strings.Cut(key, " ")
+	return k
+}
+
+// desiredState is the response to workload w's report. Callers hold mu.
+func (c *Controller) desiredState(w string, cfg *config.Config, v view) device.DesiredState {
+	spec := c.specs[w]
+	ds := device.DesiredState{
+		Hash: device.SpecHash(spec), Queues: []device.QueueSpec{}, Browse: slices.Clone(device.BrowseTypes),
+		StageEULAs: []device.EULARef{},
+	}
+	acc := []config.EULARef{}
+	if cfg != nil {
+		acc = cfg.Licenses.AcceptedEULAs
+	}
+	if spec != nil && cfg != nil {
+		for _, ps := range spec.Printers {
+			fam, ok := c.cat.Printer(ps.Family)
+			i := slices.IndexFunc(cfg.Printers, func(p config.Printer) bool { return p.ID == ps.ID })
+			pl, placed := c.placed[ps.ID]
+			if now, ok := v.printers[ps.ID]; ok && now.Node == w {
+				// This report's view of the device, at its current address.
+				if now.Device.DeviceID == "" && now.Device.Key() == pl.Device.Key() {
+					now.Device.DeviceID = pl.Device.DeviceID
+				}
+				pl, placed = now, true
+			}
+			if !ok || fam.App == "" || i < 0 || !placed {
+				continue
+			}
+			p := cfg.Printers[i]
+			dev := pl.Device
+			if dev.DeviceID == "" {
+				dev.DeviceID = c.idCache[dev.Key()]
+			}
+			dec := c.cat.DecidePrinter(&dev, p)
+			driver := config.Auto
+			if dec.Family == ps.Family && dec.Driver != "" {
+				driver = dec.Driver
+			}
+			ds.Queues = append(ds.Queues, device.QueueSpec{
+				ID: p.ID, Name: p.Name, Location: p.Location, Driver: driver, DriverPinned: driver == p.DriverName,
+				Schemes: slices.Clone(fam.DeviceSchemes), SystemURI: device.PAPPLSystemURI(fam.Port),
+				Device: dev, Defaults: device.PrintSettings(p.Defaults),
+			})
+		}
+	}
+	if w == c.blobWorkload(w) {
+		ds.StageEULAs = stageEULAs(c.cat, c.printerDecisions(cfg, v), acc)
+	}
+	return ds
+}
+
+// blobWorkload is the workload whose agent stages EULAs: the k8s backend's
+// blob slot rule (blobSlot) over the desired specs, in node order: the first
+// with blobs, else the first whose printers' family has a EULA, else the
+// first. Without specs it is the first workload of the last step, else self.
+// Callers hold mu.
+func (c *Controller) blobWorkload(self string) string {
+	names := slices.Sorted(maps.Keys(c.specs))
+	for _, want := range []func(*device.Spec) bool{
+		func(s *device.Spec) bool { return len(s.Blobs) > 0 },
+		func(s *device.Spec) bool { return c.eulaFamily(s) },
+		func(*device.Spec) bool { return true },
+	} {
+		for _, w := range names {
+			if want(c.specs[w]) {
+				return w
+			}
+		}
+	}
+	if len(c.workloads) > 0 {
+		return c.workloads[0]
+	}
+	return self
+}
+
+// eulaFamily reports whether a printer of s is of a family with a EULA.
+func (c *Controller) eulaFamily(s *device.Spec) bool {
+	return slices.ContainsFunc(s.Printers, func(ps device.PrinterSpec) bool {
+		f, ok := c.cat.Printer(ps.Family)
+		return ok && len(f.RequiredEULAs)+len(f.OptionalEULAs) > 0
+	})
 }
 
 // storeTexts keeps the latest text per EULA id. A pending report does not
@@ -275,28 +477,6 @@ func (c *Controller) EULA(id string) (apitypes.EULA, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return eulaDTO(e, c.eulaTexts), true
-}
-
-// queueFor is the desired PAPPL queue: nil unless the spec's printer family is a
-// PAPPL app. Its driver is the decision's when that is for the spec's family, else auto.
-func (c *Controller) queueFor(spec *device.Spec, cfg *config.Config, dec *device.Decision) *device.QueueSpec {
-	if spec == nil || cfg == nil {
-		return nil
-	}
-	fam, ok := c.cat.Printer(spec.Printer)
-	if !ok || fam.App == "" {
-		return nil
-	}
-	driver := config.Auto
-	if dec != nil && dec.Printer == spec.Printer && dec.Driver != "" {
-		driver = dec.Driver
-	}
-	d := cfg.Print.Defaults
-	return &device.QueueSpec{
-		Name: cfg.Name, Location: cfg.Location, Schemes: slices.Clone(fam.DeviceSchemes),
-		Driver: driver, DriverPinned: driver == cfg.Device.DriverName,
-		Media: d.Media, Sides: d.Sides, ColorMode: d.ColorMode, Quality: d.Quality,
-	}
 }
 
 // SetReconcileItem sets one reconcile[] item (data-dir, config, ...).
@@ -356,118 +536,495 @@ func (c *Controller) Subscribe() (<-chan apitypes.Status, func()) {
 // Setup returns the wizard data.
 func (c *Controller) Setup() apitypes.Setup {
 	c.mu.Lock()
-	in := setupInput{
-		backend: c.backendName, usbAvailable: c.usbAvailable,
-		missing: c.cfgState == apitypes.ConfigMissing, cfg: c.effective(), inventory: c.inventory,
-		texts: maps.Clone(c.eulaTexts),
+	defer c.mu.Unlock()
+	set := c.workloads
+	if len(set) == 0 {
+		set = slices.Sorted(maps.Keys(c.reports))
 	}
-	c.mu.Unlock()
-	return setup(c.cat, in)
+	cfg := c.effective()
+	v := c.view(set, c.reports)
+	return setup(c.cat, setupInput{
+		backend: c.backendName, usbAvailable: c.usbAvailable, missing: c.cfgState == apitypes.ConfigMissing,
+		cfg: cfg, devices: detect(c.cat, cfg, v, c.usbAvailable), decisions: c.printerDecisions(cfg, v), texts: c.eulaTexts,
+	})
 }
 
-// snapshot is the loop's copy of its inputs.
-type snapshot struct {
-	now         time.Time
-	cfgRead     bool
-	cfgState    string
-	cfg         *config.Config
-	inventory   *device.Inventory
-	report      *device.AgentReport
-	reportAt    time.Time
-	absentSince time.Time
-	restarted   bool
-	spec        *device.Spec
+// Detect re-runs device detection (POST /setup/detect): it restarts every
+// workload, so each probe looks at the USB bus again. At most once per resync;
+// a no-op on backends that cannot restart (sim).
+func (c *Controller) Detect(ctx context.Context) error {
+	r, ok := c.backend.(device.PodRestarter)
+	if !ok {
+		return nil
+	}
+	c.mu.Lock()
+	now := c.now()
+	if !c.detectAt.IsZero() && now.Sub(c.detectAt) < resync {
+		c.mu.Unlock()
+		return nil
+	}
+	c.detectAt = now
+	set := slices.Clone(c.workloads)
+	c.mu.Unlock()
+	if len(set) == 0 {
+		set = []string{""}
+	}
+	var errs []error
+	for _, w := range set {
+		if err := r.RestartPod(ctx, w); err != nil {
+			errs = append(errs, fmt.Errorf("restart workload %q: %w", w, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// view is the device side of one moment: the workload set, each workload's
+// known devices, and the binding of the config's entries to them.
+type view struct {
+	workloads []string
+	nodes     map[string][]device.USBDevice // workload -> known devices (inventory ∪ Attached)
+	probed    map[string]map[device.USBKey]bool
+	simulated map[string]bool           // workload -> its inventory is simulated
+	printers  map[string]catalog.Placed // Bind's printers
+	scanners  map[string]catalog.Placed // Bind's scanners
+	reports   map[string]*reportState   // by workload, only those in workloads
+	cfg       *config.Config
+}
+
+// view builds the view of workload set set from reports. Callers hold mu
+// (it reads idCache and the effective config).
+func (c *Controller) view(set []string, reports map[string]*reportState) view {
+	v := view{
+		workloads: set, nodes: map[string][]device.USBDevice{}, probed: map[string]map[device.USBKey]bool{},
+		simulated: map[string]bool{}, reports: map[string]*reportState{}, cfg: c.effective(),
+	}
+	for _, w := range set {
+		rs := reports[w]
+		if rs == nil {
+			continue
+		}
+		v.reports[w] = rs
+		v.nodes[w] = known(rs.r, c.idCache)
+		v.simulated[w] = rs.r.Inventory.Simulated
+		p := map[device.USBKey]bool{}
+		for _, d := range rs.r.Inventory.Devices {
+			p[d.Key()] = true
+		}
+		v.probed[w] = p
+	}
+	v.printers, v.scanners = c.cat.Bind(v.cfg, v.nodes)
+	return v
+}
+
+// isProbed reports whether a probe read device k: it is in w's inventory or
+// a probe read its device ID before.
+func (v view) isProbed(w string, k device.USBKey, ids map[device.USBKey]string) bool {
+	_, cached := ids[k]
+	return v.probed[w][k] || cached
+}
+
+// known is a workload's known device set: the probe inventory, with a device
+// that moved (one inventory and one attached device of that key, at different
+// addresses) at its new address, plus the other attached devices with their
+// device ID from ids. Inventory devices come first, so Bind keeps their
+// DeviceID.
+func known(r device.AgentReport, ids map[device.USBKey]string) []device.USBDevice {
+	out := make([]device.USBDevice, 0, len(r.Inventory.Devices)+len(r.Attached))
+	for _, d := range r.Inventory.Devices {
+		d.Interfaces = slices.Clone(d.Interfaces)
+		out = append(out, d)
+	}
+	count := func(list []device.USBDevice, k device.USBKey) int {
+		n := 0
+		for _, d := range list {
+			if d.Key() == k {
+				n++
+			}
+		}
+		return n
+	}
+	at := func(list []device.USBDevice, node string) bool {
+		return slices.ContainsFunc(list, func(d device.USBDevice) bool { return d.Node() == node })
+	}
+	for _, a := range r.Attached {
+		if at(r.Inventory.Devices, a.Node()) {
+			continue
+		}
+		k := a.Key()
+		if count(r.Inventory.Devices, k) == 1 && count(r.Attached, k) == 1 {
+			i := slices.IndexFunc(out, func(d device.USBDevice) bool { return d.Key() == k })
+			if !at(r.Attached, out[i].Node()) {
+				out[i].Bus, out[i].Address = a.Bus, a.Address
+				continue
+			}
+		}
+		a.Interfaces = slices.Clone(a.Interfaces)
+		if a.DeviceID == "" {
+			a.DeviceID = ids[k]
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// workloadSet is A7's workload set: the listed nodes plus the named
+// workloads that report or run a device-serving spec, sorted; or [""] when
+// the node list is unknown (no lister, an error) or empty with no named
+// workload. An unlisted node stays while its agent reported within
+// pendingWait or its applied spec serves a device, so a node can leave.
+func workloadSet(listed bool, nodes []string, reports map[string]*reportState, applied map[string]*device.Spec, now time.Time) []string {
+	if !listed {
+		return []string{""}
+	}
+	set := map[string]bool{}
+	for _, n := range nodes {
+		if n != "" {
+			set[n] = true
+		}
+	}
+	for w, rs := range reports {
+		if w != "" && now.Sub(rs.at) < pendingWait {
+			set[w] = true
+		}
+	}
+	for w, s := range applied {
+		if w != "" && s != nil && s.Mode != device.ModeProbe {
+			set[w] = true
+		}
+	}
+	if len(set) == 0 {
+		return []string{""}
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// legacyAlias is the node the workload "" stands for after the upgrade from
+// the single-workload release: in multi-node mode the backend still observes
+// the old unpinned slot 0 as "" and its agent reports as "", until the first
+// Apply pins it. With exactly one node in the set, "" is that node, so its
+// devices stay bound across the switch and the first Apply is the full spec.
+// shortcut: with several nodes "" is not mapped and its node gets a probe spec first; map by the pod's node name if multi-node upgrades matter.
+func legacyAlias(set []string, obs []device.Observation) string {
+	if len(set) != 1 || set[0] == "" {
+		return ""
+	}
+	legacy := false
+	for _, o := range obs {
+		switch o.Workload {
+		case "":
+			legacy = o.Phase != device.PhaseAbsent
+		case set[0]:
+			return ""
+		}
+	}
+	if legacy {
+		return set[0]
+	}
+	return ""
+}
+
+// aliasObs names the observation of workload "" alias (legacyAlias).
+func aliasObs(obs []device.Observation, alias string) []device.Observation {
+	if alias == "" {
+		return obs
+	}
+	out := slices.Clone(obs)
+	for i := range out {
+		if out[i].Workload == "" {
+			out[i].Workload = alias
+		}
+	}
+	return out
 }
 
 // desired is the outcome of the spec rules.
 type desired struct {
-	spec           *device.Spec
-	dev            *device.USBDevice // the matched device in usb mode
-	apply          bool              // false: wait, or leave whatever runs
-	phase, message string
+	specs     map[string]*device.Spec   // by workload
+	placed    map[string]catalog.Placed // entry id -> device (bound now or sticky), DeviceID filled
+	present   []device.USBDevice        // the bound devices of served entries, for SetUSBDevices
+	noID      map[string]bool           // bound printers left out until a probe reads their device ID
+	leftOut   map[string]bool           // workloads with devices past maxWorkloads, not applied
+	apply     bool                      // false: wait, or leave whatever runs
+	wait      bool                      // the control-plane restart wait (A7)
+	nodesErr  string                    // the nodes reconcile item's message, "" fine
+	printers  map[string]device.PrinterDecision
+	scanners  map[string]device.ScannerDecision
+	workloadW map[string]string // entry id -> workload of its spec
 }
 
-func (c *Controller) probe(message string) desired {
-	s := &device.Spec{Mode: device.ModeProbe}
-	s.Hash = device.SpecHash(s)
-	return desired{spec: s, apply: true, phase: apitypes.PhaseProbing, message: message}
-}
-
-func (c *Controller) deviceSpec(mode string, dec device.Decision, cfg *config.Config) desired {
-	s := &device.Spec{
-		Mode: mode, Printer: dec.Printer, Scanner: dec.Scanner,
-		SaneBackends: slices.Clone(dec.SaneBackends), Blobs: blobRefs(dec, cfg.Licenses.AcceptedEULAs, c.cat),
+// decide builds the desired specs (A6, A7) from the snapshot and view. The
+// snapshot's previous specs and placements keep sticky entries and are kept
+// as they are while the control-plane restart wait holds.
+func (c *Controller) decide(in snapshot, v view, obs map[string]device.Observation, obsErr error) desired {
+	d := desired{
+		specs: in.specs, placed: map[string]catalog.Placed{}, noID: map[string]bool{}, leftOut: map[string]bool{},
+		printers: map[string]device.PrinterDecision{}, scanners: map[string]device.ScannerDecision{},
+		workloadW: map[string]string{},
 	}
-	s.AcceptedEULAs = acceptedEULAs(s.Blobs, cfg.Licenses.AcceptedEULAs, c.cat)
-	if mode == device.ModeSimulated {
-		s.Name, s.Location = cfg.Name, cfg.Location
-	}
-	s.Hash = device.SpecHash(s)
-	d := desired{spec: s, apply: true}
-	if mode == device.ModeUSB {
-		d.dev = dec.Device
-	}
-	return d
-}
-
-// decide picks the device spec and phase from the config, inventory and pod state.
-func (c *Controller) decide(in snapshot, obs device.Observation, obsErr error) desired {
-	wait := desired{spec: in.spec, phase: apitypes.PhaseDeploying, message: msgWaitingAgent}
 	cfg := in.cfg
 	switch {
 	case !in.cfgRead:
-		return desired{spec: in.spec} // the file has not been read yet: it is not known to be missing
+		d.placed = in.placed
+		return d // the file has not been read yet: it is not known to be missing
 	case cfg == nil && in.cfgState == apitypes.ConfigInvalid:
-		return desired{spec: in.spec} // no last-known-good: no Apply, leave whatever runs
-	case cfg == nil && c.usbAvailable:
-		if in.inventory == nil {
-			return c.probe(msgWaitingAgent)
-		}
-		sel := config.Default(defaultName).Device
-		if _, err := c.cat.Decide(*in.inventory, sel); err != nil {
-			return c.probe(noPrinterMessage(err, sel))
-		}
-		return c.probe("")
+		d.placed = in.placed
+		return d // no last-known-good: no Apply, leave whatever runs; sticky placements stay
 	case cfg == nil:
-		return desired{apply: true}
-	case cfg.Device.Mode == config.ModeSimulated:
-		dec, err := c.cat.Decide(device.Inventory{}, cfg.Device)
-		if err != nil {
-			return desired{spec: in.spec, phase: apitypes.PhaseError, message: err.Error()}
+		d.specs, d.apply = map[string]*device.Spec{}, true
+		if c.usbAvailable {
+			for _, w := range v.workloads[:min(len(v.workloads), maxWorkloads)] { // the backend's slots
+				d.specs[w] = finish(&device.Spec{Mode: device.ModeProbe, Node: w})
+			}
 		}
-		return c.deviceSpec(device.ModeSimulated, dec, cfg)
-	case c.usbUnavailable != "":
-		return desired{apply: true, phase: apitypes.PhaseError, message: c.usbUnavailable}
-	case in.inventory == nil:
-		since := in.now.Sub(c.started)
+		return d
+	}
+
+	served := map[string]*device.Spec{}
+	spec := func(w string) *device.Spec {
+		if served[w] == nil {
+			served[w] = &device.Spec{Node: w}
+		}
+		return served[w]
+	}
+	// sticky finds the entry in the previous spec of a workload in the set,
+	// with its placement, while the entry still selects that device.
+	sticky := func(id string, usb *config.USB) (catalog.Placed, bool) {
+		pl, ok := in.placed[id]
+		if !ok || !slices.Contains(v.workloads, pl.Node) || in.specs[pl.Node] == nil {
+			return catalog.Placed{}, false
+		}
+		s := in.specs[pl.Node]
+		if !slices.ContainsFunc(s.Printers, func(p device.PrinterSpec) bool { return p.ID == id }) &&
+			!slices.ContainsFunc(s.Scanners, func(p device.ScannerSpec) bool { return p.ID == id }) {
+			return catalog.Placed{}, false
+		}
+		if usb != nil && !selects(usb, pl.Device) {
+			return catalog.Placed{}, false
+		}
+		return pl, true
+	}
+	first := v.workloads[0]
+	simPort := 0
+	simFam, _ := c.cat.Printer("sim")
+	printers := slices.Clone(cfg.Printers)
+	slices.SortFunc(printers, func(a, b config.Printer) int { return strings.Compare(a.ID, b.ID) })
+	for _, p := range printers {
 		switch {
-		case obsErr != nil:
-			return wait
-		case obs.Phase == device.PhaseAbsent || obs.Phase == device.PhaseFailed:
-			return c.probe(msgWaitingAgent)
-		// A running pod's agent can take longer than resync to report after a
-		// control-plane restart (its own backoff alone reaches 30 s), and probing
-		// would kill a working device pod, so running pods get the pending wait too.
-		case since < resync, (obs.Phase == device.PhasePending || obs.Phase == device.PhaseRunning) && since < pendingWait:
-			return wait
+		case !p.Enabled:
+			continue
+		case p.Simulated():
+			dec := c.cat.DecidePrinter(nil, p)
+			d.printers[p.ID] = dec
+			s := spec(first)
+			s.Printers = append(s.Printers, device.PrinterSpec{
+				ID: p.ID, Family: dec.Family, Name: p.Name, Location: p.Location, Port: simFam.Port + simPort,
+			})
+			d.workloadW[p.ID] = first
+			simPort++
+			continue
+		case c.usbUnavailable != "":
+			continue
 		}
-		return c.probe(msgWaitingAgent)
+		pl, bound := v.printers[p.ID]
+		current := bound && v.isProbed(pl.Node, pl.Device.Key(), in.idCache)
+		if !current {
+			spl, ok := sticky(p.ID, p.USB)
+			switch {
+			case ok:
+				pl = spl
+			case bound:
+				// Seen only live: it joins once a probe reads its device ID.
+				dev := pl.Device
+				d.printers[p.ID], d.placed[p.ID], d.noID[p.ID] = c.cat.DecidePrinter(&dev, p), pl, true
+				continue
+			default:
+				continue
+			}
+		}
+		if pl.Device.DeviceID == "" {
+			pl.Device.DeviceID = in.idCache[pl.Device.Key()]
+		}
+		dev := pl.Device
+		dec := c.cat.DecidePrinter(&dev, p)
+		d.printers[p.ID], d.placed[p.ID] = dec, pl
+		if dec.Family == "" {
+			continue // rule none: no printer runs
+		}
+		s := spec(pl.Node)
+		s.Printers = append(s.Printers, device.PrinterSpec{ID: p.ID, Family: dec.Family, USB: pl.Device.Key()})
+		d.workloadW[p.ID] = pl.Node
+		if current {
+			d.present = append(d.present, pl.Device)
+		}
 	}
-	dec, err := c.cat.Decide(*in.inventory, cfg.Device)
-	if errors.Is(err, catalog.ErrNoPrinter) {
-		return c.probe(noPrinterMessage(err, cfg.Device))
+	scanners := slices.Clone(cfg.Scanners)
+	slices.SortFunc(scanners, func(a, b config.Scanner) int { return strings.Compare(a.ID, b.ID) })
+	for _, sc := range scanners {
+		switch {
+		case !sc.Enabled:
+			continue
+		case sc.Simulated():
+			dec := c.cat.DecideScanner(nil, sc)
+			d.scanners[sc.ID] = dec
+			s := spec(first)
+			s.Scanners = append(s.Scanners, device.ScannerSpec{ID: sc.ID, Family: dec.Family, SaneBackends: slices.Clone(dec.SaneBackends)})
+			d.workloadW[sc.ID] = first
+			continue
+		case c.usbUnavailable != "":
+			continue
+		}
+		pl, current := v.scanners[sc.ID]
+		ok := current
+		if !ok {
+			if pl, ok = sticky(sc.ID, sc.USB); !ok {
+				continue
+			}
+		}
+		dev := pl.Device
+		dec := c.cat.DecideScanner(&dev, sc)
+		d.scanners[sc.ID], d.placed[sc.ID] = dec, pl
+		s := spec(pl.Node)
+		s.Scanners = append(s.Scanners, device.ScannerSpec{ID: sc.ID, Family: dec.Family, SaneBackends: slices.Clone(dec.SaneBackends), USB: pl.Device.Key()})
+		d.workloadW[sc.ID] = pl.Node
+		if current {
+			d.present = append(d.present, pl.Device)
+		}
 	}
-	if err != nil {
-		return desired{spec: in.spec, phase: apitypes.PhaseError, message: err.Error()}
+	d.present = slices.CompactFunc(sortedByNode(d.present), func(a, b device.USBDevice) bool { return a.Node() == b.Node() })
+
+	// The control-plane restart wait: a workload the backend sees pending or
+	// running whose agent has not reported since this control plane started
+	// keeps the running specs, as every usb entry is unbound until it reports.
+	usbEntries := c.usbUnavailable == "" &&
+		(slices.ContainsFunc(cfg.Printers, func(p config.Printer) bool { return p.Enabled && !p.Simulated() }) ||
+			slices.ContainsFunc(cfg.Scanners, func(s config.Scanner) bool { return s.Enabled && !s.Simulated() }))
+	// Observed workloads count whether listed or not: a node whose only
+	// printer is off advertises no USB resource but still runs its pod.
+	if usbEntries && obsErr != nil && slices.ContainsFunc(v.workloads, func(w string) bool { return !in.reported[w] }) {
+		d.wait = true
+		return d
 	}
-	d := c.deviceSpec(device.ModeUSB, dec, cfg)
-	switch {
-	case dec.Rule == device.RuleNone:
-		d.phase, d.message = apitypes.PhaseDegraded, msgNoDriver // the scanner still runs
-	case cfg.Device.DriverName != "" && dec.Driver != cfg.Device.DriverName:
-		d.phase, d.message = apitypes.PhaseDegraded, fmt.Sprintf(msgDriverNotListed, cfg.Device.DriverName)
+	if usbEntries && in.now.Sub(c.started) < pendingWait {
+		for w, o := range obs {
+			if !in.reported[w] && (o.Phase == device.PhasePending || o.Phase == device.PhaseRunning) {
+				d.wait = true
+				return d
+			}
+		}
 	}
+
+	specs := map[string]*device.Spec{}
+	var withDevices []string
+	for _, w := range v.workloads {
+		s := served[w]
+		switch {
+		case s != nil:
+			s.Mode = device.ModeSimulated
+			if slices.ContainsFunc(s.Printers, func(p device.PrinterSpec) bool { return p.USB != device.USBKey{} }) ||
+				slices.ContainsFunc(s.Scanners, func(p device.ScannerSpec) bool { return p.USB != device.USBKey{} }) {
+				s.Mode = device.ModeUSB
+			}
+			var decs []device.PrinterDecision
+			for _, p := range s.Printers {
+				decs = append(decs, d.printers[p.ID])
+			}
+			s.Blobs = blobRefs(decs, cfg.Licenses.AcceptedEULAs, c.cat)
+			specs[w] = s
+			if w != "" {
+				withDevices = append(withDevices, w)
+			}
+		case c.usbAvailable:
+			specs[w] = &device.Spec{Mode: device.ModeProbe, Node: w}
+		}
+	}
+	// The backend has maxWorkloads slots: device nodes past the cap are left
+	// out (those already served first, then name order), then probe-only
+	// nodes give way until the rest fits.
+	var problems []string
+	if len(withDevices) > maxWorkloads {
+		served := func(w string) bool { s := in.specs[w]; return s != nil && s.Mode != device.ModeProbe }
+		slices.SortStableFunc(withDevices, func(a, b string) int {
+			switch {
+			case served(a) == served(b):
+				return 0
+			case served(a):
+				return -1
+			}
+			return 1
+		})
+		out := slices.Sorted(slices.Values(withDevices[maxWorkloads:]))
+		for _, w := range out {
+			delete(specs, w)
+			d.leftOut[w] = true
+		}
+		problems = append(problems, fmt.Sprintf("devices on more than %d nodes: %s are left out", maxWorkloads, strings.Join(out, ", ")))
+	}
+	for i := len(v.workloads) - 1; i >= 0 && len(specs) > maxWorkloads; i-- {
+		if s := specs[v.workloads[i]]; s != nil && s.Mode == device.ModeProbe {
+			delete(specs, v.workloads[i])
+		}
+	}
+	// Only the blob workload may mount the ReadWriteOnce blob volume.
+	var needBlobs []string
+	for _, w := range v.workloads {
+		if s := specs[w]; s != nil && len(s.Blobs) > 0 {
+			needBlobs = append(needBlobs, w)
+		}
+	}
+	if len(needBlobs) > 1 {
+		for _, w := range needBlobs[1:] {
+			specs[w].Blobs = nil
+		}
+		problems = append(problems, fmt.Sprintf("nodes %s need vendor blobs; only %s gets them", strings.Join(needBlobs, ", "), needBlobs[0]))
+	}
+	d.nodesErr = strings.Join(problems, "; ")
+	for w, s := range specs {
+		s.AcceptedEULAs = acceptedEULAs(s.Blobs, cfg.Licenses.AcceptedEULAs, c.cat)
+		specs[w] = finish(s)
+	}
+	d.specs, d.apply = specs, true
 	return d
+}
+
+// maxWorkloads is the k8s backend's slot count (k8s.MaxSlots).
+const maxWorkloads = 4
+
+// finish sorts the spec's lists by ID and sets its hash.
+func finish(s *device.Spec) *device.Spec {
+	slices.SortFunc(s.Printers, func(a, b device.PrinterSpec) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(s.Scanners, func(a, b device.ScannerSpec) int { return strings.Compare(a.ID, b.ID) })
+	s.Hash = device.SpecHash(s)
+	return s
+}
+
+// selects reports whether a usb selector (serial "" matches any) picks d.
+func selects(u *config.USB, d device.USBDevice) bool {
+	return strings.EqualFold(d.VendorID, u.VendorID) && strings.EqualFold(d.ProductID, u.ProductID) &&
+		(u.Serial == "" || d.Serial == u.Serial)
+}
+
+func sortedByNode(devs []device.USBDevice) []device.USBDevice {
+	slices.SortFunc(devs, func(a, b device.USBDevice) int { return strings.Compare(a.Node(), b.Node()) })
+	return devs
+}
+
+// combinedHash is the hash over every workload's spec hash, sorted by workload.
+func combinedHash(specs map[string]*device.Spec) string {
+	var lines []string
+	for w, s := range specs {
+		lines = append(lines, w+"="+s.Hash)
+	}
+	slices.Sort(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// applyErr is the last Apply's error for workload w, "" when it applied.
+func (c *Controller) applyErr(w string) string {
+	if c.failMsg != "" {
+		return c.failMsg
+	}
+	return c.failW[w]
 }
 
 // due is the Apply rule: the hash differs from the last successful Apply, or
@@ -479,62 +1036,190 @@ func (c *Controller) due(hash string, now time.Time) bool {
 	return !c.applied || hash != c.appliedHash
 }
 
+// snapshot is the loop's copy of its inputs.
+type snapshot struct {
+	now      time.Time
+	cfgRead  bool
+	cfgState string
+	cfg      *config.Config
+	specs    map[string]*device.Spec
+	placed   map[string]catalog.Placed
+	loss     map[string]lossState
+	idCache  map[device.USBKey]string
+	reported map[string]bool
+}
+
 // step is one loop iteration.
 func (c *Controller) step(ctx context.Context) {
-	obs, obsErr := c.backend.Observe(ctx)
+	lister, hasLister := c.backend.(device.NodeLister)
+	var nodes []string
+	var nodesErr error
+	if hasLister {
+		// Before Observe, so the backend's mode and slot map are settled and
+		// Observe names the workloads the agents report.
+		nodes, nodesErr = lister.USBNodes(ctx)
+	}
+	// A transient node-list error (not single-node mode) keeps the last
+	// workload set and applies nothing, so one API-server blip never drops a
+	// multi-node install to one unpinned workload.
+	blip := nodesErr != nil && !errors.Is(nodesErr, device.ErrSingleNode)
+	if blip && !c.nodesBlip {
+		slog.Warn("listing nodes failed; keeping the device workloads as they are", "err", nodesErr)
+	}
+	wasBlip := c.nodesBlip
+	c.nodesBlip = blip
+	obsList, obsErr := c.backend.Observe(ctx)
 
 	c.mu.Lock()
-	in := snapshot{
-		now: c.now(), cfgRead: c.cfgRead, cfgState: c.cfgState, cfg: c.effective(), inventory: c.inventory,
-		report: c.report, reportAt: c.reportAt, absentSince: c.absentSince, restarted: c.restarted, spec: c.spec,
+	now := c.now()
+	applied := map[string]*device.Spec{}
+	for w := range c.appliedBy {
+		applied[w] = c.specs[w]
 	}
-	d := c.decide(in, obs, obsErr)
-	c.spec = d.spec
+	set := workloadSet(hasLister && nodesErr == nil, nodes, c.reports, applied, now)
+	if blip && len(c.workloads) > 0 {
+		set = slices.Clone(c.workloads)
+	}
+	c.alias = legacyAlias(set, obsList)
+	obsList = aliasObs(obsList, c.alias)
+	if a := c.alias; a != "" {
+		if rs := c.reports[""]; rs != nil && (c.reports[a] == nil || rs.at.After(c.reports[a].at)) {
+			rs.r.Workload = a
+			c.reports[a] = rs
+		}
+		if c.reported[""] {
+			c.reported[a] = true
+		}
+	}
+	for w := range c.reports {
+		if !blip && !slices.Contains(set, w) { // a blip's set may be a stand-in [""]
+			delete(c.reports, w)
+		}
+	}
+	for id, st := range c.loss {
+		if !blip && !slices.Contains(set, st.workload) {
+			delete(c.loss, id)
+		}
+	}
+	c.workloads = set
+	in := snapshot{
+		now: now, cfgRead: c.cfgRead, cfgState: c.cfgState, cfg: c.effective(),
+		specs: maps.Clone(c.specs), placed: maps.Clone(c.placed), idCache: maps.Clone(c.idCache), loss: map[string]lossState{},
+		reported: maps.Clone(c.reported),
+	}
+	for id, st := range c.loss {
+		in.loss[id] = *st
+	}
+	v := c.view(set, c.reports)
+	obs := observations(obsList)
+	d := c.decide(in, v, obs, obsErr)
+	if blip {
+		d.specs, d.apply = in.specs, false
+	}
+	c.specs, c.placed = d.specs, d.placed
 	c.mu.Unlock()
 
-	hash := device.SpecHash(d.spec)
+	hash := combinedHash(d.specs)
 	if t, ok := c.backend.(device.USBDeviceSetter); ok && d.apply {
 		// Before Apply, so the backend adopts what runs. Until the backend's
-		// want is this spec, the device waits for the Apply that brings it.
-		t.SetUSBDevice(d.dev, !c.applied || hash != c.appliedHash)
+		// want is these specs, the devices wait for the Apply that brings them.
+		t.SetUSBDevices(d.present, !c.applied || hash != c.appliedHash)
 	}
-	if d.apply && c.due(hash, in.now) {
+	if d.apply && c.due(hash, now) {
+		list := make([]*device.Spec, 0, len(d.specs))
+		for _, w := range slices.Sorted(maps.Keys(d.specs)) {
+			list = append(list, d.specs[w])
+		}
 		actx, cancel := context.WithTimeout(ctx, applyTimeout)
-		err := c.backend.Apply(actx, d.spec)
+		err := c.backend.Apply(actx, list)
 		cancel()
-		c.failed, c.failMsg = err != nil, ""
+		// A WorkloadErrors failed only the workloads it names; the rest applied.
+		var we device.WorkloadErrors
+		partial := errors.As(err, &we)
+		c.failed, c.failMsg, c.failW = err != nil, "", map[string]string{}
 		if err != nil {
-			c.applied, c.failHash, c.failAt, c.failMsg = false, hash, in.now, err.Error()
+			c.applied, c.failHash, c.failAt = false, hash, now
+			if partial {
+				for w, e := range we {
+					c.failW[w] = e.Error()
+				}
+			} else {
+				c.failMsg = err.Error()
+			}
+			if err.Error() != c.failLogged {
+				slog.Warn("device workload apply failed", "err", err)
+				c.failLogged = err.Error()
+			}
 		} else {
-			c.applied, c.appliedHash = true, hash
+			c.applied, c.appliedHash, c.failLogged = true, hash, ""
+		}
+		if err == nil || partial {
+			c.appliedBy = map[string]string{}
+			for w, s := range d.specs {
+				if _, bad := we[w]; !bad {
+					c.appliedBy[w] = s.Hash
+				}
+			}
+		}
+		items := slices.Sorted(maps.Keys(d.specs))
+		if len(items) == 0 {
+			items = set
 		}
 		c.mu.Lock()
-		if c.setItem("device", err == nil, c.failMsg) && err != nil {
-			slog.Warn("device workload apply failed", "err", err)
+		failedItems := map[string]bool{}
+		for _, w := range items {
+			msg := c.applyErr(w)
+			c.setItem(workloadItem(w), msg == "", msg)
+			if msg != "" {
+				failedItems[workloadItem(w)] = true
+			}
 		}
+		for w, msg := range c.failW { // a slot freed for a node that left the specs
+			if !failedItems[workloadItem(w)] {
+				c.setItem(workloadItem(w), false, msg)
+				failedItems[workloadItem(w)] = true
+			}
+		}
+		for item := range c.itemsFailed { // workloads that left the specs or recovered
+			if !failedItems[item] && !slices.ContainsFunc(items, func(w string) bool { return workloadItem(w) == item }) {
+				c.setItem(item, true, "")
+			}
+		}
+		c.itemsFailed = failedItems
 		c.mu.Unlock()
-		obs, obsErr = c.backend.Observe(ctx)
+		obsList, obsErr = c.backend.Observe(ctx)
+		obs = observations(aliasObs(obsList, c.alias))
 	}
-	applyErr := ""
+	switch {
+	case blip: // nothing applies while it lasts, so say why
+		c.nodesFailed = true
+		c.mu.Lock()
+		c.setItem("nodes", false, "listing nodes failed: "+nodesErr.Error()+"; device workloads are kept as they are")
+		c.mu.Unlock()
+	case d.apply && (d.nodesErr != "" || c.nodesFailed):
+		c.nodesFailed = d.nodesErr != ""
+		c.mu.Lock()
+		c.setItem("nodes", d.nodesErr == "", d.nodesErr)
+		c.mu.Unlock()
+	case wasBlip:
+		c.nodesFailed = false
+		c.mu.Lock()
+		c.setItem("nodes", true, "")
+		c.mu.Unlock()
+	}
+	applyErr := func(string) string { return "" }
 	if c.failed && d.apply {
-		applyErr = c.failMsg
+		applyErr = c.applyErr
 	}
 
-	if d.spec != nil && d.spec.Mode == device.ModeUSB && !in.absentSince.IsZero() && !in.restarted &&
-		in.now.Sub(in.absentSince) >= resync {
-		if r, ok := c.backend.(device.PodRestarter); ok {
-			if err := r.RestartPod(ctx); err != nil {
-				slog.Warn("device pod restart failed", "err", err)
-			}
-			c.mu.Lock()
-			if c.absentSince.Equal(in.absentSince) {
-				c.restarted = true
-			}
-			c.mu.Unlock()
-		}
-	}
+	c.restart(ctx, in, d)
 
-	st := c.observe(ctx, in, d, obs, obsErr, applyErr)
+	c.mu.Lock()
+	for id, st := range c.loss {
+		in.loss[id] = *st
+	}
+	c.mu.Unlock()
+	st := c.observe(ctx, in, v, d, obs, obsErr, applyErr)
 
 	c.mu.Lock()
 	c.status = st
@@ -542,13 +1227,7 @@ func (c *Controller) step(ctx context.Context) {
 	changed := !reflect.DeepEqual(c.published, after)
 	if changed {
 		c.published = after
-	}
-	var subs []chan apitypes.Status
-	if changed {
 		for ch := range c.subs {
-			subs = append(subs, ch)
-		}
-		for _, ch := range subs {
 			select {
 			case <-ch:
 			default:
@@ -562,101 +1241,60 @@ func (c *Controller) step(ctx context.Context) {
 	}
 }
 
-// observe derives endpoints, queries the printer and scanner (no lock held)
-// and builds the device, printer, scanner and connect parts of Status.
-func (c *Controller) observe(ctx context.Context, in snapshot, d desired, obs device.Observation, obsErr error, applyErr string) apitypes.Status {
-	st := initialStatus()
-	spec, r := d.spec, in.report
-	var fam catalog.Printer
-	if spec != nil {
-		fam, _ = c.cat.Printer(spec.Printer)
-	}
-	prefer := preferredName(fam, in.cfg)
-	ipp := printerURI(c.backendName, fam, obs, r, prefer)
-	escl := scannerURL(c.cat, c.backendName, spec, obs, r)
-
-	st.Printer = offlinePrinter(ipp)
-	if ipp != "" {
-		qctx, cancel := context.WithTimeout(ctx, queryTimeout)
-		a, err := c.printer(ipp).Attributes(qctx)
-		cancel()
-		if err == nil {
-			st.Printer = apitypes.StatusPrinter{
-				Available: true, URI: ipp, State: a.State,
-				Reasons: nonNil(a.Reasons), Formats: nonNil(a.Formats), ConvertedFormats: printing.Conversions(a.Formats),
-				Media: nonNil(a.Media), Markers: nonNil(a.Markers),
-			}
-		}
-	}
-	st.Scanner.URL = escl
-	if escl != "" {
-		qctx, cancel := context.WithTimeout(ctx, queryTimeout)
-		state, err := c.scanner(escl).Status(qctx)
-		cancel()
-		if err == nil {
-			st.Scanner.Available, st.Scanner.State = true, string(state)
-		}
-	}
-
-	sel := config.Default(defaultName).Device
-	if in.cfg != nil {
-		sel = in.cfg.Device
-	}
-	dec := decisionFor(c.cat, sel, in.inventory)
-	st.Device.Mode = modeOf(spec)
-	st.Device.Decision = dec
-	st.Device.Inventory = in.inventory
-	st.Device.Advertised = advertised(r)
-	if r != nil {
-		st.Device.Blobs = nonNil(r.Blobs)
-	}
-	st.Connect = connect(r, fam, prefer, ipp, escl)
-
-	var specDec *device.Decision
-	if spec != nil && spec.Mode != device.ModeProbe {
-		specDec = dec
-	}
-	degraded := degradedMessage(c.cat, specDec, in.cfg, st.Device.Blobs)
-	st.Device.Phase, st.Device.Message = phase(in, d, obs, obsErr, applyErr, degraded, st)
-	return st
+// workloadItem is the reconcile item of workload w's Apply.
+func workloadItem(w string) string {
+	return "workload/" + cmp.Or(w, "default")
 }
 
-// phase picks Status device.phase and message, highest priority first. Ready
-// needs a reachable printer only: many decided scanners never advertise
-// (print-only devices, HP scanners without the plug-in); scanner.available says so.
-func phase(in snapshot, d desired, obs device.Observation, obsErr error, applyErr, degraded string, st apitypes.Status) (string, string) {
-	spec, r := d.spec, in.report
-	switch {
-	case d.phase == apitypes.PhaseError:
-		return d.phase, d.message
-	case r != nil && r.Queue != nil && r.Queue.State == device.QueueError && spec != nil:
-		return apitypes.PhaseError, r.Queue.Message
-	case applyErr != "":
-		return apitypes.PhaseError, applyErr
-	case spec == nil && d.phase == "":
-		return apitypes.PhaseNone, ""
-	case obsErr != nil:
-		return apitypes.PhaseError, obsErr.Error()
-	case obs.Phase == device.PhaseFailed:
-		return apitypes.PhaseError, orDefault(obs.Message, "Device pod failed")
-	case obs.Unschedulable:
-		return apitypes.PhaseProbing, msgUnschedulable
-	case r != nil && spec != nil && in.now.Sub(in.reportAt) > resync:
-		return apitypes.PhaseDegraded, msgNotReporting
-	case d.phase != "":
-		return d.phase, d.message
-	case degraded != "":
-		return apitypes.PhaseDegraded, degraded
-	case r != nil && r.Queue != nil && r.Queue.State == device.QueueOK && r.Queue.Message != "":
-		return apitypes.PhaseDegraded, r.Queue.Message // the queue runs the app's own driver choice
-	case spec.Mode == device.ModeProbe:
-		return apitypes.PhaseProbing, ""
-	case obs.Phase != device.PhaseRunning:
-		return apitypes.PhaseDeploying, orDefault(obs.Message, msgStarting)
-	case spec.Printer != "" && !st.Printer.Available:
-		return apitypes.PhaseDeploying, msgWaitPrinter
+// observations indexes the backend's observations by workload.
+func observations(list []device.Observation) map[string]device.Observation {
+	out := map[string]device.Observation{}
+	for _, o := range list {
+		out[o.Workload] = o
 	}
-	return apitypes.PhaseReady, ""
+	return out
+}
+
+// restart calls RestartPod once per workload with a due replug key (A8) and
+// marks every due key on it as restarted: at most one restart per change.
+func (c *Controller) restart(ctx context.Context, in snapshot, d desired) {
+	r, ok := c.backend.(device.PodRestarter)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	due := map[string][]string{} // workload -> entry ids
+	for id, st := range c.loss {
+		if st.key != "" && st.key != st.restartedKey && in.now.Sub(st.since) >= resync && d.specs[st.workload] != nil {
+			due[st.workload] = append(due[st.workload], id)
+		}
+	}
+	keys := map[string]lossState{}
+	for _, ids := range due {
+		for _, id := range ids {
+			keys[id] = *c.loss[id]
+		}
+	}
+	c.mu.Unlock()
+	for _, w := range slices.Sorted(maps.Keys(due)) {
+		ids := due[w]
+		slices.Sort(ids)
+		var reasons []string
+		for _, id := range ids {
+			reasons = append(reasons, id+": "+keys[id].key)
+		}
+		slog.Info("device pod restart", "workload", w, "reason", strings.Join(reasons, ", "))
+		if err := r.RestartPod(ctx, w); err != nil {
+			slog.Warn("device pod restart failed", "workload", w, "err", err)
+		}
+		c.mu.Lock()
+		for _, id := range ids {
+			if st := c.loss[id]; st != nil && st.key == keys[id].key && st.since.Equal(keys[id].since) {
+				st.restartedKey = st.key
+			}
+		}
+		c.mu.Unlock()
+	}
 }
 
 func orDefault(s, def string) string {

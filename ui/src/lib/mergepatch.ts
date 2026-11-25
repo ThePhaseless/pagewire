@@ -8,8 +8,9 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 /**
  * The merge patch that turns `base` into `edited`. Keys missing (or undefined) in `edited` become
- * `null`, so removing an optional object such as `device.usb` deletes it. Arrays are replaced whole.
- * Equal documents give `{}`.
+ * `null`, so removing an optional key deletes it. Arrays are replaced whole: any edit inside
+ * `printers` (an entry's `usb` or `defaults`, say) sends the whole `printers` list. Equal documents
+ * give `{}`.
  */
 export function diff(base: Obj, edited: Obj): Obj {
   const patch: Obj = {};

@@ -7,23 +7,35 @@
       "properties": {
         "apiVersion": {
           "type": "string",
-          "const": "pagewire/v1"
+          "const": "pagewire/v2"
         },
         "name": {
           "type": "string",
           "maxLength": 63,
           "minLength": 1,
           "pattern": "^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$",
-          "description": "Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."
+          "description": "Required, 1 to 63 characters, no control characters, not starting with -. The UI title."
         },
-        "location": {
-          "type": "string",
-          "maxLength": 127,
-          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
-          "description": "printer-location, 0 to 127 characters."
+        "printers": {
+          "items": {
+            "$ref": "#/$defs/Printer"
+          },
+          "type": "array",
+          "description": "Printers pagewire serves (default [])."
         },
-        "device": {
-          "$ref": "#/$defs/Device"
+        "scanners": {
+          "items": {
+            "$ref": "#/$defs/Scanner"
+          },
+          "type": "array",
+          "description": "Scanners pagewire serves (default [])."
+        },
+        "ignoredDevices": {
+          "items": {
+            "$ref": "#/$defs/IgnoredDevice"
+          },
+          "type": "array",
+          "description": "USB devices the setup wizard does not offer again (default [])."
         },
         "print": {
           "$ref": "#/$defs/PrintConfig"
@@ -42,54 +54,6 @@
         "name"
       ]
     },
-    "Device": {
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "usb",
-            "simulated"
-          ],
-          "description": "usb, or simulated (test printer and SANE test scanner, no USB resource).",
-          "default": "usb"
-        },
-        "usb": {
-          "$ref": "#/$defs/USB",
-          "description": "Optional selector when several USB devices are visible. Only allowed with mode usb."
-        },
-        "driver": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "ipp-usb",
-            "ps",
-            "hplip",
-            "gutenprint",
-            "ghostscript",
-            "legacy"
-          ],
-          "default": "auto"
-        },
-        "driverName": {
-          "type": "string",
-          "maxLength": 255,
-          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
-          "description": "Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the device degraded. Not allowed with driver ipp-usb or mode simulated."
-        },
-        "scanner": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "ipp-usb",
-            "airsane",
-            "none"
-          ],
-          "default": "auto"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object"
-    },
     "EULARef": {
       "properties": {
         "id": {
@@ -102,6 +66,39 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "Lowercase hex sha256 of the accepted licence text. Settings writes it when you accept; required in acceptedEulas."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "IgnoredDevice": {
+      "properties": {
+        "vendorId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "productId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "serial": {
+          "type": "string",
+          "maxLength": 126,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "USB serial number, at most 126 characters, no control characters."
+        },
+        "roles": {
+          "items": {
+            "type": "string",
+            "enum": [
+              "printer",
+              "scanner"
+            ]
+          },
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "printer, scanner or both."
         }
       },
       "additionalProperties": false,
@@ -123,9 +120,6 @@
     },
     "PrintConfig": {
       "properties": {
-        "defaults": {
-          "$ref": "#/$defs/PrintDefaults"
-        },
         "maxUploadMiB": {
           "type": "integer",
           "maximum": 500,
@@ -141,8 +135,17 @@
         "media": {
           "type": "string",
           "pattern": "^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$",
-          "description": "PWG self-describing media name.",
-          "default": "iso_a4_210x297mm"
+          "description": "PWG self-describing media name, such as iso_a4_210x297mm."
+        },
+        "mediaSource": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,254}$",
+          "description": "Tray keyword the printer reports, such as auto, main, tray-1 or manual."
+        },
+        "mediaType": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,254}$",
+          "description": "Media type keyword the printer reports, such as stationery or photographic-glossy."
         },
         "sides": {
           "type": "string",
@@ -150,8 +153,7 @@
             "one-sided",
             "two-sided-long-edge",
             "two-sided-short-edge"
-          ],
-          "default": "one-sided"
+          ]
         },
         "colorMode": {
           "type": "string",
@@ -159,8 +161,7 @@
             "auto",
             "color",
             "monochrome"
-          ],
-          "default": "auto"
+          ]
         },
         "quality": {
           "type": "string",
@@ -168,18 +169,133 @@
             "draft",
             "normal",
             "high"
-          ],
-          "default": "normal"
+          ]
+        },
+        "resolution": {
+          "type": "integer",
+          "maximum": 2400,
+          "minimum": 75,
+          "description": "Dots per inch."
+        },
+        "contentOptimize": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "graphic",
+            "photo",
+            "text",
+            "text-and-graphic"
+          ]
+        },
+        "orientation": {
+          "type": "string",
+          "enum": [
+            "portrait",
+            "landscape",
+            "reverse-landscape",
+            "reverse-portrait"
+          ]
+        },
+        "numberUp": {
+          "type": "integer",
+          "maximum": 16,
+          "minimum": 1,
+          "description": "Pages per sheet."
+        },
+        "printScaling": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "auto-fit",
+            "fill",
+            "fit",
+            "none"
+          ]
+        },
+        "outputBin": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,254}$",
+          "description": "Output bin keyword the printer reports, such as face-down or top."
+        },
+        "finishings": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,254}$",
+          "description": "One IANA finishings keyword, such as none, staple or punch."
         }
       },
       "additionalProperties": false,
       "type": "object"
     },
+    "Printer": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$",
+          "description": "Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Required, 1 to 63 characters, no control characters, not starting with -, unique among printers (ignoring case). The queue and DNS-SD name of PAPPL and simulated printers; ipp-usb and AirSane advertise the device's own names."
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "printer-location, 0 to 127 characters."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "false keeps the entry but does not serve the printer (default true).",
+          "default": true
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "usb",
+            "simulated"
+          ],
+          "description": "usb, or simulated (a test printer, no USB resource).",
+          "default": "usb"
+        },
+        "usb": {
+          "$ref": "#/$defs/USB",
+          "description": "Selects the USB device. Only allowed with mode usb; at most one usb printer may leave it out."
+        },
+        "driver": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "ps",
+            "hplip",
+            "gutenprint",
+            "ghostscript",
+            "legacy"
+          ],
+          "default": "auto"
+        },
+        "driverName": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the printer degraded. Not allowed with driver ipp-usb or mode simulated."
+        },
+        "defaults": {
+          "$ref": "#/$defs/PrintDefaults"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ]
+    },
     "ScanConfig": {
       "properties": {
-        "defaults": {
-          "$ref": "#/$defs/ScanDefaults"
-        },
         "retentionDays": {
           "type": "integer",
           "maximum": 3650,
@@ -199,14 +315,13 @@
             "platen",
             "adf",
             "adf-duplex"
-          ],
-          "default": "platen"
+          ]
         },
         "resolution": {
           "type": "integer",
           "maximum": 1200,
           "minimum": 75,
-          "default": 300
+          "description": "Dots per inch."
         },
         "colorMode": {
           "type": "string",
@@ -214,20 +329,87 @@
             "color",
             "grayscale",
             "blackandwhite"
-          ],
-          "default": "color"
+          ]
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "document",
+            "text-and-graphic",
+            "photo",
+            "preview",
+            "object",
+            "business-card"
+          ]
         },
         "format": {
           "type": "string",
           "enum": [
             "pdf",
             "jpeg"
-          ],
-          "default": "pdf"
+          ]
         }
       },
       "additionalProperties": false,
       "type": "object"
+    },
+    "Scanner": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$",
+          "description": "Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Required, 1 to 63 characters, no control characters, not starting with -. The scanner's name in the UI; ipp-usb and AirSane advertise the device's own name."
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "0 to 127 characters."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "false keeps the entry but does not serve the scanner (default true).",
+          "default": true
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "usb",
+            "simulated"
+          ],
+          "description": "usb, or simulated (the SANE test scanner, no USB resource). At most one scanner may be simulated.",
+          "default": "usb"
+        },
+        "usb": {
+          "$ref": "#/$defs/USB",
+          "description": "Selects the USB device. Only allowed with mode usb; at most one usb scanner may leave it out."
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ipp-usb",
+            "airsane"
+          ],
+          "default": "auto"
+        },
+        "defaults": {
+          "$ref": "#/$defs/ScanDefaults"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ]
     },
     "USB": {
       "properties": {

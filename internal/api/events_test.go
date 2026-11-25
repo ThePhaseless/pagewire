@@ -85,7 +85,7 @@ func TestSSEStatusAndHeartbeat(t *testing.T) {
 
 	// A Status change from the source reaches the client.
 	st := e.status.Current()
-	st.Device.Phase = "ready"
+	st.Phase = "ready"
 	e.status.ch <- st
 	f := nextFrame(t, frames, isEvent(apitypes.EventStatus))
 	if _, data := parseFrame(t, []byte(f)); !strings.Contains(string(data), `"phase":"ready"`) {

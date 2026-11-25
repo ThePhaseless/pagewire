@@ -42,7 +42,8 @@ import (
 
 const (
 	saNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-	noUSBResource   = "device.mode usb needs a USB resource (set --usb-resource)"
+	noUSBResource   = "USB printers and scanners need a USB resource (set --usb-resource)"
+	migrationItem   = "config-migration"
 	lastGoodName    = "pagewire.last-good.yaml"
 	// The print handler streams the upload to the printer inside the request,
 	// and only SSE and downloads lift the write deadline, so it must cover a
@@ -235,7 +236,7 @@ func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 	fl.StringVar(&f.configPath, "config", env("PAGEWIRE_CONFIG", "/data/pagewire.yaml"), "config file (env PAGEWIRE_CONFIG)")
 	fl.StringVar(&f.dataDir, "data-dir", env("PAGEWIRE_DATA_DIR", "/data"), "data directory (env PAGEWIRE_DATA_DIR)")
 	fl.StringVar(&f.backend, "backend", env("PAGEWIRE_BACKEND", defaultBackend()), "k8s, docker or sim (env PAGEWIRE_BACKEND)")
-	fl.StringVar(&f.simDevice, "sim-device", env("PAGEWIRE_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PAGEWIRE_SIM_DEVICE)")
+	fl.StringVar(&f.simDevice, "sim-device", env("PAGEWIRE_SIM_DEVICE", "ippusb-mfp"), "sim USB devices: a fixture such as ippusb-mfp or office, or none (env PAGEWIRE_SIM_DEVICE)")
 	// hidden test seam (e2e scan cancel): sim backend only, holds each scanned page this long
 	fl.StringVar(&f.simScanDelay, "sim-scan-delay", env("PAGEWIRE_SIM_SCAN_DELAY", "0s"), "")
 	fl.StringVar(&f.esclClient, "escl-client", env("PAGEWIRE_ESCL_CLIENT", "mfp"), "mfp or xml (env PAGEWIRE_ESCL_CLIENT)")
@@ -359,9 +360,9 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	scanEvents := make(chan apitypes.Scan, 16)
 	scans := scanning.New(scanning.Options{
 		Dir: filepath.Join(f.dataDir, "scans"),
-		Scanner: func() scanning.Scanner {
-			url := ctrl.Current().Scanner.URL
-			if url == "" {
+		Scanner: func(id string) scanning.Scanner {
+			url, err := scannerURL(ctrl.Current(), id)
+			if err != nil {
 				return nil
 			}
 			s, err := newScanner(url)
@@ -378,7 +379,10 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	})
 
 	hub := api.NewHub()
-	var ready, readFailed atomic.Bool
+	// One store for the API and the v1 rewrite: every write is migrated to v2
+	// first, so a v1 PUT answers the ETag of the v2 file it wrote.
+	st := store.New(f.configPath, func(b []byte) error { _, err := check(b); return err }, store.WithNormalize(migrateAdapter))
+	var ready, readFailed, migrationFailed atomic.Bool
 	seen := func(etag string) {
 		ready.Store(true)
 		if readFailed.Swap(false) {
@@ -398,6 +402,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		},
 		OnApply: func(c config.Config, etag string) {
 			ctrl.ConfigApplied(&c, etag)
+			rewriteV1(st, f.configPath, etag, ctrl, &migrationFailed)
 			seen(etag)
 		},
 		OnInvalid: func(err error, etag string, lastGood *config.Config) {
@@ -424,14 +429,15 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		tokens = ts
 	}
 	public, internal := api.New(api.Deps{
-		Store:       store.New(f.configPath, func(b []byte) error { _, err := check(b); return err }),
+		Store:       st,
 		Check:       check,
 		LastGood:    w.LastGood,
 		Config:      ctrl.Config,
 		Status:      ctrl,
 		Setup:       ctrl,
-		Printer:     printerAdapter{ctrl},
-		Scans:       scanAdapter{Service: scans, scanner: func() string { return ctrl.Current().Scanner.URL }, newScanner: newScanner},
+		Printers:    printers{ctrl},
+		PrinterCaps: func(id string) (device.PrinterCaps, bool) { return printerCaps(ctrl.Current(), id) },
+		Scans:       scanAdapter{Service: scans, status: ctrl.Current, newScanner: newScanner},
 		ScanEvents:  scanEvents,
 		Agent:       api.Agent{Report: ctrl.AgentReport, Tokens: tokens},
 		UI:          uiFS,
@@ -588,6 +594,58 @@ func newDockerBackend(f serveFlags, overrides map[string]string) (*docker.Backen
 	}), nil
 }
 
+// migrateAdapter is the store's normaliser: config.Migrate without its bool.
+// Any migration error is a config error, so the API answers 422 for it.
+func migrateAdapter(b []byte) ([]byte, error) {
+	out, _, err := config.Migrate(b)
+	var el *config.ErrorList
+	if err != nil && !errors.As(err, &el) {
+		err = &config.ErrorList{Errors: []config.FieldError{{Message: err.Error()}}}
+	}
+	return out, err
+}
+
+// rewriteV1 rewrites the config file as pagewire/v2 when it is still the
+// pagewire/v1 file the watcher applied (etag). The running config is the
+// in-memory migration whatever happens here. The config-migration item
+// appears only after a failure, and turns ok once a later callback finds the
+// file rewritten or v2. The watcher calls back only when the content changes,
+// so a failed rewrite is retried on the next edit of the file or the next
+// restart, not periodically.
+func rewriteV1(st *store.Store, path, etag string, ctrl *controller.Controller, failed *atomic.Bool) {
+	fail := func(err error) {
+		failed.Store(true)
+		slog.Warn("config file is pagewire/v1 and could not be rewritten", "path", path, "err", err)
+		ctrl.SetReconcileItem(migrationItem, false, fmt.Sprintf(
+			"The config file is pagewire/v1 and could not be rewritten as pagewire/v2: %v. pagewire runs the migrated config.", err))
+	}
+	raw, cur, err := st.Read()
+	if errors.Is(err, store.ErrNotExist) {
+		return // removed since the watcher read it; OnMissing follows
+	}
+	if err != nil {
+		fail(err)
+		return
+	}
+	if cur != etag {
+		return // changed since the watcher read it; the callback for the new content retries
+	}
+	if config.IsV1(raw) {
+		migrated, _, err := config.Migrate(raw)
+		if err == nil {
+			_, err = st.Replace(etag, migrated)
+		}
+		if err != nil {
+			fail(err)
+			return
+		}
+		slog.Info("config file rewritten as pagewire/v2", "path", path)
+	}
+	if failed.Swap(false) {
+		ctrl.SetReconcileItem(migrationItem, true, "config file rewritten as pagewire/v2")
+	}
+}
+
 // failedScanner reports a scanner URL that could not be turned into a client.
 type failedScanner struct{ err error }
 
@@ -595,13 +653,71 @@ func (s failedScanner) Status(context.Context) (scanning.State, error) {
 	return scanning.StateUnknown, s.err
 }
 
-// printerAdapter is the API's printer: the controller's current printer URI.
-type printerAdapter struct{ ctrl *controller.Controller }
+func (s failedScanner) Capabilities(context.Context) (scanning.Caps, error) {
+	return scanning.Caps{}, s.err
+}
+
+// printerCaps is the capabilities of enabled printer id, true only while it is
+// available and has reported them (document formats are always reported).
+func printerCaps(st apitypes.Status, id string) (device.PrinterCaps, bool) {
+	for _, p := range st.Printers {
+		if p.ID == id && p.Enabled && p.Available && len(p.Capabilities.Formats) > 0 {
+			return p.Capabilities, true
+		}
+	}
+	return device.PrinterCaps{}, false
+}
+
+// printerURI is the endpoint of enabled printer id: api.ErrUnknownPrinter for
+// an unknown or disabled id, api.ErrNoPrinter while it has none.
+func printerURI(st apitypes.Status, id string) (string, error) {
+	for _, p := range st.Printers {
+		if p.ID == id && p.Enabled {
+			if p.URI == "" {
+				return "", api.ErrNoPrinter
+			}
+			return p.URI, nil
+		}
+	}
+	return "", api.ErrUnknownPrinter
+}
+
+// scannerURL is the endpoint of enabled scanner id: api.ErrUnknownScanner
+// for an unknown or disabled id, scanning.ErrNoScanner while it has none.
+func scannerURL(st apitypes.Status, id string) (string, error) {
+	for _, s := range st.Scanners {
+		if s.ID == id && s.Enabled {
+			if s.URL == "" {
+				return "", scanning.ErrNoScanner
+			}
+			return s.URL, nil
+		}
+	}
+	return "", api.ErrUnknownScanner
+}
+
+// printers are the API's printers, looked up in the controller's Status.
+type printers struct{ ctrl *controller.Controller }
+
+func (p printers) Printer(id string) (api.Printer, error) {
+	a := printerAdapter{p.ctrl, id}
+	if _, err := a.client(); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// printerAdapter is one printer; each call reads its current URI, so a job
+// watcher follows the printer to a new address.
+type printerAdapter struct {
+	ctrl *controller.Controller
+	id   string
+}
 
 func (p printerAdapter) client() (*printing.Client, error) {
-	uri := p.ctrl.Current().Printer.URI
-	if uri == "" {
-		return nil, api.ErrNoPrinter
+	uri, err := printerURI(p.ctrl.Current(), p.id)
+	if err != nil {
+		return nil, err
 	}
 	return printing.New(uri), nil
 }
@@ -647,17 +763,17 @@ func (p printerAdapter) Formats(ctx context.Context) ([]string, error) {
 	return a.Formats, err
 }
 
-// scanAdapter is the scan service plus the current scanner's capabilities.
+// scanAdapter is the scan service plus each scanner's capabilities.
 type scanAdapter struct {
 	*scanning.Service
-	scanner    func() string
+	status     func() apitypes.Status
 	newScanner func(string) (scanning.Scanner, error)
 }
 
-func (s scanAdapter) Caps(ctx context.Context) (apitypes.ScannerCaps, error) {
-	url := s.scanner()
-	if url == "" {
-		return apitypes.ScannerCaps{}, scanning.ErrNoScanner
+func (s scanAdapter) Caps(ctx context.Context, id string) (apitypes.ScannerCaps, error) {
+	url, err := scannerURL(s.status(), id)
+	if err != nil {
+		return apitypes.ScannerCaps{}, err
 	}
 	sc, err := s.newScanner(url)
 	if err != nil {

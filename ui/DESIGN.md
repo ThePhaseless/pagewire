@@ -1,6 +1,6 @@
 # pagewire UI design system
 
-pagewire runs one household printer and scanner. People reach the web UI from a phone in the hallway ("print this boarding pass"), from a laptop at a desk, and now and then from the homelab owner's screen while setting up the device. Each visit is a short task: print, scan, check why the printer is offline, change a default. Every screen is an Operate surface: the interface should get out of the way, look the same from screen to screen, and keep its personality to small details.
+pagewire runs a household's USB printers and scanners, any number of them, each configured on its own. People reach the web UI from a phone in the hallway ("print this boarding pass"), from a laptop at a desk, and now and then from the homelab owner's screen while setting up the device. Each visit is a short task: print, scan, check why the printer is offline, change a default. Every screen is an Operate surface: the interface should get out of the way, look the same from screen to screen, and keep its personality to small details.
 
 There is no PRODUCT.md yet. The product facts above are the project's own assumptions; nobody was interviewed for them.
 
@@ -41,13 +41,13 @@ Colours are always written as `oklch()`. Do not write raw hex in component or vi
 
 There is one family, Figtree Variable, self-hosted from `@fontsource-variable/figtree` (OFL-1.1). The scale is fixed rem with a ratio of 1.2. Only the page title is fluid, and it clamps between `--text-xl` and `--text-2xl`.
 
-| Token                      | Size         | Use                                            |
-| -------------------------- | ------------ | ---------------------------------------------- |
-| `--text-xs`                | 13 px        | Tab bar labels                                 |
-| `--text-sm`                | 14 px        | Labels, descriptions, badges, helper text      |
-| `--text-md`                | 16 px        | Body, buttons, inputs                          |
-| `--text-lg`                | 19.2 px      | Card titles, h2, the device name in the header |
-| `--text-xl` / `--text-2xl` | 23 / 27.6 px | Page title (h1)                                |
+| Token                      | Size         | Use                                                  |
+| -------------------------- | ------------ | ---------------------------------------------------- |
+| `--text-xs`                | 13 px        | Tab bar labels                                       |
+| `--text-sm`                | 14 px        | Labels, descriptions, badges, helper text            |
+| `--text-md`                | 16 px        | Body, buttons, inputs                                |
+| `--text-lg`                | 19.2 px      | Card titles, h2, the installation name in the header |
+| `--text-xl` / `--text-2xl` | 23 / 27.6 px | Page title (h1)                                      |
 
 Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and `--weight-strong` 650 (headings). Headings use `text-wrap: balance` and slight negative tracking. Body paragraphs stop at 70ch. Numbers in tables, meters and counts use `.tabular` (tabular figures). Monospace is for URIs and code only (`ipp://…`, eSCL URLs).
 
@@ -59,7 +59,7 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 - Shell metrics: `--tabbar-height` 64 px, `--rail-width` 88 px, `--rail-width-wide` 240 px, `--content-max` 72 rem.
 - Safe-area insets (`--safe-*`) pad the header, the tab bar, overlays and toasts (`viewport-fit=cover`).
 - `scroll-padding-block` keeps a focused control clear of the sticky header, the phone tab bar and a visible toast. While a toast shows, `--toast-reserve` adds about one toast's height to the page's bottom padding. While a sticky action bar shows (Settings with unsaved edits), `--bar-reserve` adds its height there and lifts the toast region above it.
-- Button labels wrap rather than overflow, and the device name in the header keeps room for about ten characters; at large text sizes the status badge moves to a second line.
+- Button labels wrap rather than overflow, and the installation name in the header keeps room for about ten characters; at large text sizes the status badge moves to a second line.
 
 ### Motion
 
@@ -78,8 +78,8 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 
 ## App shell (`src/app.tsx`)
 
-- The header is sticky and slightly translucent. It shows the paper-sheet mark, the device name (the config's `name`, or the last good config's while the file is invalid, else "pagewire") and a `StatusBadge` for the device phase: Ready, Starting (breathing), Needs attention, Not set up (no config file), Printer not found (a configured device has been looking for a printer for 5 s), or Offline when the event stream is down.
-- Navigation has four destinations: Status, Print, Scan and Settings.
+- The header is sticky and slightly translucent. It shows the paper-sheet mark, the installation name (the config's `name`, or the last good config's while the file is invalid, else "pagewire") and a `StatusBadge` for the overall phase across every enabled printer and scanner: Ready, Starting (breathing), Needs attention, Nothing in use (every device is switched off), Not set up (no config file), No device found (setup has been looking for 5 s and found nothing that can print or scan), or Offline when the event stream is down.
+- Navigation has four destinations: Status, Print, Scan and Settings. Print is hidden while no printer is enabled, and Scan while no scanner is. Opening a hidden page lands on Status.
   - Under 768 px it is a bottom tab bar, and the current item gets a tinted pill behind its icon.
   - From 768 px it is a compact rail with the icon above the label.
   - From 1024 px it is a 240 px rail with labelled rows, and the current row is tinted.
@@ -89,33 +89,54 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
   - invalid config (red, with the first error's line and message and a link to Settings), except on Settings, which lists the errors itself.
 - A skip link, the toast region, and focus moving to the page `h1` after each navigation.
 - Pages that hold unsaved work block navigation to another page with `useNavigationBlocker` (`src/router.tsx`): links, `navigate()` and Back/Forward wait for the page to confirm. Settings asks in an alert dialog while it has unsaved edits, and also sets `beforeunload`.
-- `document.title` is the page `h1` and the device name ("Print · Hall printer"), or `pagewire` before one is set. In setup the title carries the step ("Step 2 of 5: Name and location") through `PageHeader`'s `documentTitle`.
+- `document.title` is the page `h1` and the installation name ("Print · Home"), or `pagewire` before one is set. In setup the title carries the step ("Step 2 of 5: Name and location") through `PageHeader`'s `documentTitle`.
 
 ## Components (`src/components/ui.tsx`)
 
 They are styled wrappers over react-aria-components 1.22. They take their copy from props or `strings.ts` and never hard-code text.
 
-| Component                                          | Notes                                                                                                                                                                                                                                                  |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Button`                                           | Variants `primary` (one per view, for its main action), `secondary` (default), `quiet` (text-like, accent), `danger`. RAC states: hovered, pressed, disabled, pending.                                                                                 |
-| `LinkButton`                                       | A link that looks like a button, for navigation and downloads.                                                                                                                                                                                         |
-| `TextField`, `NumberField`, `Select`, `RadioGroup` | Label above, description and `errorMessage` below. `errorMessage` marks the field invalid. `Select` and `RadioGroup` take `options: {id, label, description?}[]`. A required `TextField` shows "(required)" after its label.                           |
-| `Checkbox`, `Switch`                               | Use a checkbox for consent (EULAs) and a switch for an immediate on/off setting.                                                                                                                                                                       |
-| `Dialog`                                           | A modal with a title and a Close button. `role="alertdialog"` drops outside-click dismissal. Use it only when the task needs protected focus: confirmations and conflicts. Prefer inline UI everywhere else. `children` may be `(close) => …`.         |
-| `Tabs`, `TabList`, `Tab`, `TabPanel`               | Underline tabs.                                                                                                                                                                                                                                        |
-| `ProgressBar`                                      | Determinate when given `value`, indeterminate otherwise.                                                                                                                                                                                               |
-| `Meter`                                            | `color` takes the marker's own colour.                                                                                                                                                                                                                 |
-| `toast()`, `ToastRegion`                           | Tones are neutral, ok and problem. Problems leave after 10 s or when the route changes; others leave after 5 s. Timers pause while a toast is hovered or focused. The region sits above the tab bar on phones and bottom-right from 768 px.            |
-| `DropZone`, `FileTrigger`                          | Drop target (tinted while dragging) and file picker.                                                                                                                                                                                                   |
-| `Disclosure`                                       | A heading-level-3 trigger with a chevron. "Technical details" disclosures hold jargon (USB IDs, matched rule, mode) on Status and in setup.                                                                                                            |
-| `EulaAccept` (`src/components/EulaAccept.tsx`)     | One vendor licence: progress while the device agent fetches the archive, the exact text in a scrollable, focusable region, the failure message, and a checkbox that records the text's sha256. A changed text asks again.                              |
-| `ConflictDialog`                                   | The 412 dialog in Settings: your changes side by side with the file, plus what else the file changed.                                                                                                                                                  |
-| `Card`                                             | A sheet with an optional title (h2 by default) and actions. It is a container-query container, so lay out its contents with `@container`. Never nest cards. `tone="problem"` is for errors that block the card's job.                                  |
-| `StatusBadge`                                      | A dot and a text label (colour never carries meaning alone). Tones are ok, busy (waiting), active (in progress, the accent colour), problem and idle. `pulse` only while work is in flight.                                                            |
-| `PageHeader`                                       | Every view starts with one: the `h1` (the focus target after navigation), an optional description, and actions.                                                                                                                                        |
-| `EmptyState`                                       | Says what will appear and how to make it appear, with an optional action.                                                                                                                                                                              |
-| `InlineError`                                      | `role="alert"` with the problem and the recovery (`problemMessage(err)` from the client), plus an optional retry.                                                                                                                                      |
-| `Icon`                                             | One authored 24 px set with a 1.75 stroke: status, print, scan, settings, chevronDown, check, plus, minus, close, alert, offline, upload, download, copy, file. Add new icons in the same grid and stroke. Never use emoji or Unicode glyphs as icons. |
+| Component                                          | Notes                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Button`                                           | Variants `primary` (one per view, for its main action), `secondary` (default), `quiet` (text-like, accent), `danger`. RAC states: hovered, pressed, disabled, pending.                                                                                                                  |
+| `LinkButton`                                       | A link that looks like a button, for navigation and downloads.                                                                                                                                                                                                                          |
+| `TextField`, `NumberField`, `Select`, `RadioGroup` | Label above, description and `errorMessage` below. `errorMessage` marks the field invalid. `Select` and `RadioGroup` take `options: {id, label, description?}[]`. A required `TextField` shows "(required)" after its label. Option kinds never use `RadioGroup` (see Option controls). |
+| `Checkbox`, `Switch`                               | Use a checkbox for consent (EULAs) and a switch for an immediate on/off setting.                                                                                                                                                                                                        |
+| `Dialog`                                           | A modal with a title and a Close button. `role="alertdialog"` drops outside-click dismissal. Use it only when the task needs protected focus: confirmations and conflicts. Prefer inline UI everywhere else. `children` may be `(close) => …`.                                          |
+| `Tabs`, `TabList`, `Tab`, `TabPanel`               | Underline tabs.                                                                                                                                                                                                                                                                         |
+| `ProgressBar`                                      | Determinate when given `value`, indeterminate otherwise.                                                                                                                                                                                                                                |
+| `Meter`                                            | `color` takes the marker's own colour.                                                                                                                                                                                                                                                  |
+| `toast()`, `ToastRegion`                           | Tones are neutral, ok and problem. Problems leave after 10 s or when the route changes; others leave after 5 s. Timers pause while a toast is hovered or focused. The region sits above the tab bar on phones and bottom-right from 768 px.                                             |
+| `DropZone`, `FileTrigger`                          | Drop target (tinted while dragging) and file picker.                                                                                                                                                                                                                                    |
+| `Disclosure`                                       | A heading-level-3 trigger with a chevron. "Technical details" disclosures hold jargon (USB IDs, matched rule, mode) on Status and in setup.                                                                                                                                             |
+| `EulaAccept` (`src/components/EulaAccept.tsx`)     | One vendor licence: progress while the device agent fetches the archive, the exact text in a scrollable, focusable region, the failure message, and a checkbox that records the text's sha256. A changed text asks again.                                                               |
+| `ConflictDialog`                                   | The 412 dialog in Settings: your changes side by side with the file, plus what else the file changed.                                                                                                                                                                                   |
+| `Card`                                             | A sheet with an optional title (h2 by default) and actions. It is a container-query container, so lay out its contents with `@container`. Never nest cards. `tone="problem"` is for errors that block the card's job.                                                                   |
+| `StatusBadge`                                      | A dot and a text label (colour never carries meaning alone). Tones are ok, busy (waiting), active (in progress, the accent colour), problem and idle. `pulse` only while work is in flight.                                                                                             |
+| `PageHeader`                                       | Every view starts with one: the `h1` (the focus target after navigation), an optional description, and actions.                                                                                                                                                                         |
+| `EmptyState`                                       | Says what will appear and how to make it appear, with an optional action.                                                                                                                                                                                                               |
+| `InlineError`                                      | `role="alert"` with the problem and the recovery (`problemMessage(err)` from the client), plus an optional retry.                                                                                                                                                                       |
+| `Icon`                                             | One authored 24 px set with a 1.75 stroke: status, print, scan, settings, chevronDown, check, plus, minus, close, alert, offline, upload, download, copy, file. Add new icons in the same grid and stroke. Never use emoji or Unicode glyphs as icons.                                  |
+
+## Patterns
+
+### Status dashboard (`src/views/Status.tsx`)
+
+Below 1024 px the page is one column. From 1024 px it has two tracks, `minmax(0, 2fr) minmax(18rem, 1fr)`. The wide track stacks one full-width card per enabled printer, then one per enabled scanner. The narrow track holds Recent print jobs, Recent scans and System (the settings file and open reconcile problems). Cards never sit in a multi-column grid, so rows are never ragged, and the content keeps the shell's maximum width.
+
+A device card reads top to bottom:
+
+- The heading has the kind icon, the entry's name and a badge. The badge shows the device's phase, and once the device answers it shows what the device is doing (Ready, Printing, Stopped).
+- Below it come the location, the phase message (an `InlineError` when the phase is error) and the option warnings. Warnings are sentences built from labels (`warningText`), never raw keywords.
+- Then the device's one action, Print or Scan, which links to its page with `?printer=<id>` or `?scanner=<id>`, and for printers the printer's reasons and supply meters.
+- Last come two collapsed disclosures: "Connect a device" (that device's own addresses and DNS-SD name, with the steps per system) and "Technical details" (USB IDs, node, driver family, driver, how it was chosen, SANE backends, the device's own advertised services and vendor files).
+
+A disclosure draws only its bottom rule. The first disclosure in a card gets a top rule, and a section that follows a disclosure drops its own, so one line separates each part.
+
+Problems that belong to no single card, such as a failed workload or an apply error, appear once above the cards. With no enabled device the wide track shows an empty state that links to "Detect and add devices".
+
+### Option controls (`src/components/OptionField.tsx`)
+
+Every enumerated option is a dropdown: the house `Select`, never a radio group, on every page. Values are labelled through `src/lib/labels.ts`. Job pages (Print, Scan) hide an option the device cannot change: one it does not report, one with a single value, or every option while the device is not connected. Defaults pages (Settings, the setup wizard's defaults step) show every option, and grey out the ones the device cannot change. The reason ("This printer only prints one-sided.") is the control's description, linked with `aria-describedby`: it shows as text under the control, and screen readers announce it with the control. The first entry of a defaults dropdown is the device's own default, and choosing it removes the key from the config.
 
 ## Copy
 

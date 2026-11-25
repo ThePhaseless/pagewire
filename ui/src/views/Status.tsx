@@ -1,10 +1,12 @@
-// The Status dashboard: device, printer, scanner, jobs, config, problems and how to connect.
-import { useEffect, useState } from "react";
-import { problemMessage } from "../api/client";
-import { useJobs, usePrinterNotFound, useStatus } from "../api/events";
+// The Status dashboard: one card per enabled printer and scanner, with recent jobs, recent scans
+// and the system state beside them.
+import { useContext, useEffect, useState } from "react";
+import { api, problemMessage } from "../api/client";
+import { EventsContext, useJobs, useStatus } from "../api/events";
 import {
   Button,
   Card,
+  DeviceStatusBadge,
   Disclosure,
   EmptyState,
   Icon,
@@ -20,23 +22,27 @@ import {
   type Tone,
   toast,
 } from "../components/ui";
-import type { Job, Status as StatusDTO } from "../gen/api";
+import type {
+  Job,
+  PrinterConnect,
+  Scan,
+  ScannerConnect,
+  Status as StatusDTO,
+  StatusPrinter,
+  StatusScanner,
+  StatusWorkload,
+  USBDevice,
+  Warning,
+} from "../gen/api";
+import { enabled } from "../lib/devices";
+import { type DeviceRole, warningText } from "../lib/labels";
 import { strings } from "../strings";
 import { statusStrings as t } from "./Status.strings";
 import "./Status.css";
 
-const RECENT_JOBS = 5;
+const RECENT = 5;
 
-const phaseTone: Record<StatusDTO["device"]["phase"], Tone> = {
-  none: "idle",
-  probing: "busy",
-  deploying: "busy",
-  ready: "ok",
-  degraded: "problem",
-  error: "problem",
-};
-
-const endpointTone: Record<StatusDTO["printer"]["state"], Tone> = {
+const endpointTone: Record<StatusPrinter["state"], Tone> = {
   idle: "ok",
   processing: "busy",
   stopped: "problem",
@@ -51,6 +57,13 @@ const jobTone: Record<Job["state"], Tone> = {
   aborted: "problem",
   held: "idle",
   stopped: "problem",
+};
+
+const scanTone: Record<Scan["state"], Tone> = {
+  scanning: "active",
+  completed: "ok",
+  failed: "problem",
+  canceled: "idle",
 };
 
 const blobTone = { installed: "ok", missing: "idle", failed: "problem", disabled: "idle" } as const;
@@ -76,36 +89,175 @@ export function reasonText(keyword: string): string | null {
 // Marker colours come from the printer; only plain #rrggbb values reach the style prop.
 const markerColor = (c: string) => (/^#[0-9a-f]{6}$/i.test(c) ? c : undefined);
 
-function DeviceCard({ device }: { device: StatusDTO["device"] }) {
-  const notFound = usePrinterNotFound();
-  const d = device.decision;
-  const usb = d?.device;
-  const family = (id: string) => t.device.families[id] ?? id;
-  const usbName = usb && (`${usb.manufacturer} ${usb.product}`.trim() || t.device.unnamedDevice);
-  const tone = notFound ? "problem" : phaseTone[device.phase];
+const family = (id: string) => strings.device.families[id] ?? id;
+
+/**
+ * The node a printer or scanner runs on, and that node's workload. Simulated entries have no
+ * detected USB device, so they get the only workload when there is exactly one.
+ */
+function placeOf(status: StatusDTO, role: DeviceRole, id: string) {
+  const found = status.devices.find((d) => (role === "printer" ? d.printerId : d.scannerId) === id);
+  const workload = found
+    ? status.workloads.find((w) => w.node === found.node)
+    : status.workloads.length === 1
+      ? status.workloads[0]
+      : undefined;
+  return { node: found?.node ?? "", workload };
+}
+
+/** The card heading: kind icon and the entry's name. */
+function DeviceTitle({ kind, name }: { kind: DeviceRole; name: string }) {
+  return (
+    <span className="status-device-title">
+      <Icon name={kind === "printer" ? "print" : "scan"} size={22} />
+      <span>{name}</span>
+    </span>
+  );
+}
+
+/** The phase, or once the device answers, what it is doing (Ready, Printing, Stopped). */
+function DeviceBadge({
+  device,
+  kind,
+}: {
+  device: StatusPrinter | StatusScanner;
+  kind: DeviceRole;
+}) {
+  if (device.phase !== "ready" || !device.available)
+    return <DeviceStatusBadge phase={device.phase} />;
+  const words = kind === "printer" ? t.printer.state : t.scanner.state;
+  return <StatusBadge tone={endpointTone[device.state]}>{words[device.state]}</StatusBadge>;
+}
+
+/** Location, the phase message (an alert in phase error) and the option warnings. */
+function DeviceIntro({
+  device,
+  kind,
+}: {
+  device: StatusPrinter | StatusScanner;
+  kind: DeviceRole;
+}) {
+  return (
+    <>
+      {device.location && <p className="status-subtle">{device.location}</p>}
+      {device.message &&
+        (device.phase === "error" ? (
+          <InlineError>{device.message}</InlineError>
+        ) : (
+          <p className="status-message">{device.message}</p>
+        ))}
+      <Warnings warnings={device.warnings} kind={kind} />
+    </>
+  );
+}
+
+function Warnings({ warnings, kind }: { warnings: Warning[]; kind: DeviceRole }) {
+  if (warnings.length === 0) return null;
+  return (
+    <section className="status-section">
+      <h3>{t.device.warningsLabel}</h3>
+      <ul className="status-list">
+        {warnings.map((w) => (
+          <li key={`${w.option}:${w.value}:${w.message}`}>{warningText(w, kind)}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function usbName(usb: USBDevice) {
+  return `${usb.manufacturer} ${usb.product}`.trim() || t.device.unnamedDevice;
+}
+
+/** The shared head of Technical details: which device, its USB IDs and its node. */
+function DeviceFacts({ usb, node }: { usb: USBDevice | null | undefined; node: string }) {
+  return (
+    <>
+      <div>
+        <dt>{t.device.deviceLabel}</dt>
+        <dd>{usb ? usbName(usb) : t.device.simulatedDevice}</dd>
+      </div>
+      {usb && (
+        <div>
+          <dt>{t.device.usbLabel}</dt>
+          <dd>
+            {[
+              t.device.usbIds(usb.vendorId, usb.productId),
+              usb.serial && t.device.serial(usb.serial),
+            ]
+              .filter(Boolean)
+              .join(", ")}
+          </dd>
+        </div>
+      )}
+      {node && (
+        <div>
+          <dt>{t.device.nodeLabel}</dt>
+          <dd>{node}</dd>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** This device's own DNS-SD services among those its workload advertises. */
+function Advertised({ workload, name }: { workload?: StatusWorkload; name: string }) {
+  const services = name ? (workload?.advertised ?? []).filter((s) => s.name === name) : [];
+  return (
+    <section className="status-section">
+      <h3>{t.advertised.title}</h3>
+      {services.length === 0 ? (
+        <p className="status-subtle">{t.advertised.notDiscoverable}</p>
+      ) : (
+        <>
+          <p className="status-check">
+            <Icon name="check" size={18} />
+            {t.advertised.discoverable}
+          </p>
+          <ul className="status-list">
+            {services.map((s, i) => (
+              // Avahi can list one service once per interface, so entries repeat.
+              // biome-ignore lint/suspicious/noArrayIndexKey: entries have no unique id
+              <li key={i}>
+                <span>{`${t.advertised.types[s.type] ?? s.type}: ${s.name}`}</span>
+                <span className="status-subtle tabular">{t.advertised.port(s.port)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+function PrinterCard({ printer, status }: { printer: StatusPrinter; status: StatusDTO }) {
+  const { node, workload } = placeOf(status, "printer", printer.id);
+  const d = printer.decision;
+  const usb = printer.device ?? d?.device;
+  const reasons = [
+    ...new Set(printer.reasons.map(reasonText).filter((r): r is string => r !== null)),
+  ];
+  // shortcut: a vendor file is matched to the printer by its EULA id (true of every catalog blob);
+  // match on the blob's own EULA field once BlobStatus carries it.
+  const eulas = d ? [...d.requiredEulas, ...d.optionalEulas] : [];
+  const blobs = (workload?.blobs ?? []).filter((b) => eulas.includes(b.id));
   return (
     <Card
-      title={t.device.title}
-      actions={
-        <StatusBadge tone={tone} pulse={tone === "busy"}>
-          {notFound ? t.device.notFound : t.device.phase[device.phase]}
-        </StatusBadge>
-      }
+      className="status-device"
+      title={<DeviceTitle kind="printer" name={printer.name} />}
+      actions={<DeviceBadge device={printer} kind="printer" />}
     >
-      {device.message && device.phase !== "error" && (
-        <p className="status-message">{device.message}</p>
-      )}
-      {notFound && <p className="status-message">{strings.plugInHint}</p>}
+      <DeviceIntro device={printer} kind="printer" />
       {d?.rule === "none" && (
         <section className="status-section">
-          <h3>{t.device.noDriver.title}</h3>
+          <h3>{strings.device.noDriver.title}</h3>
           <p className="status-message">
             {usb?.deviceId ? (
               <>
-                {t.device.noDriver.deviceId} <code>{usb.deviceId}</code>
+                {strings.device.noDriver.deviceId} <code>{usb.deviceId}</code>
               </>
             ) : (
-              t.device.noDriver.noDeviceId
+              strings.device.noDriver.noDeviceId
             )}
           </p>
           <div>
@@ -113,124 +265,6 @@ function DeviceCard({ device }: { device: StatusDTO["device"] }) {
           </div>
         </section>
       )}
-      <dl className="status-facts">
-        <div>
-          <dt>{t.device.deviceLabel}</dt>
-          <dd>
-            {!d
-              ? t.device.noDecision
-              : !usbName
-                ? t.device.simulatedDevice
-                : device.inventory?.simulated
-                  ? t.device.simulatedName(usbName)
-                  : usbName}
-          </dd>
-        </div>
-      </dl>
-      <Disclosure title={strings.technicalDetails}>
-        <dl className="status-facts">
-          <div>
-            <dt>{t.device.modeLabel}</dt>
-            <dd>{t.device.mode[device.mode]}</dd>
-          </div>
-          {usb && (
-            <div>
-              <dt>{t.device.usbLabel}</dt>
-              <dd>
-                {[
-                  t.device.usbIds(usb.vendorId, usb.productId),
-                  usb.serial && t.device.serial(usb.serial),
-                ]
-                  .filter(Boolean)
-                  .join(", ")}
-              </dd>
-            </div>
-          )}
-          {d && (
-            <>
-              <div>
-                <dt>{t.device.ruleLabel}</dt>
-                <dd>{t.device.rules[d.rule]}</dd>
-              </div>
-              <div>
-                <dt>{t.device.printerFamilyLabel}</dt>
-                <dd>{d.printer ? family(d.printer) : t.device.noFamily}</dd>
-              </div>
-              <div>
-                <dt>{t.device.driverLabel}</dt>
-                <dd>
-                  {d.driverDescription ||
-                    d.driver ||
-                    // A PAPPL family without a driver name runs its own automatic choice.
-                    (d.printer && d.printer !== "ipp-usb" && d.printer !== "sim"
-                      ? t.device.appDriver
-                      : t.device.noFamily)}
-                </dd>
-              </div>
-              <div>
-                <dt>{t.device.scannerFamilyLabel}</dt>
-                <dd>{d.scanner ? family(d.scanner) : t.device.noFamily}</dd>
-              </div>
-            </>
-          )}
-        </dl>
-      </Disclosure>
-      {device.blobs.length > 0 && (
-        <section className="status-section">
-          <h3>{t.device.blobsTitle}</h3>
-          <ul className="status-list">
-            {device.blobs.map((b) => (
-              <li key={b.id}>
-                <span className="status-row">
-                  <span>{`${b.id} ${b.version}`}</span>
-                  <StatusBadge tone={blobTone[b.state]}>{t.device.blobState[b.state]}</StatusBadge>
-                </span>
-                {b.message && <span className="status-subtle">{b.message}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <section className="status-section">
-        <h3>{t.advertised.title}</h3>
-        {device.advertised.length === 0 ? (
-          <p className="status-subtle">{t.advertised.notDiscoverable}</p>
-        ) : (
-          <>
-            <p className="status-check">
-              <Icon name="check" size={18} />
-              {t.advertised.discoverable}
-            </p>
-            <ul className="status-list">
-              {device.advertised.map((s, i) => (
-                // Avahi can list one service once per interface, so names repeat.
-                // biome-ignore lint/suspicious/noArrayIndexKey: entries have no unique id
-                <li key={i}>
-                  <span>{`${t.advertised.types[s.type] ?? s.type}: ${s.name}`}</span>
-                  <span className="status-subtle tabular">{t.advertised.port(s.port)}</span>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
-    </Card>
-  );
-}
-
-function PrinterCard({ printer }: { printer: StatusDTO["printer"] }) {
-  const reasons = [
-    ...new Set(printer.reasons.map(reasonText).filter((r): r is string => r !== null)),
-  ];
-  return (
-    <Card
-      title={t.printer.title}
-      actions={
-        <StatusBadge tone={endpointTone[printer.state]}>
-          {t.printer.state[printer.state]}
-        </StatusBadge>
-      }
-    >
       {reasons.length > 0 && (
         <section className="status-section">
           <h3>{t.printer.reasonsLabel}</h3>
@@ -243,7 +277,9 @@ function PrinterCard({ printer }: { printer: StatusDTO["printer"] }) {
       )}
       {printer.available ? (
         <div>
-          <LinkButton href="/print">{t.printer.open}</LinkButton>
+          <LinkButton href={`/print?printer=${encodeURIComponent(printer.id)}`}>
+            {t.printer.open}
+          </LinkButton>
         </div>
       ) : (
         <p className="status-subtle">{t.printer.unavailable}</p>
@@ -270,90 +306,102 @@ function PrinterCard({ printer }: { printer: StatusDTO["printer"] }) {
           )}
         </section>
       )}
+      <Connect kind="printer" connect={printer.connect} />
+      <Disclosure title={strings.technicalDetails}>
+        <dl className="status-facts">
+          <DeviceFacts usb={usb} node={node} />
+          {d && (
+            <>
+              <div>
+                <dt>{t.device.ruleLabel}</dt>
+                <dd>{strings.device.rules[d.rule]}</dd>
+              </div>
+              <div>
+                <dt>{t.device.printerFamilyLabel}</dt>
+                <dd>{d.family ? family(d.family) : t.device.noFamily}</dd>
+              </div>
+              <div>
+                <dt>{t.device.driverLabel}</dt>
+                <dd>
+                  {d.driverDescription ||
+                    d.driver ||
+                    // A PAPPL family without a driver name runs its own automatic choice.
+                    (d.family && d.family !== "ipp-usb" && d.family !== "sim"
+                      ? t.device.appDriver
+                      : t.device.noFamily)}
+                </dd>
+              </div>
+            </>
+          )}
+        </dl>
+        <Advertised workload={workload} name={printer.connect.dnssdName} />
+        {blobs.length > 0 && (
+          <section className="status-section">
+            <h3>{t.device.blobsTitle}</h3>
+            <ul className="status-list">
+              {blobs.map((b) => (
+                <li key={b.id}>
+                  <span className="status-row">
+                    <span>{`${b.id} ${b.version}`}</span>
+                    <StatusBadge tone={blobTone[b.state]}>
+                      {t.device.blobState[b.state]}
+                    </StatusBadge>
+                  </span>
+                  {b.message && <span className="status-subtle">{b.message}</span>}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </Disclosure>
     </Card>
   );
 }
 
-function ScannerCard({ scanner }: { scanner: StatusDTO["scanner"] }) {
+function ScannerCard({ scanner, status }: { scanner: StatusScanner; status: StatusDTO }) {
+  const { node, workload } = placeOf(status, "scanner", scanner.id);
+  const d = scanner.decision;
   return (
     <Card
-      title={t.scanner.title}
-      actions={
-        <StatusBadge tone={endpointTone[scanner.state]}>
-          {t.scanner.state[scanner.state]}
-        </StatusBadge>
-      }
+      className="status-device"
+      title={<DeviceTitle kind="scanner" name={scanner.name} />}
+      actions={<DeviceBadge device={scanner} kind="scanner" />}
     >
+      <DeviceIntro device={scanner} kind="scanner" />
       {scanner.available ? (
         <div>
-          <LinkButton href="/scan">{t.scanner.open}</LinkButton>
+          <LinkButton href={`/scan?scanner=${encodeURIComponent(scanner.id)}`}>
+            {t.scanner.open}
+          </LinkButton>
         </div>
       ) : (
         <p className="status-subtle">{t.scanner.unavailable}</p>
       )}
-    </Card>
-  );
-}
-
-function JobsCard({ available }: { available: boolean }) {
-  const { jobs, error } = useJobs();
-  const recent = jobs.slice(0, RECENT_JOBS);
-  return (
-    <Card
-      title={t.jobs.title}
-      actions={
-        jobs.length > 0 && (
-          <LinkButton variant="quiet" href="/print">
-            {t.jobs.seeAll}
-          </LinkButton>
-        )
-      }
-    >
-      {available && error ? <InlineError>{problemMessage(error)}</InlineError> : null}
-      {recent.length > 0 ? (
-        <ul className="status-list">
-          {recent.map((j) => (
-            <li key={j.id}>
-              <span className="status-row">
-                <span className="status-job-name">{j.name}</span>
-                <StatusBadge tone={jobTone[j.state]} pulse={j.state === "processing"}>
-                  {t.jobs.state[j.state]}
-                </StatusBadge>
-              </span>
-              <span className="status-subtle tabular">{formatTime(j.createdAt)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <EmptyState icon="print" title={t.jobs.empty}>
-          {available ? t.jobs.emptyBody : t.jobs.unavailable}
-        </EmptyState>
-      )}
-    </Card>
-  );
-}
-
-function ConfigCard({ config }: { config: StatusDTO["config"] }) {
-  const changed = formatTime(config.changedAt);
-  const tone: Tone =
-    config.state === "applied" ? "ok" : config.state === "invalid" ? "problem" : "idle";
-  return (
-    <Card
-      title={t.config.title}
-      actions={<StatusBadge tone={tone}>{t.config.state[config.state]}</StatusBadge>}
-    >
-      {changed && <p className="status-subtle">{t.config.changedAt(changed)}</p>}
-      {config.state === "invalid" && config.errors.length > 0 && (
-        <ul className="status-list">
-          {config.errors.map((e, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: errors are a fixed list per Status
-            <li key={i}>{t.config.error(e.line, e.column, e.message)}</li>
-          ))}
-        </ul>
-      )}
-      <div>
-        <LinkButton href="/settings">{t.config.openSettings}</LinkButton>
-      </div>
+      <Connect kind="scanner" connect={scanner.connect} />
+      <Disclosure title={strings.technicalDetails}>
+        <dl className="status-facts">
+          <DeviceFacts usb={scanner.device ?? d?.device} node={node} />
+          {d && (
+            <>
+              <div>
+                <dt>{t.device.ruleLabel}</dt>
+                <dd>{strings.device.scannerRules[d.rule]}</dd>
+              </div>
+              <div>
+                <dt>{t.device.scannerFamilyLabel}</dt>
+                <dd>{d.family ? family(d.family) : t.device.noFamily}</dd>
+              </div>
+              {d.saneBackends.length > 0 && (
+                <div>
+                  <dt>{t.device.saneBackendsLabel}</dt>
+                  <dd>{d.saneBackends.join(", ")}</dd>
+                </div>
+              )}
+            </>
+          )}
+        </dl>
+        <Advertised workload={workload} name={scanner.connect.dnssdName} />
+      </Disclosure>
     </Card>
   );
 }
@@ -404,11 +452,19 @@ function Addresses({ label, values }: { label: string; values: string[] }) {
 
 const osKeys = ["windows", "apple", "android", "linux"] as const;
 
-function ConnectCard({ connect }: { connect: StatusDTO["connect"] }) {
-  const name = connect.dnssdName || t.connect.thisPrinter;
+type ConnectProps =
+  | { kind: "printer"; connect: PrinterConnect }
+  | { kind: "scanner"; connect: ScannerConnect };
+
+/** How to reach this one device from a phone or computer: its steps and its own addresses. */
+function Connect(props: ConnectProps) {
+  const { connect } = props;
+  const printer = props.kind === "printer";
+  const name = connect.dnssdName || (printer ? t.connect.thisPrinter : t.connect.thisScanner);
+  const steps = printer ? t.connect.printerSteps : t.connect.scannerSteps;
   return (
-    <Card title={t.connect.title} className="status-connect">
-      <p className="status-subtle">{t.connect.intro}</p>
+    <Disclosure title={t.connect.title}>
+      <p className="status-subtle">{printer ? t.connect.printerIntro : t.connect.scannerIntro}</p>
       <dl className="status-facts">
         <div>
           <dt>{t.connect.nameLabel}</dt>
@@ -426,7 +482,7 @@ function ConnectCard({ connect }: { connect: StatusDTO["connect"] }) {
         {osKeys.map((k) => (
           <TabPanel key={k} id={k}>
             <ol className="status-steps">
-              {t.connect.steps[k](name).map((step) => (
+              {steps[k](name).map((step) => (
                 <li key={step}>{step}</li>
               ))}
             </ol>
@@ -436,13 +492,223 @@ function ConnectCard({ connect }: { connect: StatusDTO["connect"] }) {
       <section className="status-section">
         <h3>{t.connect.manualTitle}</h3>
         <dl className="status-addresses">
-          <Addresses label={t.connect.printerAddress} values={connect.ippUris} />
-          <Addresses label={t.connect.scannerAddress} values={connect.esclUrls} />
+          {props.kind === "printer" ? (
+            <Addresses label={t.connect.printerAddress} values={props.connect.ippUris} />
+          ) : (
+            <Addresses label={t.connect.scannerAddress} values={props.connect.esclUrls} />
+          )}
         </dl>
         <p className="status-subtle">{t.connect.tailscale}</p>
       </section>
+    </Disclosure>
+  );
+}
+
+/** One printer's latest jobs; `named` adds the printer's name for a card listing several. */
+function PrinterJobs({ printer, named }: { printer: StatusPrinter; named: boolean }) {
+  const { jobs, error } = useJobs(printer.id);
+  const recent = jobs.slice(0, RECENT);
+  const body = (
+    <>
+      {printer.available && error ? <InlineError>{problemMessage(error)}</InlineError> : null}
+      {recent.length > 0 ? (
+        <ul className="status-list">
+          {recent.map((j) => (
+            <li key={j.id}>
+              <span className="status-row">
+                <span className="status-job-name">{j.name}</span>
+                <StatusBadge tone={jobTone[j.state]} pulse={j.state === "processing"}>
+                  {t.jobs.state[j.state]}
+                </StatusBadge>
+              </span>
+              <span className="status-subtle tabular">{formatTime(j.createdAt)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : named ? (
+        <p className="status-subtle">{t.jobs.empty}</p>
+      ) : (
+        <EmptyState icon="print" title={t.jobs.empty}>
+          {printer.available ? t.jobs.emptyBody : t.jobs.unavailable}
+        </EmptyState>
+      )}
+      {jobs.length > 0 && (
+        <div>
+          <LinkButton
+            variant="quiet"
+            href={`/print?printer=${encodeURIComponent(printer.id)}`}
+            aria-label={named ? t.jobs.seeAllOf(printer.name) : undefined}
+          >
+            {t.jobs.seeAll}
+          </LinkButton>
+        </div>
+      )}
+    </>
+  );
+  if (!named) return body;
+  return (
+    <section className="status-section">
+      <h3>{printer.name}</h3>
+      {body}
+    </section>
+  );
+}
+
+function JobsCard({ printers }: { printers: StatusPrinter[] }) {
+  return (
+    <Card title={t.jobs.title}>
+      {printers.map((p) => (
+        <PrinterJobs key={p.id} printer={p} named={printers.length > 1} />
+      ))}
     </Card>
   );
+}
+
+const newestScans = (list: Scan[]) =>
+  [...list].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, RECENT);
+
+/** The latest scans: GET /scans, then `scan` events by id, reloaded on SSE reconnect. */
+function useRecentScans() {
+  const store = useContext(EventsContext);
+  const [scans, setScans] = useState<Scan[]>([]);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      api.getScans().then(
+        (list) => {
+          if (!live) return;
+          setScans(newestScans(list));
+          setError(null);
+        },
+        (err) => {
+          if (live) setError(err);
+        },
+      );
+    void load();
+    const offReconnect = store.onReconnect(() => void load());
+    const offScan = store.on("scan", (s) =>
+      setScans((prev) => newestScans([s, ...prev.filter((p) => p.id !== s.id)])),
+    );
+    return () => {
+      live = false;
+      offReconnect();
+      offScan();
+    };
+  }, [store]);
+  return { scans, error };
+}
+
+function ScansCard({ scanners }: { scanners: StatusScanner[] }) {
+  const { scans, error } = useRecentScans();
+  const nameOf = (id: string) => scanners.find((s) => s.id === id)?.name ?? id;
+  return (
+    <Card title={t.scans.title}>
+      {error ? <InlineError>{problemMessage(error)}</InlineError> : null}
+      {scans.length > 0 ? (
+        <>
+          <ul className="status-list">
+            {scans.map((s) => (
+              <li key={s.id}>
+                <span className="status-row">
+                  <span className="status-job-name">{nameOf(s.scanner)}</span>
+                  <StatusBadge tone={scanTone[s.state]} pulse={s.state === "scanning"}>
+                    {t.scans.state[s.state]}
+                  </StatusBadge>
+                </span>
+                <span className="status-row status-subtle tabular">
+                  <span>{formatTime(s.createdAt)}</span>
+                  {s.pages > 0 && <span>{t.scans.pages(s.pages)}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div>
+            <LinkButton variant="quiet" href="/scan">
+              {t.scans.seeAll}
+            </LinkButton>
+          </div>
+        </>
+      ) : (
+        !error && (
+          <EmptyState icon="scan" title={t.scans.empty}>
+            {t.scans.emptyBody}
+          </EmptyState>
+        )
+      )}
+    </Card>
+  );
+}
+
+function reconcileLabel(item: string) {
+  if (item.startsWith("workload/")) return t.reconcile.workload(item.slice("workload/".length));
+  return t.reconcile.items[item] ?? item;
+}
+
+/** The settings file and the control plane's reconcile problems. */
+function SystemCard({ status }: { status: StatusDTO }) {
+  const { config } = status;
+  const changed = formatTime(config.changedAt);
+  const tone: Tone =
+    config.state === "applied" ? "ok" : config.state === "invalid" ? "problem" : "idle";
+  const problems = status.reconcile.filter((r) => !r.ok);
+  return (
+    <Card title={t.system.title}>
+      <div className="status-row">
+        <span>{t.system.configLabel}</span>
+        <StatusBadge tone={tone}>{t.config.state[config.state]}</StatusBadge>
+      </div>
+      {changed && <p className="status-subtle">{t.config.changedAt(changed)}</p>}
+      {config.state === "invalid" && config.errors.length > 0 && (
+        <ul className="status-list">
+          {config.errors.map((e, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: errors are a fixed list per Status
+            <li key={i}>{t.config.error(e.line, e.column, e.message)}</li>
+          ))}
+        </ul>
+      )}
+      {problems.length > 0 && (
+        <section className="status-section">
+          <h3>{t.reconcile.title}</h3>
+          <ul className="status-list">
+            {problems.map((p) => (
+              <li key={p.item}>
+                <span className="status-problem-item">{reconcileLabel(p.item)}</span>
+                <span>{p.message}</span>
+                <span className="status-subtle tabular">{formatTime(p.at)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      <div>
+        <LinkButton href="/settings">{t.config.openSettings}</LinkButton>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Messages no device card explains, shown once above the cards: a workload that is not running
+ * (failed, or waiting such as unschedulable) and an overall error message (an observe or apply
+ * error). Text an enabled card already shows is left out. Only failures are alerts.
+ */
+function workloadProblems(
+  status: StatusDTO,
+  devices: (StatusPrinter | StatusScanner)[],
+): { text: string; failed: boolean }[] {
+  const multi = status.workloads.length > 1;
+  const shown = new Set(devices.map((d) => d.message));
+  const lines: { text: string; failed: boolean }[] = [];
+  for (const w of status.workloads) {
+    if (w.phase === "running" || !w.message || shown.has(w.message)) continue;
+    shown.add(w.message);
+    const text = multi && w.node ? `${t.workloadOn(w.node)}: ${w.message}` : w.message;
+    lines.push({ text, failed: w.phase === "failed" });
+  }
+  if (status.phase === "error" && status.message && !shown.has(status.message))
+    lines.push({ text: status.message, failed: true });
+  return lines;
 }
 
 export function Status() {
@@ -455,36 +721,60 @@ export function Status() {
       </div>
     );
   }
-  const problems = status.reconcile.filter((r) => !r.ok);
+  const printers = enabled(status.printers);
+  const scanners = enabled(status.scanners);
+  const problems = workloadProblems(status, [...printers, ...scanners]);
+  const failures = problems.filter((p) => p.failed);
   return (
     <div className="status-view">
       <PageHeader title={strings.nav.status} description={t.description} />
-      {status.device.phase === "error" && (
+      {failures.length > 0 && (
         <InlineError>
-          <p className="status-error-title">{t.deviceError}</p>
-          {status.device.message && <p>{status.device.message}</p>}
+          <p className="status-error-title">{t.workloadError}</p>
+          {failures.map((p) => (
+            <p key={p.text}>{p.text}</p>
+          ))}
         </InlineError>
       )}
-      <div className="status-grid">
-        <PrinterCard printer={status.printer} />
-        <ScannerCard scanner={status.scanner} />
-        <JobsCard available={status.printer.available} />
-        <DeviceCard device={status.device} />
-        <ConfigCard config={status.config} />
-        {problems.length > 0 && (
-          <Card title={t.reconcile.title} tone="problem">
-            <ul className="status-list">
-              {problems.map((p) => (
-                <li key={p.item}>
-                  <span className="status-problem-item">{t.reconcile.items[p.item] ?? p.item}</span>
-                  <span>{p.message}</span>
-                  <span className="status-subtle tabular">{formatTime(p.at)}</span>
-                </li>
+      {problems
+        .filter((p) => !p.failed)
+        .map((p) => (
+          <p key={p.text} className="status-message">
+            {p.text}
+          </p>
+        ))}
+      <div className="status-layout">
+        <div className="status-main">
+          {printers.length + scanners.length === 0 ? (
+            <Card>
+              <EmptyState
+                icon="status"
+                title={t.empty.title}
+                action={
+                  <LinkButton variant="primary" href="/setup?add=1">
+                    {t.empty.detect}
+                  </LinkButton>
+                }
+              >
+                {t.empty.body}
+              </EmptyState>
+            </Card>
+          ) : (
+            <>
+              {printers.map((p) => (
+                <PrinterCard key={p.id} printer={p} status={status} />
               ))}
-            </ul>
-          </Card>
-        )}
-        <ConnectCard connect={status.connect} />
+              {scanners.map((s) => (
+                <ScannerCard key={s.id} scanner={s} status={status} />
+              ))}
+            </>
+          )}
+        </div>
+        <div className="status-side">
+          {printers.length > 0 && <JobsCard printers={printers} />}
+          {scanners.length > 0 && <ScansCard scanners={scanners} />}
+          <SystemCard status={status} />
+        </div>
       </div>
     </div>
   );

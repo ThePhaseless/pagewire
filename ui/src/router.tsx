@@ -1,10 +1,13 @@
-// A small history router: five fixed routes, link interception, focus management and the page title.
+// A small history router: five fixed routes, query parameters, link interception, focus management
+// and the page title.
 import { useEffect, useSyncExternalStore } from "react";
 
 export const routes = ["/", "/print", "/scan", "/settings", "/setup"] as const;
 export type Route = (typeof routes)[number];
 
 const NAVIGATE = "pagewire:navigate";
+/** A query change in place (replaceQueryParam): not a navigation, so focus stays where it is. */
+const QUERY = "pagewire:query";
 
 export function isRoute(path: string): path is Route {
   return (routes as readonly string[]).includes(path);
@@ -69,6 +72,31 @@ function subscribe(fn: () => void) {
 
 export function usePath(): string {
   return useSyncExternalStore(subscribe, () => window.location.pathname);
+}
+
+function subscribeQuery(fn: () => void) {
+  const off = subscribe(fn);
+  window.addEventListener(QUERY, fn);
+  return () => {
+    off();
+    window.removeEventListener(QUERY, fn);
+  };
+}
+
+/** The value of one query parameter of the current address (`?printer=hp`), or null. */
+export function useQueryParam(name: string): string | null {
+  const search = useSyncExternalStore(subscribeQuery, () => window.location.search);
+  return new URLSearchParams(search).get(name);
+}
+
+/** Sets (or, with null, removes) one query parameter in place, without a history entry. */
+export function replaceQueryParam(name: string, value: string | null) {
+  const url = new URL(window.location.href);
+  if (value === null) url.searchParams.delete(name);
+  else url.searchParams.set(name, value);
+  if (url.href === window.location.href) return;
+  window.history.replaceState(window.history.state, "", url);
+  window.dispatchEvent(new Event(QUERY));
 }
 
 /** Turns clicks on same-origin links to app routes into history navigation. */

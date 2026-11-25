@@ -1,63 +1,41 @@
-// Copy for the setup wizard. Shared words (Back, Next, Loading) come from ../strings.
-import type { Decision } from "../gen/api";
+// Copy for the setup wizard. Shared words (Back, Next, Loading) and the device copy shared with
+// Status and Settings come from ../strings (strings.device); option titles and labels from
+// ../lib/labels.
 import { strings } from "../strings";
 
 const stepOf = (n: number, total: number) => `Step ${n} of ${total}`;
+type Role = "printer" | "scanner";
 
 export const setupStrings = {
   title: "Set up pagewire",
+  addTitle: "Add devices",
   progressLabel: "Setup steps",
   stepOf,
-  /** The document title for a step: "Step 2 of 5: Name and location". */
+  /** The document title for a step: "Step 2 of 5: Names and locations". */
   stepTitle: (n: number, total: number, label: string) => `${stepOf(n, total)}: ${label}`,
   steps: {
-    detect: "Find the printer",
-    name: "Name and location",
-    driver: "Driver and licences",
+    devices: "Choose devices",
+    names: "Names and locations",
+    drivers: "Drivers and licences",
+    review: "Review and save",
     defaults: "Defaults",
-    review: "Review and finish",
   },
   loadFailed: "Could not load the setup data.",
+  configInvalid: "The settings file has an error. Fix it in Settings, then add devices again.",
   alreadyDone: {
     title: "pagewire is already set up",
-    body: "Change the name, driver or defaults in Settings.",
+    body: "Change names, drivers or defaults in Settings, or look for more devices.",
     action: "Go to Settings",
-  },
-  families: {
-    "ipp-usb": "Driverless (IPP over USB)",
-    ps: "PostScript",
-    hplip: "HP (HPLIP)",
-    gutenprint: "Gutenprint",
-    ghostscript: "Ghostscript",
-    legacy: "Classic CUPS drivers",
-    airsane: "SANE",
-    sim: "Simulated",
-    none: "No scanner",
-  } as Record<string, string>,
-  /** How the dispatcher chose the printer driver (Decision.rule). */
-  rules: {
-    "ipp-over-usb": "Driverless printing (IPP over USB)",
-    model: "Printer model",
-    "command-set": "Printer language",
-    override: "Your settings",
-    none: "No match",
-    simulated: "Simulated mode",
-  } satisfies Record<Decision["rule"], string>,
-  /** The no-driver state: the dispatcher found no driver for the printer. */
-  noDriver: {
-    title: "No printer driver matches this printer",
-    deviceId: "Device ID:",
-    noDeviceId: "The printer did not report a device ID.",
+    add: "Detect and add devices",
   },
   detect: {
-    description: "pagewire looks for a printer on USB and picks a driver for it.",
-    searchingTitle: "Looking for the printer",
+    description: "pagewire looks for printers and scanners on USB. Choose how to use each one.",
+    searchingTitle: "Looking for devices",
     waiting: "Waiting for the device to report.",
     plugInHint: strings.plugInHint,
     devicesTitle: "USB devices",
-    noDevices: "No USB devices found yet.",
-    noPrinter:
-      "None of these devices is a printer pagewire can use. Check the cable and that the printer is switched on.",
+    noUsable:
+      "None of these devices is a printer or scanner pagewire can use. Check the cable and that the device is switched on.",
     unnamedDevice: "Unnamed USB device",
     /** Disclosure over the devices that cannot be a printer or scanner (hubs, keyboards, ...). */
     otherDevices: (n: number) =>
@@ -65,124 +43,116 @@ export const setupStrings = {
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
     simulatedName: (name: string) => `${name} (simulated)`,
-    choiceTitle: "pagewire will use",
-    ruleLabel: "Chosen by",
-    printerLabel: "Printer driver",
-    noPrinterDriver: "None found",
-    scannerLabel: "Scanner driver",
-    noUsbTitle: "No USB printer available",
-    k8sIntro: "This server cannot reach a USB printer yet. On Kubernetes pagewire needs:",
+    cannotUse: "pagewire cannot use this device as a printer or scanner.",
+    /** The choice for one role of a device. */
+    roleLabel: { printer: "As a printer", scanner: "As a scanner" } satisfies Record<Role, string>,
+    use: { printer: "Use as printer", scanner: "Use as scanner" } satisfies Record<Role, string>,
+    dontUse: "Don't use",
+    inUse: (role: Role, name: string) =>
+      role === "printer" ? `In use as printer ${name}` : `In use as scanner ${name}`,
+    /** Disclosure over the devices the user chose not to use before. */
+    notOffered: (n: number) => `Not offered (${n})`,
+    notOfferedHint: "You chose not to use these. pagewire does not offer them again.",
+    ignoredRoles: (roles: Role[]) =>
+      `Not used as ${roles.map((r) => (r === "printer" ? "printer" : "scanner")).join(" or ")}`,
+    offerAgain: "Offer again",
+    detectAgain: "Detect again",
+    detecting: "Looking again. The list updates by itself.",
+    noUsbTitle: "No USB devices available",
+    k8sIntro: "This server cannot reach USB devices yet. On Kubernetes pagewire needs:",
     k8sSteps: [
-      "generic-device-plugin running on the node the printer is plugged into, sharing the printer as a resource such as devic.es/printer;",
+      "generic-device-plugin running on the node the devices are plugged into, sharing them as a resource such as devic.es/printer;",
       "PAGEWIRE_USB_RESOURCE set to that resource name on the pagewire Deployment;",
       "the printing namespace allowed to run privileged pods (host networking).",
     ],
     simBackend:
-      "This server runs without Kubernetes and has no USB device attached, so it cannot reach a real printer.",
+      "This server runs without Kubernetes and has no USB device attached, so it cannot reach a real printer or scanner.",
     simulatedOffer: "You can finish setup with a simulated printer and scanner now.",
     useSimulated: "Use a simulated printer",
-    simulatedTitle: "Simulated printer",
+    simulatedTitle: "Simulated printer and scanner",
     simulatedBody:
       "pagewire will run a test printer and a test scanner. Nothing goes to real hardware.",
-    useUsb: "Use the USB printer instead",
+    useUsb: "Use the USB devices instead",
   },
-  name: {
-    description: "How this printer appears in pagewire and to computers on your network.",
+  names: {
+    description: "How each device appears in pagewire and to computers on your network.",
+    titleLabel: "Installation name",
+    titleHint: "Shown at the top of every page.",
     nameLabel: "Name",
-    nameHint:
-      "Shown at the top of every page. Computers and phones may show the printer's own name instead.",
-    nameInvalid: "Enter 1 to 63 characters, without line breaks or tabs.",
+    printerHint: "Computers and phones may show the printer's own name instead.",
+    scannerHint: "Shown in pagewire.",
+    nameInvalid: "Enter 1 to 63 characters, without line breaks or tabs, not starting with a dash.",
+    nameTaken: "Another printer already has this name.",
     locationLabel: "Location",
-    locationHint: "Optional, for example Living room. Computers show it when you add the printer.",
+    locationHint: "Optional, for example Living room. Computers show it when you add the device.",
     locationInvalid: "Use at most 127 characters, without line breaks or tabs.",
+    printerTitle: (name: string) => `Printer: ${name}`,
+    scannerTitle: (name: string) => `Scanner: ${name}`,
+    nothingChosen: "No device chosen. Saving keeps pagewire's settings without new devices.",
   },
-  driver: {
-    description: "pagewire picked a driver from the printer's USB details. You can override it.",
-    explained: (printer: string, scanner: string) =>
-      `pagewire picked printer driver ${printer} and scanner driver ${scanner} for this printer.`,
+  drivers: {
+    description: "pagewire picked a driver from each device's USB details. You can override it.",
+    explained: (family: string) => `pagewire picked the printer driver ${family}.`,
+    scannerExplained: (family: string) => `pagewire picked the scanner driver ${family}.`,
     simulated: "The simulated printer and scanner need no driver.",
     driverLabel: "Printer driver",
-    scannerLabel: "Scanner driver",
+    backendLabel: "Scanner driver",
     automatic: (family: string) => `Automatic: ${family}`,
     automaticUnknown: "Automatic",
     automaticNone: "Automatic: no driver matches",
+    ruleLabel: "Chosen by",
     noDriverHint:
       "Pick a driver family below, or finish setup and enter an exact driver name in Settings.",
     licencesTitle: "Vendor licences",
-    noLicences: "This printer needs no vendor files.",
-  },
-  defaults: {
-    description:
-      "What new print and scan jobs start with. You can change them per job and later in Settings.",
-    printTitle: "Printing",
-    scanTitle: "Scanning",
-    media: "Paper size",
-    mediaOptions: {
-      iso_a4_210x297mm: "A4",
-      "na_letter_8.5x11in": "Letter",
-      "na_legal_8.5x14in": "Legal",
-      iso_a5_148x210mm: "A5",
-    } as Record<string, string>,
-    sides: "Sides",
-    sidesOptions: {
-      "one-sided": "One-sided",
-      "two-sided-long-edge": "Two-sided, flip on long edge",
-      "two-sided-short-edge": "Two-sided, flip on short edge",
-    } as Record<string, string>,
-    source: "Scan from",
-    sourceOptions: {
-      platen: "Glass",
-      adf: "Document feeder",
-      "adf-duplex": "Document feeder, both sides",
-    } as Record<string, string>,
-    resolution: "Resolution",
-    dpi: (n: number) => `${n} dpi`,
-    colorMode: "Colour",
-    colorOptions: {
-      color: "Colour",
-      grayscale: "Greyscale",
-      blackandwhite: "Black and white",
-    } as Record<string, string>,
-    format: "File type",
-    formatOptions: { pdf: "PDF", jpeg: "JPEG" } as Record<string, string>,
+    noLicences: "These devices need no vendor files.",
   },
   review: {
-    description: "Check the settings, then finish. pagewire saves them to its settings file.",
-    name: "Name",
-    location: "Location",
-    noLocation: "Not set",
-    device: "Device",
-    usbDevice: "USB printer",
-    simulatedDevice: "Simulated printer and scanner",
-    driver: "Printer driver",
-    scanner: "Scanner driver",
+    description: "Check the settings, then save. pagewire writes them to its settings file.",
+    title: "Installation name",
+    printers: "Printers",
+    scanners: "Scanners",
+    none: "None",
+    simulatedDevice: "Simulated",
+    notUsed: "Not used",
     noDriverHint: "After setup, choose a driver in Settings.",
     licences: "Accepted licences",
     noLicences: "None",
-    printDefaults: "Print defaults",
-    scanDefaults: "Scan defaults",
-    finish: "Finish setup",
+    finish: "Save",
     finishing: "Saving…",
     invalid: "The server rejected some settings:",
     conflict: "Another session finished setup. Reloading…",
+    addConflict:
+      "Someone else changed the settings at the same time. Save again to add the devices to the current settings.",
     reloadNow: "Reload now",
+    saveAgain: "Save again",
   },
   applying: {
-    title: "Starting the printer",
-    description: "pagewire saved the settings and is starting the printer and scanner.",
+    title: "Starting the devices",
+    description: "pagewire saved the settings and is starting the printers and scanners.",
     progress: "Starting",
     timeout:
-      "This is taking longer than 3 minutes. The Status page shows what the device is doing.",
+      "This is taking longer than 3 minutes. The Status page shows what each device is doing.",
     goToStatus: "Go to Status",
+  },
+  defaults: {
+    description:
+      "What new print and scan jobs start with, from what each device offers. You can change them per job and later in Settings.",
+    keep: "Keep these",
+    save: "Save",
+    saving: "Saving…",
+    skip: "Skip",
+    conflict:
+      "Someone else changed the settings at the same time. Save again to apply these defaults on top of their changes.",
+    saveAgain: "Save again",
   },
   done: {
     title: "pagewire is ready",
-    description: "Print and scan from this page, or add the printer on your computers and phones.",
+    description: "Print and scan from this page, or add the devices on your computers and phones.",
     networkName: "Name on your network",
     printerAddress: "Printer address",
     scannerAddress: "Scanner address",
     connectHint:
-      "Most computers and phones find the printer by itself. Use these addresses when they do not, for example over a VPN.",
+      "Most computers and phones find the devices by themselves. Use these addresses when they do not, for example over a VPN.",
     goToStatus: "Go to Status",
   },
 };

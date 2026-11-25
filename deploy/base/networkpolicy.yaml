@@ -23,8 +23,8 @@ spec:
     # arrives with the node's LAN address or with the node's address inside the pod
     # network (example pod CIDR 10.244.0.0/16). Both are listed; check which one your
     # CNI uses and drop the other. 192.0.2.0/24 is a documentation range that matches
-    # nothing: replace it with your nodes' LAN subnet, or narrow it to the USB node's
-    # address as a /32.
+    # nothing: replace it with your nodes' LAN subnet, or narrow it to the address of
+    # every node with USB devices, one /32 each (each such node runs a device pod).
     - from:
         - ipBlock:
             cidr: 192.0.2.0/24  # CHANGE ME

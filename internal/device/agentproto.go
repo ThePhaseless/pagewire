@@ -16,6 +16,9 @@ const (
 
 	ServiceIPP   = "_ipp._tcp"
 	ServiceUScan = "_uscan._tcp"
+
+	// AgentWorkloadArg is the agent flag that names its workload (Spec.Node).
+	AgentWorkloadArg = "--workload"
 )
 
 // BrowseTypes are the DNS-SD service types the controller always asks for.
@@ -64,13 +67,14 @@ type EULAText struct {
 	Message    string `json:"message"`
 }
 
-// QueueSpec is the PAPPL queue the agent reconciles on every cycle.
+// QueueSpec is one PAPPL queue the agent reconciles on every cycle.
 type QueueSpec struct {
+	ID       string `json:"id"` // config printer entry id
 	Name     string `json:"name"`
 	Location string `json:"location"`
 	Driver   string `json:"driver"` // PAPPL driver name, or "auto" (needs a device ID from Find-Devices)
-	// DriverPinned means the user chose Driver (device.driverName). An unpinned
-	// name comes from the driver index, which can list a driver the running app
+	// DriverPinned means the user chose Driver (driverName). An unpinned name
+	// comes from the driver index, which can list a driver the running app
 	// lacks, so the agent then falls back to the app's own choice.
 	DriverPinned bool `json:"driverPinned"`
 	// DeviceURI is an optional full PAPPL device URI as the app lists it, e.g.
@@ -79,19 +83,33 @@ type QueueSpec struct {
 	DeviceURI string `json:"deviceUri"`
 	// Schemes are the preferred CUPS/PAPPL device schemes in order, without the
 	// "cups:" prefix, e.g. ["hp","usb"].
-	Schemes   []string `json:"schemes"`
-	Media     string   `json:"media"`
-	Sides     string   `json:"sides"`
-	ColorMode string   `json:"colorMode"`
-	Quality   string   `json:"quality"`
+	Schemes []string `json:"schemes"`
+	// SystemURI is the printer application's system URI,
+	// PAPPLSystemURI(family port). The agent may translate it through
+	// agent.Core.SystemURL (the sim does) before connecting.
+	SystemURI string `json:"systemUri"`
+	// Device is the USB device the queue must use. Its DeviceID must be set
+	// (the IEEE-1284 string): the agent sends it when it creates or recreates
+	// a queue.
+	Device   USBDevice     `json:"device"`
+	Defaults PrintSettings `json:"defaults"` // the entry's defaults; the agent sets only what the queue supports
 }
 
-// QueueResult is the agent's last PAPPL reconcile outcome.
+// QueueResult is the agent's last reconcile outcome for one QueueSpec.
 type QueueResult struct {
-	State      string `json:"state"` // QueueOK | QueuePending | QueueError
-	Message    string `json:"message"`
-	PrinterURI string `json:"printerUri"` // loopback printer URI the agent used
-	DeviceURI  string `json:"deviceUri"`  // chosen device URI
+	ID         string   `json:"id"`    // QueueSpec.ID
+	State      string   `json:"state"` // QueueOK | QueuePending | QueueError
+	Message    string   `json:"message"`
+	PrinterURI string   `json:"printerUri"` // loopback printer URI the agent used
+	DeviceURI  string   `json:"deviceUri"`  // chosen device URI
+	Warnings   []string `json:"warnings"`   // with QueueOK, e.g. the defaults could not be set
+	// Refused are the defaults the queue refused in Set-Printer-Attributes,
+	// by option kind; Using is the queue's own default. Not resent until the
+	// wanted value or the queue changes.
+	Refused []Dropped `json:"refused,omitempty"`
+	// Unreachable is set when the printer application refused the connection
+	// (still starting).
+	Unreachable bool `json:"unreachable"`
 }
 
 // DNSSDService is one browsed and resolved DNS-SD instance.
@@ -106,24 +124,30 @@ type DNSSDService struct {
 // AgentReport is the body of POST AgentReportPath with
 // "Authorization: Bearer <token>".
 type AgentReport struct {
-	PodUID        string         `json:"podUid"`
-	AppliedHash   string         `json:"appliedHash"` // DesiredState.Hash the agent last received
-	Inventory     Inventory      `json:"inventory"`
-	DevicePresent bool           `json:"devicePresent"`
-	Services      []DNSSDService `json:"services"`
-	Queue         *QueueResult   `json:"queue"`
-	Blobs         []BlobStatus   `json:"blobs"` // in k8s read from --blob-status
-	EULAs         []EULAText     `json:"eulas"` // one per DesiredState.StageEULAs ref
+	PodUID      string    `json:"podUid"`
+	Workload    string    `json:"workload"`    // the agent's --workload (Spec.Node)
+	AppliedHash string    `json:"appliedHash"` // DesiredState.Hash the agent last received
+	Inventory   Inventory `json:"inventory"`   // the static probe result
+	// Attached is this cycle's sysfs device list (DeviceID empty); nil when
+	// not reported (old agents, no inventory file).
+	Attached []USBDevice `json:"attached"`
+	// ProbeNodes are the usbfs nodes (USBDevice.Node form) the probe found
+	// under /dev/bus/usb; nil when unknown, [] when there were none.
+	ProbeNodes []string       `json:"probeNodes"`
+	Services   []DNSSDService `json:"services"`
+	Queues     []QueueResult  `json:"queues"` // one per DesiredState.Queues entry, in order
+	Blobs      []BlobStatus   `json:"blobs"`  // in k8s read from --blob-status
+	EULAs      []EULAText     `json:"eulas"`  // one per DesiredState.StageEULAs ref
 }
 
 // DesiredState is the 200 response to an AgentReport (401 bad token, 400 malformed).
 type DesiredState struct {
-	Hash string `json:"hash"` // the current Spec.Hash ("" when the spec is nil)
-	// Queue is built from the current config on every report; nil unless the
-	// printer family is a PAPPL app. The agent reconciles it every cycle, so
-	// queue changes need no pod roll.
-	Queue  *QueueSpec `json:"queue"`
-	Browse []string   `json:"browse"` // service types to browse; the controller always sends BrowseTypes
+	Hash string `json:"hash"` // the Spec.Hash of the report's workload ("" when it has no spec)
+	// Queues are built from the current config on every report: one per PAPPL
+	// printer of the workload's spec. The agent reconciles them every cycle,
+	// so queue changes need no pod roll.
+	Queues []QueueSpec `json:"queues"`
+	Browse []string    `json:"browse"` // service types to browse; the controller always sends BrowseTypes
 	// StageEULAs are the EULAs whose text the agent stages and reports, sorted
 	// by id so an unchanged list compares equal. TextSHA256 is always "".
 	StageEULAs []EULARef `json:"stageEulas"`

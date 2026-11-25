@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 )
 
 // PAPPL vendor operations, from pappl/base.h at v1.4.12.
@@ -46,13 +49,11 @@ const (
 // dnssd schemes are not.
 const DeviceTypeCustomLocal = "other-local"
 
-// Qualities maps print-quality keywords to their IPP enum values.
-var Qualities = map[string]goipp.Integer{"draft": 3, "normal": 4, "high": 5}
-
 // IPPError is an IPP response with an unsuccessful status.
 type IPPError struct {
-	Status  goipp.Status
-	Message string
+	Status      goipp.Status
+	Message     string
+	Unsupported []string // the attributes the response's unsupported-attributes group names
 }
 
 func (e *IPPError) Error() string {
@@ -70,10 +71,7 @@ type Printer struct {
 	DeviceURI string
 	Driver    string // "auto" when it was created with driver auto
 	Location  string
-	Media     string
-	Sides     string
-	ColorMode string
-	Quality   string // draft | normal | high, "" if unknown
+	Caps      device.PrinterCaps // the options and current defaults the queue reports
 }
 
 // Device is one Find-Devices entry.
@@ -83,12 +81,23 @@ type Device struct{ URI, Info, DeviceID string }
 type Driver struct{ Name, Description string }
 
 // Client talks to one PAPPL system service. It remembers Reconcile's last
-// Find-Devices choice per queue, so reuse one Client for the agent's life.
+// Find-Devices choice per queue and when it was made, and the location and
+// refused defaults it sent each queue, so reuse one Client per system URL for
+// the agent's life.
 type Client struct {
 	uri string
+	now func() time.Time // nil: time.Now
 
 	mu    sync.Mutex
-	picks map[string]string // queue key -> device URI; see Reconcile
+	picks map[string]pick   // queue key -> last Find-Devices choice; see Reconcile
+	memos map[int]queueMemo // printer-id -> what Reconcile sent it; see reconcileQueue
+}
+
+// pick is one Find-Devices choice: the device URI ("" when none matched) and
+// when it was made.
+type pick struct {
+	uri string
+	at  time.Time
 }
 
 // New returns a client for the system URI, e.g. ipp://127.0.0.1:8001/ipp/system.
@@ -142,15 +151,22 @@ func do(ctx context.Context, uri string, msg *goipp.Message) (*goipp.Message, er
 		return nil, fmt.Errorf("ipp %s: decode response: %w", goipp.Op(msg.Code), err)
 	}
 	if st := goipp.Status(rsp.Code); st > 0x00ff {
-		return nil, &IPPError{Status: st, Message: First(rsp.Operation, "status-message")}
+		ie := &IPPError{Status: st, Message: First(rsp.Operation, "status-message")}
+		for _, g := range rsp.AttrGroups() {
+			if g.Tag == goipp.TagUnsupportedGroup {
+				for _, a := range g.Attrs {
+					ie.Unsupported = append(ie.Unsupported, a.Name)
+				}
+			}
+		}
+		return nil, ie
 	}
 	return rsp, nil
 }
 
-var printerAttrs = []string{
+var printerAttrs = append([]string{
 	"printer-id", "printer-name", "printer-uri-supported", AttrDeviceURI, AttrDriver, "printer-location",
-	"media-default", "sides-default", "print-color-mode-default", "print-quality-default",
-}
+}, ippcaps.Requested...)
 
 // Printers lists every queue (Get-Printers).
 func (c *Client) Printers(ctx context.Context) ([]Printer, error) {
@@ -168,18 +184,10 @@ func (c *Client) Printers(ctx context.Context) ([]Printer, error) {
 		a := g.Attrs
 		p := Printer{
 			Name: First(a, "printer-name"), DeviceURI: First(a, AttrDeviceURI), Driver: First(a, AttrDriver),
-			Location: First(a, "printer-location"), Media: First(a, "media-default"), Sides: First(a, "sides-default"),
-			ColorMode: First(a, "print-color-mode-default"),
+			Location: First(a, "printer-location"), Caps: ippcaps.Parse(a),
 		}
 		if id := Ints(a, "printer-id"); len(id) > 0 {
 			p.ID = id[0]
-		}
-		if q := Ints(a, "print-quality-default"); len(q) > 0 {
-			for k, v := range Qualities {
-				if int(v) == q[0] {
-					p.Quality = k
-				}
-			}
 		}
 		for _, u := range all(a, "printer-uri-supported") {
 			if strings.HasPrefix(u, "ipp://") {
@@ -269,25 +277,57 @@ func (c *Client) DeletePrinter(ctx context.Context, id int) error {
 	return nil
 }
 
-// SetDefaults sets printer-location and the non-empty job defaults of q on
-// the queue at printerURI (Set-Printer-Attributes).
-func (c *Client) SetDefaults(ctx context.Context, printerURI string, q device.QueueSpec) error {
-	m := request(goipp.OpSetPrinterAttributes, "printer-uri", printerURI)
-	m.Printer.Add(goipp.MakeAttribute("printer-location", goipp.TagText, goipp.String(q.Location)))
-	for _, kw := range []struct{ name, value string }{
-		{"media-default", q.Media}, {"sides-default", q.Sides}, {"print-color-mode-default", q.ColorMode},
-	} {
-		if kw.value != "" {
-			m.Printer.Add(goipp.MakeAttribute(kw.name, goipp.TagKeyword, goipp.String(kw.value)))
+// SetDefaults sets attrs on the queue at printerURI (Set-Printer-Attributes)
+// and returns the ones PAPPL refused. PAPPL refuses the whole request for one
+// unsupported value, naming it in the unsupported-attributes group or, for
+// some (output-bin-default, a driver-defaults failure), not at all.
+// SetDefaults therefore retries without the named ones, and sends each
+// remaining attribute alone when none is named. err is the first failure that
+// is not such a refusal; the attributes set before it stay set.
+func (c *Client) SetDefaults(ctx context.Context, printerURI string, attrs goipp.Attributes) (rejected goipp.Attributes, err error) {
+	set := func(as goipp.Attributes) (*IPPError, error) {
+		m := request(goipp.OpSetPrinterAttributes, "printer-uri", printerURI)
+		m.Printer = as
+		_, err := do(ctx, printerURI, m)
+		var ie *IPPError
+		if errors.As(err, &ie) && ie.Status == goipp.StatusErrorAttributesOrValues {
+			return ie, nil
 		}
+		if err != nil {
+			return nil, fmt.Errorf("set-printer-attributes: %w", err)
+		}
+		return nil, nil
 	}
-	if v, ok := Qualities[q.Quality]; ok {
-		m.Printer.Add(goipp.MakeAttribute("print-quality-default", goipp.TagEnum, v))
+	rest := attrs
+	for len(rest) > 0 { // every pass drops at least one attribute or ends
+		ie, err := set(rest)
+		if ie == nil {
+			return rejected, err
+		}
+		named := func(a goipp.Attribute) bool { return slices.Contains(ie.Unsupported, a.Name) }
+		if !slices.ContainsFunc(rest, named) {
+			if len(rest) == 1 {
+				return append(rejected, rest...), nil
+			}
+			for _, a := range rest {
+				ie, err := set(goipp.Attributes{a})
+				if err != nil {
+					return rejected, err
+				}
+				if ie != nil {
+					rejected = append(rejected, a)
+				}
+			}
+			return rejected, nil
+		}
+		for _, a := range rest {
+			if named(a) {
+				rejected = append(rejected, a)
+			}
+		}
+		rest = slices.DeleteFunc(slices.Clone(rest), named)
 	}
-	if _, err := do(ctx, printerURI, m); err != nil {
-		return fmt.Errorf("set-printer-attributes: %w", err)
-	}
-	return nil
+	return rejected, nil
 }
 
 func notFound(err error) bool {

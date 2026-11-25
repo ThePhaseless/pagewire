@@ -12,30 +12,37 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
-const scanBody = `{"source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`
+const scanBody = `{"scanner":"s1","source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`
+
+// samsungScanCaps is the Samsung's scanner as AirSane reports it: no duplex, no intents.
+var samsungScanCaps = apitypes.ScannerCaps{
+	Sources: []string{"platen", "adf"}, Resolutions: []int{75, 150, 300, 600}, ColorModes: []string{"color", "grayscale"}, ADF: true,
+}
 
 func TestScanner(t *testing.T) {
 	e := newEnv(t)
 	e.scans.caps = apitypes.ScannerCaps{Sources: []string{"platen"}, Resolutions: []int{300}}
-	rec := e.do("GET", "/api/v1/scanner", nil)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"colorModes":[]`) {
+	rec := e.do("GET", "/api/v1/scanners/s1/capabilities", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"colorModes":[]`) || !strings.Contains(rec.Body.String(), `"intents":[]`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
+	wantProblem(t, e.do("GET", "/api/v1/scanners/nope/capabilities", nil), 404, "scanner-not-found")
 	e.scans.capsErr = scanning.ErrNoScanner
-	wantProblem(t, e.do("GET", "/api/v1/scanner", nil), 503, "scanner-unavailable")
+	wantProblem(t, e.do("GET", "/api/v1/scanners/s1/capabilities", nil), 503, "scanner-unavailable")
 	e.scans.capsErr = errors.New("connection refused")
-	wantProblem(t, e.do("GET", "/api/v1/scanner", nil), 503, "scanner-unavailable")
+	wantProblem(t, e.do("GET", "/api/v1/scanners/s1/capabilities", nil), 503, "scanner-unavailable")
 }
 
 func TestPostScan(t *testing.T) {
 	e := newEnv(t)
+	e.scans.caps = samsungScanCaps
 	rec := e.do("POST", "/api/v1/scans", strings.NewReader(scanBody))
-	if rec.Code != 202 || decode[apitypes.Scan](t, rec.Body.Bytes()).State != "scanning" {
+	if sc := decode[apitypes.Scan](t, rec.Body.Bytes()); rec.Code != 202 || sc.State != "scanning" || sc.Scanner != "s1" {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(`{"source":`)), 400, "bad-request")
 	wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(`{"source":"platen","x":1}`)), 400, "bad-request")
-	wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(`{"source":"platen","resolution":5,"colorMode":"color","format":"pdf"}`)),
+	wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(`{"scanner":"s1","source":"platen","resolution":5,"colorMode":"color","format":"pdf"}`)),
 		422, "invalid-settings")
 	for err, want := range map[error]struct {
 		code int
@@ -125,4 +132,49 @@ func TestDeleteRunningScanCancels(t *testing.T) {
 		t.Fatalf("DELETE after cancel: %d %s", rec.Code, rec.Body)
 	}
 	wantProblem(t, e.do("DELETE", "/api/v1/scans/00000000000000ff", nil), 404, "not-found")
+}
+
+func TestPostScanUnknownScanner(t *testing.T) {
+	e := newEnv(t)
+	e.scans.caps = samsungScanCaps
+	for _, id := range []string{"nope", ""} {
+		body := strings.Replace(scanBody, `"s1"`, `"`+id+`"`, 1)
+		wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(body)), 404, "scanner-not-found")
+	}
+	if len(e.scans.List()) != 0 {
+		t.Fatal("a scan started on an unknown scanner")
+	}
+}
+
+func TestPostScanChecksCaps(t *testing.T) {
+	e := newEnv(t)
+	e.scans.caps = samsungScanCaps
+	for _, tc := range []struct{ body, path string }{
+		{`{"scanner":"s1","source":"platen","resolution":300,"colorMode":"color","format":"pdf","intent":"poster"}`, ""}, // enum
+		{`{"scanner":"s1","source":"platen","resolution":300,"colorMode":"color","format":"pdf","intent":"photo"}`, "/intent"},
+		{`{"scanner":"s1","source":"adf-duplex","resolution":300,"colorMode":"color","format":"pdf"}`, "/source"},
+		{`{"scanner":"s1","source":"platen","resolution":1200,"colorMode":"color","format":"pdf"}`, "/resolution"},
+		{`{"scanner":"s1","source":"platen","resolution":300,"colorMode":"blackandwhite","format":"pdf"}`, "/colorMode"},
+	} {
+		p := wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(tc.body)), 422, "invalid-settings")
+		if tc.path != "" && (len(p.Errors) != 1 || p.Errors[0].Path != tc.path) {
+			t.Errorf("%s: errors %+v, want one at %s", tc.body, p.Errors, tc.path)
+		}
+	}
+	if len(e.scans.List()) != 0 {
+		t.Fatal("an unsupported scan started")
+	}
+	// Supported: adf with grayscale at 600 dpi.
+	if rec := e.do("POST", "/api/v1/scans", strings.NewReader(`{"scanner":"s1","source":"adf","resolution":600,"colorMode":"grayscale","format":"jpeg"}`)); rec.Code != 202 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPostScanCapsUnavailable(t *testing.T) {
+	e := newEnv(t)
+	e.scans.capsErr = errors.New("connection refused")
+	body := `{"scanner":"s1","source":"adf-duplex","resolution":300,"colorMode":"color","format":"pdf","intent":"photo"}`
+	if rec := e.do("POST", "/api/v1/scans", strings.NewReader(body)); rec.Code != 202 {
+		t.Fatalf("caps unavailable: %d %s, want the scan started", rec.Code, rec.Body)
+	}
 }

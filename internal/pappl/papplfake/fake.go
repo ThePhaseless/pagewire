@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 	"github.com/ThePhaseless/pagewire/internal/pappl"
 )
 
@@ -43,16 +45,41 @@ type Options struct {
 	// NoAutoDriver makes Create-Printer refuse driver "auto", like an
 	// application without an auto-add callback.
 	NoAutoDriver bool
+	// Caps are the supported lists and defaults every queue reports, encoded
+	// the way PAPPL encodes them. Zero means today's: A4 and Letter, every
+	// sides, colour mode and quality value, defaults A4, one-sided, auto, normal.
+	// A queue starts on the *Default values; Set-Printer-Attributes changes them
+	// and refuses a value its supported list lacks.
+	Caps device.PrinterCaps
+	// Refuse lists Set-Printer-Attributes attributes refused whatever their
+	// value, as ps-printer-app refuses output-bin-default while reporting
+	// output-bin-supported face-down (its driver lists no bins).
+	Refuse []string
+	// DropLocation accepts printer-location without storing it, as PAPPL
+	// 1.4.12 does (it passes the value to papplPrinterSetGeoLocation).
+	DropLocation bool
+}
+
+// defaultCaps are the caps of a fake without Options.Caps.
+func defaultCaps() device.PrinterCaps {
+	return device.PrinterCaps{
+		Media:        []string{"iso_a4_210x297mm", "na_letter_8.5x11in"},
+		MediaDefault: "iso_a4_210x297mm",
+		Sides:        []string{"one-sided", "two-sided-long-edge", "two-sided-short-edge"}, SidesDefault: "one-sided",
+		ColorModes: []string{"auto", "color", "monochrome"}, ColorModeDefault: "auto",
+		Qualities: []string{"draft", "normal", "high"}, QualityDefault: "normal",
+		Formats: []string{"application/pdf", "image/jpeg", "image/png", "image/pwg-raster", "image/urf"},
+	}
 }
 
 // Printer is a snapshot of one queue.
 type Printer struct {
-	ID                                int
-	Name, Resource                    string // Resource is the sanitised name in /ipp/print/<Resource>
-	DeviceURI, DeviceID, Driver       string
-	Location, Media, Sides, ColorMode string
-	Quality                           string // draft | normal | high
-	Jobs                              int
+	ID                          int
+	Name, Resource              string // Resource is the sanitised name in /ipp/print/<Resource>
+	DeviceURI, DeviceID, Driver string
+	Location                    string
+	Defaults                    device.PrintSettings // the queue's current *-default values
+	Jobs                        int
 }
 
 type job struct {
@@ -77,12 +104,16 @@ type System struct {
 	nextID  int
 	nextJob int
 	finds   int
+	sets    [][]string // the attribute names of each Set-Printer-Attributes
 }
 
 // New returns a fake system with no queues.
 func New(o Options) *System {
 	if len(o.Schemes) == 0 {
 		o.Schemes = []string{"cups"}
+	}
+	if reflect.ValueOf(o.Caps).IsZero() {
+		o.Caps = defaultCaps()
 	}
 	return &System{opts: o, nextID: 1, nextJob: 1}
 }
@@ -92,6 +123,22 @@ func (s *System) FindDevicesCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.finds
+}
+
+// SetCalls returns how many Set-Printer-Attributes requests the system has
+// served, refused ones included.
+func (s *System) SetCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sets)
+}
+
+// Sets returns the printer attribute names of every Set-Printer-Attributes
+// request the system has served, in order, refused ones included.
+func (s *System) Sets() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.sets)
 }
 
 // Printers returns a snapshot of the queues in creation order.
@@ -255,56 +302,134 @@ func (s *System) createPrinter(req, rsp *goipp.Message, fail failFunc) *goipp.Me
 	if !ok {
 		return fail(goipp.StatusErrorAttributesOrValues, "Driver '%s' cannot be used with this printer.", driver)
 	}
+	c := s.opts.Caps
 	q := &queue{Printer: Printer{
 		ID: s.nextID, Name: name, Resource: res, DeviceURI: uri, DeviceID: deviceID, Driver: driver,
-		Media: "iso_a4_210x297mm", Sides: "one-sided", ColorMode: "auto", Quality: "normal",
+		Defaults: device.PrintSettings{
+			Media: c.MediaDefault, MediaSource: c.MediaSourceDefault, MediaType: c.MediaTypeDefault,
+			Sides: c.SidesDefault, ColorMode: c.ColorModeDefault, Quality: c.QualityDefault,
+			Resolution: c.ResolutionDefault, ContentOptimize: c.ContentOptimizeDefault,
+			Orientation: c.OrientationDefault, NumberUp: c.NumberUpDefault, PrintScaling: c.PrintScalingDefault,
+			OutputBin: c.OutputBinDefault, Finishings: c.FinishingsDefault,
+		},
 	}}
 	s.nextID++
-	if st, msg := q.set(req.Printer); st != goipp.StatusOk {
-		return fail(st, "%s", msg)
+	if st, msg, bad := s.set(q, req.Printer); st != goipp.StatusOk {
+		r := fail(st, "%s", msg)
+		r.Unsupported = bad
+		return r
 	}
 	s.queues = append(s.queues, q)
 	rsp.Printer.Add(goipp.MakeAttribute("printer-id", goipp.TagInteger, goipp.Integer(int32(q.ID)))) //nolint:gosec // small counter
 	return rsp
 }
 
-var settable = map[string]bool{
-	"printer-location": true, "media-default": true, "sides-default": true,
-	"print-color-mode-default": true, "print-quality-default": true,
-}
+// settable is what PAPPL's Set-Printer-Attributes accepts among the
+// attributes pagewire sends (ippcaps.PAPPLSettable, confirmed against
+// PAPPL_COMMIT there).
+var settable = func() map[string]bool {
+	m := map[string]bool{"printer-location": true}
+	for _, n := range ippcaps.PAPPLSettable {
+		m[n] = true
+	}
+	return m
+}()
 
-// set applies settable printer attributes. Unknown ones are refused, as PAPPL does.
-func (q *queue) set(attrs goipp.Attributes) (goipp.Status, string) {
+// set applies settable printer attributes, all or none. Like PAPPL it checks
+// every attribute and answers the last refusal's message, with the refused
+// attributes in the unsupported group, except output-bin-default, which PAPPL
+// refuses without naming it. Unknown attributes are refused, and so is a value
+// the supported list lacks, as the Samsung's queue refused
+// print-color-mode-default auto. media-col-default is merged member by member
+// onto the current default.
+func (s *System) set(q *queue, attrs goipp.Attributes) (st goipp.Status, msg string, unsupported goipp.Attributes) {
+	c := s.opts.Caps
+	d, loc := q.Defaults, q.Location
+	st = goipp.StatusOk
 	for _, a := range attrs {
 		if a.Name == "printer-name" || a.Name == "printer-device-id" {
 			continue
 		}
 		if !settable[a.Name] || len(a.Values) != 1 {
-			return goipp.StatusErrorAttributesOrValues, "Unsupported attribute '" + a.Name + "'."
+			st, msg = goipp.StatusErrorAttributesOrValues, "Unsupported attribute '"+a.Name+"'."
+			unsupported.Add(a)
+			continue
 		}
-		v := a.Values[0].V.String()
-		switch a.Name {
-		case "printer-location":
-			q.Location = v
-		case "media-default":
-			q.Media = v
-		case "sides-default":
-			q.Sides = v
-		case "print-color-mode-default":
-			q.ColorMode = v
-		case "print-quality-default":
-			q.Quality = ""
-			for k, e := range pappl.Qualities {
-				if e.String() == v {
-					q.Quality = k
+		v := a.Values[0].V
+		kw := func(dst *string, supported []string) bool {
+			if !slices.Contains(supported, v.String()) {
+				return false
+			}
+			*dst = v.String()
+			return true
+		}
+		enum := func(dst *string, supported []string, table map[string]goipp.Integer) bool {
+			n, ok := v.(goipp.Integer)
+			k := ippcaps.Keyword(table, n)
+			if !ok || !slices.Contains(supported, k) {
+				return false
+			}
+			*dst = k
+			return true
+		}
+		ok := !slices.Contains(s.opts.Refuse, a.Name)
+		switch {
+		case !ok:
+		case a.Name == "printer-location":
+			if !s.opts.DropLocation {
+				loc = v.String()
+			}
+		case a.Name == "media-default":
+			ok = kw(&d.Media, c.Media)
+		case a.Name == "media-col-default":
+			col, isCol := v.(goipp.Collection)
+			ok = isCol
+			for _, m := range col {
+				if len(m.Values) != 1 {
+					ok = false
+					continue
+				}
+				mv := m.Values[0].V.String()
+				switch m.Name {
+				case "media-size-name":
+					ok = ok && slices.Contains(c.Media, mv)
+					d.Media = mv
+				case "media-source":
+					ok = ok && slices.Contains(c.MediaSources, mv)
+					d.MediaSource = mv
+				case "media-type":
+					ok = ok && slices.Contains(c.MediaTypes, mv)
+					d.MediaType = mv
 				}
 			}
-			if q.Quality == "" {
-				return goipp.StatusErrorAttributesOrValues, "Unsupported \"print-quality-default\" value '" + v + "'."
+		case a.Name == "sides-default":
+			ok = kw(&d.Sides, c.Sides)
+		case a.Name == "print-color-mode-default":
+			ok = kw(&d.ColorMode, c.ColorModes)
+		case a.Name == "print-content-optimize-default":
+			ok = kw(&d.ContentOptimize, c.ContentOptimize)
+		case a.Name == "output-bin-default":
+			ok = kw(&d.OutputBin, c.OutputBins)
+		case a.Name == "print-quality-default":
+			ok = enum(&d.Quality, c.Qualities, ippcaps.Qualities)
+		case a.Name == "orientation-requested-default":
+			ok = enum(&d.Orientation, c.Orientations, ippcaps.Orientations)
+		case a.Name == "printer-resolution-default":
+			r, isRes := v.(goipp.Resolution)
+			ok = isRes && r.Units == goipp.UnitsDpi && r.Xres == r.Yres && slices.Contains(c.Resolutions, r.Xres)
+			d.Resolution = r.Xres
+		}
+		if !ok {
+			st, msg = goipp.StatusErrorAttributesOrValues, fmt.Sprintf("Unsupported %q value '%s'.", a.Name, v)
+			if a.Name != "output-bin-default" {
+				unsupported.Add(a)
 			}
 		}
 	}
-	return goipp.StatusOk, ""
+	if st == goipp.StatusOk {
+		q.Defaults, q.Location = d, loc
+	}
+	return st, msg, unsupported
 }
 
 func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body io.Reader, host string, fail failFunc) *goipp.Message {
@@ -312,8 +437,15 @@ func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body 
 	case goipp.OpGetPrinterAttributes:
 		rsp.Printer = append(rsp.Printer, s.printerAttrs(q, host)...)
 	case goipp.OpSetPrinterAttributes:
-		if st, msg := q.set(req.Printer); st != goipp.StatusOk {
-			return fail(st, "%s", msg)
+		var names []string
+		for _, a := range req.Printer {
+			names = append(names, a.Name)
+		}
+		s.sets = append(s.sets, names)
+		if st, msg, bad := s.set(q, req.Printer); st != goipp.StatusOk {
+			r := fail(st, "%s", msg)
+			r.Unsupported = bad
+			return r
 		}
 	case goipp.OpCreateJob:
 		j := &job{id: s.nextJob, name: pappl.First(req.Operation, "job-name"), state: 3, created: time.Now()}
@@ -413,8 +545,7 @@ func jobAttrs(j *job) goipp.Attributes {
 }
 
 func (s *System) printerAttrs(q *queue, host string) goipp.Attributes {
-	quality := pappl.Qualities[q.Quality]
-	return goipp.Attributes{
+	attrs := goipp.Attributes{
 		goipp.MakeAttribute("printer-id", goipp.TagInteger, goipp.Integer(int32(q.ID))), //nolint:gosec // small counter
 		goipp.MakeAttribute("printer-name", goipp.TagName, goipp.String(q.Name)),
 		goipp.MakeAttribute("printer-info", goipp.TagText, goipp.String(q.Name)),
@@ -426,16 +557,95 @@ func (s *System) printerAttrs(q *queue, host string) goipp.Attributes {
 		goipp.MakeAttribute("printer-state", goipp.TagEnum, goipp.Integer(3)), // idle
 		goipp.MakeAttribute("printer-state-reasons", goipp.TagKeyword, goipp.String("none")),
 		goipp.MakeAttribute("printer-is-accepting-jobs", goipp.TagBoolean, goipp.Boolean(true)),
-		goipp.MakeAttr("document-format-supported", goipp.TagMimeType,
-			goipp.String("application/pdf"), goipp.String("image/jpeg"), goipp.String("image/png"),
-			goipp.String("image/pwg-raster"), goipp.String("image/urf")),
-		goipp.MakeAttr("media-supported", goipp.TagKeyword,
-			goipp.String("iso_a4_210x297mm"), goipp.String("na_letter_8.5x11in")),
-		goipp.MakeAttribute("media-default", goipp.TagKeyword, goipp.String(q.Media)),
-		goipp.MakeAttribute("sides-default", goipp.TagKeyword, goipp.String(q.Sides)),
-		goipp.MakeAttribute("print-color-mode-default", goipp.TagKeyword, goipp.String(q.ColorMode)),
-		goipp.MakeAttribute("print-quality-default", goipp.TagEnum, quality),
 	}
+	return append(attrs, capsAttrs(s.opts.Caps, q.Defaults)...)
+}
+
+// capsAttrs encodes the supported lists of c and the defaults d as PAPPL
+// reports them; empty lists and defaults are left out.
+func capsAttrs(c device.PrinterCaps, d device.PrintSettings) goipp.Attributes {
+	var out goipp.Attributes
+	add := func(name string, tag goipp.Tag, vs ...goipp.Value) {
+		if len(vs) > 0 {
+			out.Add(goipp.MakeAttr(name, tag, vs[0], vs[1:]...))
+		}
+	}
+	strs := func(name string, tag goipp.Tag, vs ...string) {
+		var gv []goipp.Value
+		for _, v := range vs {
+			if v != "" {
+				gv = append(gv, goipp.String(v))
+			}
+		}
+		add(name, tag, gv...)
+	}
+	enums := func(name string, table map[string]goipp.Integer, vs ...string) {
+		var gv []goipp.Value
+		for _, v := range vs {
+			if n, ok := table[v]; ok {
+				gv = append(gv, n)
+			}
+		}
+		add(name, goipp.TagEnum, gv...)
+	}
+	ints := func(name string, vs ...int) {
+		var gv []goipp.Value
+		for _, v := range vs {
+			if v > 0 {
+				gv = append(gv, goipp.Integer(int32(v))) //nolint:gosec // small test values
+			}
+		}
+		add(name, goipp.TagInteger, gv...)
+	}
+	res := func(name string, vs ...int) {
+		var gv []goipp.Value
+		for _, v := range vs {
+			if v > 0 {
+				gv = append(gv, goipp.Resolution{Xres: v, Yres: v, Units: goipp.UnitsDpi})
+			}
+		}
+		add(name, goipp.TagResolution, gv...)
+	}
+
+	strs("document-format-supported", goipp.TagMimeType, c.Formats...)
+	strs("media-supported", goipp.TagKeyword, c.Media...)
+	strs("media-default", goipp.TagKeyword, d.Media)
+	strs("media-source-supported", goipp.TagKeyword, c.MediaSources...)
+	strs("media-type-supported", goipp.TagKeyword, c.MediaTypes...)
+	var col goipp.Collection
+	for _, m := range []struct{ name, v string }{{"media-size-name", d.Media}, {"media-source", d.MediaSource}, {"media-type", d.MediaType}} {
+		if m.v != "" {
+			col.Add(goipp.MakeAttribute(m.name, goipp.TagKeyword, goipp.String(m.v)))
+		}
+	}
+	if len(col) > 0 {
+		add("media-col-default", goipp.TagBeginCollection, col)
+	}
+	strs("sides-supported", goipp.TagKeyword, c.Sides...)
+	strs("sides-default", goipp.TagKeyword, d.Sides)
+	strs("print-color-mode-supported", goipp.TagKeyword, c.ColorModes...)
+	strs("print-color-mode-default", goipp.TagKeyword, d.ColorMode)
+	enums("print-quality-supported", ippcaps.Qualities, c.Qualities...)
+	enums("print-quality-default", ippcaps.Qualities, d.Quality)
+	res("printer-resolution-supported", c.Resolutions...)
+	res("printer-resolution-default", d.Resolution)
+	strs("print-content-optimize-supported", goipp.TagKeyword, c.ContentOptimize...)
+	strs("print-content-optimize-default", goipp.TagKeyword, d.ContentOptimize)
+	enums("orientation-requested-supported", ippcaps.Orientations, c.Orientations...)
+	enums("orientation-requested-default", ippcaps.Orientations, d.Orientation)
+	ints("number-up-supported", c.NumberUp...)
+	ints("number-up-default", d.NumberUp)
+	strs("print-scaling-supported", goipp.TagKeyword, c.PrintScalings...)
+	strs("print-scaling-default", goipp.TagKeyword, d.PrintScaling)
+	strs("output-bin-supported", goipp.TagKeyword, c.OutputBins...)
+	strs("output-bin-default", goipp.TagKeyword, d.OutputBin)
+	enums("finishings-supported", ippcaps.Finishings, c.Finishings...)
+	enums("finishings-default", ippcaps.Finishings, d.Finishings)
+	if c.CopiesMax > 0 {
+		add("copies-supported", goipp.TagRange, goipp.Range{Lower: 1, Upper: c.CopiesMax})
+		add("copies-default", goipp.TagInteger, goipp.Integer(1))
+	}
+	return out
 }
 
 func (s *System) find(res string) *queue {

@@ -1,7 +1,7 @@
 // Copy for the Scan view. Shared words (the page title, problem messages) come from ../strings.
 
 export const scanStrings = {
-  description: "Scan from the glass or the document feeder and download the result.",
+  description: "Scan from the flatbed or the document feeder and download the result.",
   unavailable: {
     loading: "Checking the scanner…",
     title: "The scanner is not ready",
@@ -11,27 +11,8 @@ export const scanStrings = {
   options: {
     title: "Scan settings",
     loading: "Reading what the scanner can do…",
-    source: {
-      label: "Source",
-      platen: "Glass",
-      adf: "Document feeder",
-      "adf-duplex": "Document feeder, both sides",
-    },
-    resolution: "Resolution",
-    dpi: (n: number) => `${n} dpi`,
-    colorMode: {
-      label: "Colour",
-      color: "Colour",
-      grayscale: "Greyscale",
-      blackandwhite: "Black and white",
-    },
-    format: {
-      label: "File type",
-      pdf: "PDF",
-      jpeg: "JPEG",
-      pdfHint: "One document with every page",
-      jpegHint: "One image per page; several pages download as a ZIP",
-    },
+    cannotScan:
+      "This scanner does not report a source, resolution or colour mode, so pagewire cannot scan with it.",
   },
   submit: "Scan",
   cancel: "Cancel scan",
@@ -65,6 +46,9 @@ export const scanStrings = {
       days === 0
         ? "Scans are kept until you delete them."
         : `Scans are deleted after ${days} ${days === 1 ? "day" : "days"}.`,
+    /** A row's line: the scanner's name when it is known, then what it holds. */
+    from: (scanner: string | undefined, summary: string) =>
+      scanner ? `${scanner} · ${summary}` : summary,
     summary: (pages: number, format: string) =>
       `${pages} ${pages === 1 ? "page" : "pages"}, ${format}`,
     empty: "No recent scans",

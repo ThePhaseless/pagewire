@@ -5,19 +5,24 @@ metadata:
   namespace: printing
 # Every rule names its objects except pods. The "pagewire" resourceName is the owner
 # Deployment: if you change PAGEWIRE_K8S_OWNER, change it here too (two rules).
+# The device workloads use a fixed set of slot names, one per node with USB devices
+# (at most 4, MaxSlots in internal/backend/k8s): pagewire-device, then
+# pagewire-device-1 to -3. resourceNames match exactly, so the three rules that name
+# them list all four. Slots 1-3 are used only with the optional pagewire-nodes
+# ClusterRole (clusterrole.yaml); without it pagewire runs pagewire-device alone.
 # internal/backend/k8s/policy_test.go checks every client call against this file.
 rules:
   # Owner lookup of this control plane's own Deployment (PAGEWIRE_K8S_OWNER), and
-  # reads of the device Deployment.
+  # reads of the device Deployments (slot recovery reads their node annotation).
   - apiGroups: [apps]
     resources: [deployments]
-    resourceNames: [pagewire, pagewire-device]
+    resourceNames: [pagewire, pagewire-device, pagewire-device-1, pagewire-device-2, pagewire-device-3]
     verbs: [get]
-  # The device Deployment. Server-side apply is a PATCH by name that may create
+  # The device Deployments. Server-side apply is a PATCH by name that may create
   # the object, so it needs both patch and create on that name.
   - apiGroups: [apps]
     resources: [deployments]
-    resourceNames: [pagewire-device]
+    resourceNames: [pagewire-device, pagewire-device-1, pagewire-device-2, pagewire-device-3]
     verbs: [create, patch, delete]
   # The device Deployment, ConfigMap and token Secret set blockOwnerDeletion in their
   # ownerReference to the owner Deployment, which needs update on its finalizers.
@@ -25,10 +30,10 @@ rules:
     resources: [deployments/finalizers]
     resourceNames: [pagewire]
     verbs: [update]
-  # The device ConfigMap (ipp-usb, SANE and AirSane settings), server-side applied.
+  # The device ConfigMaps (ipp-usb, SANE and AirSane settings), server-side applied.
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [pagewire-device]
+    resourceNames: [pagewire-device, pagewire-device-1, pagewire-device-2, pagewire-device-3]
     verbs: [get, create, patch, delete]
   # The agent token Secret, server-side applied by name.
   - apiGroups: [""]

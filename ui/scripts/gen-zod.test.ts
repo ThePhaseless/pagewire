@@ -159,7 +159,7 @@ describe("generate", () => {
     expect(dt.safeParse("2026-11-24 17:00").success).toBe(false);
 
     const { JobSchema } = await import("../src/gen/api.ts");
-    const job = { id: 1, name: "a", state: "pending", reasons: [], createdAt: "" };
+    const job = { id: 1, printer: "p", name: "a", state: "pending", reasons: [], createdAt: "" };
     expect(
       JobSchema.safeParse({ ...job, createdAt: "2026-11-24T17:00:00.123456789+01:00" }).success,
     ).toBe(true);

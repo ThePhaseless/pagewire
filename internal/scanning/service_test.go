@@ -101,7 +101,7 @@ func newHarness(t *testing.T, pages int) *harness {
 func (h *harness) newService(retention func() time.Duration) *Service {
 	return New(Options{
 		Dir:       h.dir,
-		Scanner:   func() Scanner { return h.scan },
+		Scanner:   func(string) Scanner { return h.scan },
 		Retention: retention,
 		Events:    h.events,
 		Now:       h.clock.Now,
@@ -400,7 +400,7 @@ func TestServiceFailures(t *testing.T) {
 		h := newHarness(t, 1)
 		h.scan.gate = make(chan struct{})
 		c, cancel := context.WithCancel(context.Background())
-		svc := New(Options{Dir: h.dir, Scanner: func() Scanner { return h.scan }, Context: c})
+		svc := New(Options{Dir: h.dir, Scanner: func(string) Scanner { return h.scan }, Context: c})
 		sc, err := svc.Start(Settings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"})
 		if err != nil {
 			t.Fatal(err)
@@ -436,7 +436,7 @@ func TestServiceFailures(t *testing.T) {
 	})
 	t.Run("no scanner", func(t *testing.T) {
 		h := newHarness(t, 1)
-		svc := New(Options{Dir: h.dir, Scanner: func() Scanner { return nil }})
+		svc := New(Options{Dir: h.dir, Scanner: func(string) Scanner { return nil }})
 		if _, err := svc.Start(Settings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"}); !errors.Is(err, ErrNoScanner) {
 			t.Fatalf("Start: %v, want ErrNoScanner", err)
 		}
@@ -602,5 +602,64 @@ func TestServiceQuota(t *testing.T) {
 	h.wait(t, sc.ID, ScanCompleted)
 	if MaxStoredBytes != 1<<30 || MaxPageBytes != 256<<20 {
 		t.Fatalf("limits %d and %d, want 1 GiB and 256 MiB", MaxStoredBytes, MaxPageBytes)
+	}
+}
+
+// TestServiceScannersByID: a scan runs on the scanner its settings name and
+// records it; an unknown id gives ErrNoScanner.
+func TestServiceScannersByID(t *testing.T) {
+	h := newHarness(t, 0)
+	a, b := &fakeScanner{pages: [][]byte{jpegBytes(t, 60, 80, false)}}, &fakeScanner{pages: [][]byte{jpegBytes(t, 60, 80, false)}}
+	scanners := map[string]Scanner{"a": a, "b": b}
+	svc := New(Options{Dir: h.dir, Events: h.events, Now: h.clock.Now, Scanner: func(id string) Scanner {
+		if s, ok := scanners[id]; ok {
+			return s
+		}
+		return nil
+	}})
+	h.svc = svc
+	sc, err := svc.Start(Settings{Scanner: "b", Source: "platen", Resolution: 300, ColorMode: "color", Format: "jpeg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Scanner != "b" {
+		t.Errorf("Start returned scanner %q, want b", sc.Scanner)
+	}
+	h.wait(t, sc.ID, ScanCompleted)
+	a.mu.Lock()
+	b.mu.Lock()
+	aNext, bNext := a.next, b.next
+	a.mu.Unlock()
+	b.mu.Unlock()
+	if aNext != 0 || bNext != 1 {
+		t.Errorf("pages read: a %d, b %d; want only b", aNext, bNext)
+	}
+	if _, err := svc.Start(Settings{Scanner: "c", Source: "platen", Resolution: 300, ColorMode: "color", Format: "jpeg"}); !errors.Is(err, ErrNoScanner) {
+		t.Errorf("Start on unknown scanner: %v, want ErrNoScanner", err)
+	}
+
+	// The scanner is persisted in the meta and survives a reload.
+	got, err := h.newService(nil).Get(sc.ID)
+	if err != nil || got.Scanner != "b" || got.Settings.Scanner != "b" {
+		t.Errorf("reloaded scan = %+v, %v; want scanner b", got, err)
+	}
+}
+
+// TestServiceLegacyMetaWithoutScanner: a meta.json written before scans named
+// their scanner loads with scanner "".
+func TestServiceLegacyMetaWithoutScanner(t *testing.T) {
+	h := newHarness(t, 0)
+	const id = "0123456789abcdef"
+	if err := os.MkdirAll(filepath.Join(h.dir, id), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"id":"` + id + `","state":"completed","createdAt":"2026-11-01T10:00:00Z","pages":1,"format":"jpeg",` +
+		`"settings":{"source":"platen","resolution":300,"colorMode":"color","format":"jpeg"},"error":null}`
+	if err := os.WriteFile(filepath.Join(h.dir, id, "meta.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.newService(nil).Get(id)
+	if err != nil || got.Scanner != "" || got.State != ScanCompleted {
+		t.Fatalf("legacy scan = %+v, %v; want loaded with scanner \"\"", got, err)
 	}
 }

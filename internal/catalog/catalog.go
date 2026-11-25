@@ -1,6 +1,7 @@
 // Package catalog holds the embedded device catalog (printer families,
 // scanners, EULAs, vendor blobs and dispatch data), the generated driver and
-// SANE indexes, the shared device fixtures, and the dispatcher Decide.
+// SANE indexes, the shared device fixtures, and the dispatcher: Roles,
+// DecidePrinter and DecideScanner (dispatch.go), Bind and Detect (match.go).
 package catalog
 
 import (

@@ -22,7 +22,7 @@ import (
 
 // Names and labels of the rendered objects.
 const (
-	DeviceName      = "pagewire-device" // Deployment and ConfigMap
+	DeviceName      = "pagewire-device" // slot 0's Deployment and ConfigMap
 	TokenSecretName = "pagewire-agent-token"
 	TokenSecretKey  = "token"
 	NameLabel       = "app.kubernetes.io/name"
@@ -31,7 +31,26 @@ const (
 
 	SpecHashAnnotation   = "pagewire.thephaseless.github.io/spec-hash"
 	ConfigHashAnnotation = "pagewire.thephaseless.github.io/config-hash"
+	// NodeAnnotation names the node a Deployment is pinned to. It is on the
+	// Deployment only, so the pod template (and its hash) does not carry it;
+	// slot recovery reads it.
+	NodeAnnotation = "pagewire.thephaseless.github.io/node"
+	// WorkloadLabel marks every device workload; it is not in the selector.
+	WorkloadLabel = "pagewire.thephaseless.github.io/device-workload"
 )
+
+// MaxSlots is the number of device workload slots. RBAC resourceNames match
+// exactly, so deploy/base/role.yaml lists every SlotName.
+const MaxSlots = 4
+
+// SlotName is the Deployment and ConfigMap name of slot i: slot 0 keeps
+// today's name, so an existing install is adopted in place.
+func SlotName(i int) string {
+	if i == 0 {
+		return DeviceName
+	}
+	return DeviceName + "-" + strconv.Itoa(i)
+}
 
 // ErrNoUSBResource is returned for usb and probe specs when Params.USBResource is empty.
 var ErrNoUSBResource = errors.New("needs a USB resource but Params.USBResource is empty")
@@ -54,6 +73,10 @@ type Params struct {
 	BlobPVC     string
 	SelfImage   string // image of the owner's SelfContainer: probe, agent and fetch-blobs
 	PodUID      string // agent --pod-uid; "" renders $(POD_UID) from the downward API
+	Slot        int    // workload slot, 0 to MaxSlots-1: names the Deployment and ConfigMap
+	// BlobWorkload marks the one workload that mounts the blob volume (a
+	// ReadWriteOnce PVC): its agent stages EULAs, and only it may fetch blobs.
+	BlobWorkload bool
 }
 
 // Fixed uids. messagebus and avahi match the LABELs of images/device/Dockerfile.
@@ -92,19 +115,25 @@ type Container struct {
 	Command, Args []string
 	Env           []EnvVar
 	UID           int64
-	USB, Sidecar  bool
+	USB           []device.USBKey // the devices the container serves
+	USBAll        bool            // the container needs every USB device of the node (the probe)
+	Sidecar       bool
 	Mounts        []Mount
 	Res           [4]string // cpu request, memory request, cpu limit, memory limit
 }
+
+func (c Container) usesUSB() bool { return c.USBAll || len(c.USB) > 0 }
 
 // EnvVar is a container environment variable. FieldPath is for the Kubernetes
 // downward API only; Value is ignored when it is set.
 type EnvVar struct{ Name, Value, FieldPath string }
 
-// Mount mounts the volume Vol (a VolumeOrder name) at Path.
+// Mount mounts the volume Vol (a VolumeOrder name) at Path; SubPath, when
+// set, mounts that subdirectory of the volume instead.
 type Mount struct {
 	Vol, Path string
 	RO        bool
+	SubPath   string
 }
 
 // Render builds the device Deployment and ConfigMap for spec. It is pure: it
@@ -117,11 +146,19 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 	if usbMode && p.USBResource == "" {
 		return nil, nil, fmt.Errorf("spec mode %s %w", spec.Mode, ErrNoUSBResource)
 	}
+	if p.Slot < 0 || p.Slot >= MaxSlots {
+		return nil, nil, fmt.Errorf("render: slot %d out of range 0-%d", p.Slot, MaxSlots-1)
+	}
+	// The blob PVC is ReadWriteOnce: a second workload mounting it would never start.
+	if len(spec.Blobs) > 0 && !p.BlobWorkload {
+		return nil, nil, fmt.Errorf("render: workload %s needs vendor blobs but is not the blob workload", SlotName(p.Slot))
+	}
 	plan, err := Plan(spec, p)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	name := SlotName(p.Slot)
 	cm := configMap(plan.Config, p)
 	used := map[string]bool{}
 	pod := corev1ac.PodSpec().
@@ -139,26 +176,40 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 	for _, c := range plan.Mains {
 		pod.WithContainers(c.build(p.USBResource, used))
 	}
-	for _, name := range VolumeOrder {
-		if used[name] {
-			pod.WithVolumes(volume(name, p.BlobPVC))
+	for _, v := range VolumeOrder {
+		if used[v] {
+			pod.WithVolumes(volume(v, name, p.BlobPVC))
 		}
 	}
+	// Pinned by the Node object's name, which is what USBNodes returns; the
+	// kubernetes.io/hostname label need not equal it.
+	if spec.Node != "" {
+		pod.WithAffinity(corev1ac.Affinity().WithNodeAffinity(corev1ac.NodeAffinity().
+			WithRequiredDuringSchedulingIgnoredDuringExecution(corev1ac.NodeSelector().
+				WithNodeSelectorTerms(corev1ac.NodeSelectorTerm().
+					WithMatchFields(corev1ac.NodeSelectorRequirement().
+						WithKey("metadata.name").WithOperator(corev1.NodeSelectorOpIn).WithValues(spec.Node))))))
+	}
 
-	labels := map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager}
-	deploy := appsv1ac.Deployment(DeviceName, p.Namespace).
+	labels := map[string]string{NameLabel: name, ManagedByLabel: FieldManager, WorkloadLabel: "true"}
+	annotations := map[string]string{
+		"reloader.stakater.com/auto":                  "false",
+		SpecHashAnnotation:                            spec.Hash,
+		"ignore-check.kube-linter.io/host-network":    hostNetworkReason,
+		"ignore-check.kube-linter.io/run-as-non-root": rootReason,
+	}
+	if spec.Node != "" {
+		annotations[NodeAnnotation] = spec.Node
+	}
+	deploy := appsv1ac.Deployment(name, p.Namespace).
 		WithLabels(labels).
-		WithAnnotations(map[string]string{
-			"reloader.stakater.com/auto":                  "false",
-			SpecHashAnnotation:                            spec.Hash,
-			"ignore-check.kube-linter.io/host-network":    hostNetworkReason,
-			"ignore-check.kube-linter.io/run-as-non-root": rootReason,
-		}).
+		WithAnnotations(annotations).
 		WithOwnerReferences(ownerRef(p.Owner)).
 		WithSpec(appsv1ac.DeploymentSpec().
 			WithReplicas(1).
 			WithStrategy(appsv1ac.DeploymentStrategy().WithType("Recreate")).
-			WithSelector(metav1ac.LabelSelector().WithMatchLabels(map[string]string{NameLabel: DeviceName})).
+			// Slot 0 keeps today's selector, which cannot change, so the live Deployment is adopted.
+			WithSelector(metav1ac.LabelSelector().WithMatchLabels(map[string]string{NameLabel: name})).
 			WithTemplate(corev1ac.PodTemplateSpec().
 				WithLabels(labels).
 				WithAnnotations(map[string]string{
@@ -172,24 +223,23 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 // Plan builds the backend-neutral device workload for spec. Unlike Render it
 // does not check Params.USBResource, which only Kubernetes uses. It is pure:
 // it reads only spec, p and the embedded catalog.
+//
+// One daemon per family serves every device of the workload: ipp-usb, one
+// printer application per PAPPL family (in catalog order), one ippeveprinter
+// per simulated printer and one AirSane for the airsane and simulated scanners.
 func Plan(spec *device.Spec, p Params) (Pod, error) {
 	if spec == nil {
 		return Pod{}, errors.New("render: nil spec")
 	}
 	usbMode := spec.Mode == device.ModeUSB || spec.Mode == device.ModeProbe
-	// ippeveprinter takes the name as its last argument: one starting with -
-	// would be read as an option. Config validation refuses it too.
-	if spec.Mode == device.ModeSimulated && strings.HasPrefix(spec.Name, "-") {
-		return Pod{}, fmt.Errorf("render: printer name %q must not start with -", spec.Name)
-	}
 	cat := catalog.Default()
 	deviceImage := ImageRef(p.Registry, p.Tag, "pagewire-device", p.Overrides)
 
 	probe := Container{
 		Name: "probe", Image: p.SelfImage, Command: []string{"/pagewire"},
 		Args: []string{"agent", "probe", "--out", device.InventoryFile},
-		UID:  uidNonroot, USB: usbMode,
-		Mounts: []Mount{{"run-pagewire", "/run/pagewire", false}},
+		UID:  uidNonroot, USBAll: usbMode,
+		Mounts: []Mount{{Vol: "run-pagewire", Path: "/run/pagewire"}},
 		Res:    [4]string{"10m", "16Mi", "200m", "64Mi"},
 	}
 	if usbMode {
@@ -199,7 +249,7 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 		Name: "dbus", Image: deviceImage, Sidecar: true, UID: uidMessagebus,
 		Command: []string{"/usr/bin/dbus-daemon"},
 		Args:    []string{"--config-file=/etc/pagewire/dbus.conf", "--nofork", "--nopidfile"},
-		Mounts:  []Mount{{"run-dbus", "/run/dbus", false}},
+		Mounts:  []Mount{{Vol: "run-dbus", Path: "/run/dbus"}},
 		Res:     [4]string{"5m", "8Mi", "100m", "32Mi"},
 	}
 	avahi := Container{
@@ -209,7 +259,7 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 		// avahi-daemon creates /run/avahi-daemon itself and refuses it unless it
 		// is owned by avahi:avahi, which an emptyDir mounted there never is; so
 		// its own emptyDir is /run, with the shared /run/dbus mounted inside.
-		Mounts: []Mount{{"run-avahi", "/run", false}, {"run-dbus", "/run/dbus", false}},
+		Mounts: []Mount{{Vol: "run-avahi", Path: "/run"}, {Vol: "run-dbus", Path: "/run/dbus"}},
 		Res:    [4]string{"5m", "8Mi", "100m", "32Mi"},
 	}
 	podUID, podUIDEnv := "$(POD_UID)", []EnvVar{{Name: "POD_UID", FieldPath: "metadata.uid"}}
@@ -227,103 +277,141 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 			"--dbus-address", device.DBusAddress,
 			"--inventory", device.InventoryFile,
 			"--blob-status", device.BlobStatusFile,
+			device.AgentWorkloadArg, spec.Node,
 		},
 		Env: podUIDEnv,
 		Mounts: []Mount{
-			{"agent-token", "/var/run/pagewire", true},
-			{"run-pagewire", "/run/pagewire", true},
-			{"run-dbus", "/run/dbus", false},
+			{Vol: "agent-token", Path: "/var/run/pagewire", RO: true},
+			{Vol: "run-pagewire", Path: "/run/pagewire", RO: true},
+			{Vol: "run-dbus", Path: "/run/dbus"},
 		},
 		Res: [4]string{"10m", "32Mi", "200m", "128Mi"},
 	}
 
 	// The agent stages EULA texts on the blob volume, so the wizard and
 	// Settings can show a licence before it is accepted.
-	if usbMode && p.BlobPVC != "" {
+	if usbMode && p.BlobWorkload && p.BlobPVC != "" {
 		agent.Args = append(agent.Args, "--blob-dir", "/blobs")
-		agent.Mounts = append(agent.Mounts, Mount{"blobs", "/blobs", false})
-	}
-
-	var printer catalog.Printer
-	if spec.Printer != "" {
-		var ok bool
-		if printer, ok = cat.Printer(spec.Printer); !ok {
-			return Pod{}, fmt.Errorf("render: unknown printer family %q", spec.Printer)
-		}
-		if printer.App != "" {
-			agent.Args = append(agent.Args, "--pappl-url", fmt.Sprintf("ipp://127.0.0.1:%d/ipp/system", printer.Port))
-		}
+		agent.Mounts = append(agent.Mounts, Mount{Vol: "blobs", Path: "/blobs"})
 	}
 
 	inits := []Container{probe, dbus, avahi}
-	var mains []Container
-	switch spec.Mode {
-	case device.ModeProbe:
-		mains = []Container{agent}
-	case device.ModeUSB:
-		inits = append(inits, agent)
-		if len(spec.Blobs) > 0 {
-			inits = append(inits, fetchBlobs(spec, p.SelfImage))
-		}
-		if spec.Printer == "ipp-usb" || spec.Scanner == "ipp-usb" {
-			mains = append(mains, Container{
-				Name: "ipp-usb", Image: deviceImage, UID: uidRoot, USB: true,
-				Command: []string{"/usr/local/sbin/ipp-usb"}, Args: []string{"standalone"},
-				Mounts: []Mount{
-					{"ipp-usb-conf", "/etc/ipp-usb", true},
-					{"run-dbus", "/run/dbus", false},
-					{"ipp-usb-state", "/var/ipp-usb", false},
-					{"ipp-usb-log", "/var/log/ipp-usb", false},
-				},
-				Res: [4]string{"10m", "32Mi", "500m", "128Mi"},
-			})
-		}
-		if printer.App != "" {
-			c := Container{
-				Name: "printer-app", Image: ImageRef(p.Registry, p.Tag, printer.Image, p.Overrides), UID: uidRoot, USB: true,
-				Command: []string{"/usr/local/bin/" + printer.App},
-				// log-file=- logs to stderr, so nothing is written under the read-only root.
-				Args: []string{"-o", "server-port=" + strconv.Itoa(printer.Port), "-o", "log-file=-", "server"},
-				Mounts: []Mount{
-					{"app-run", "/run", false}, // PAPPL's control socket /run/<app>.sock
-					{"run-dbus", "/run/dbus", false},
-					{"app-state", "/var/lib/" + printer.App, false},
-					{"app-spool", "/var/spool/" + printer.App, false},
-					{"tmp", "/tmp", false},
-					{"app-ssl", "/etc/cups/ssl", false},                // PAPPL's self-signed TLS certificate
-					{"app-fontconfig", "/var/cache/fontconfig", false}, // the filters' font cache
-				},
-				Res: [4]string{"50m", "64Mi", "2", "1Gi"},
-			}
-			if len(spec.Blobs) > 0 {
-				c.Mounts = append(c.Mounts, Mount{"blobs", "/blobs", true})
-			}
-			mains = append(mains, c)
-		}
-		if spec.Scanner == "airsane" {
-			mains = append(mains, airsane(cat, spec, deviceImage, uidRoot, true))
-		}
-	case device.ModeSimulated:
-		inits = append(inits, agent)
-		mains = append(mains, Container{
-			Name: "sim-printer", Image: deviceImage, UID: uidNonroot,
-			Command: []string{"/usr/sbin/ippeveprinter"},
-			Args: []string{
-				"-p", strconv.Itoa(printer.Port),
-				"-f", "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf",
-				"-l", spec.Location, spec.Name,
-			},
-			Mounts: []Mount{{"run-dbus", "/run/dbus", false}, {"tmp", "/tmp", false}},
-			Res:    [4]string{"10m", "16Mi", "500m", "128Mi"},
-		})
-		if spec.Scanner != "" {
-			mains = append(mains, airsane(cat, spec, deviceImage, uidNonroot, false))
-		}
-	default:
+	if spec.Mode == device.ModeProbe {
+		return Pod{Inits: inits, Mains: []Container{agent}, Config: configData(cat, spec)}, nil
+	}
+	if spec.Mode != device.ModeUSB && spec.Mode != device.ModeSimulated {
 		return Pod{}, fmt.Errorf("render: unknown spec mode %q", spec.Mode)
 	}
+	inits = append(inits, agent)
+	if len(spec.Blobs) > 0 {
+		inits = append(inits, fetchBlobs(spec, p.SelfImage))
+	}
 
+	var ippUSB, airsaneUSB []device.USBKey
+	pappl := map[string][]device.USBKey{} // PAPPL family -> its printers' devices
+	var sims []device.PrinterSpec
+	for _, ps := range spec.Printers {
+		fam, ok := cat.Printer(ps.Family)
+		switch {
+		case !ok:
+			return Pod{}, fmt.Errorf("render: unknown printer family %q", ps.Family)
+		case ps.Family == "ipp-usb":
+			ippUSB = addKey(ippUSB, ps.USB)
+		case ps.Family == "sim":
+			// ippeveprinter takes the name as its last argument: one starting
+			// with - would be read as an option. Config validation refuses it too.
+			if strings.HasPrefix(ps.Name, "-") {
+				return Pod{}, fmt.Errorf("render: printer name %q must not start with -", ps.Name)
+			}
+			sims = append(sims, ps)
+		case fam.App != "":
+			pappl[ps.Family] = addKey(pappl[ps.Family], ps.USB)
+		default:
+			return Pod{}, fmt.Errorf("render: printer family %q has no daemon", ps.Family)
+		}
+	}
+	runAirsane := false
+	for _, ss := range spec.Scanners {
+		switch ss.Family {
+		case "ipp-usb":
+			ippUSB = addKey(ippUSB, ss.USB)
+		case "airsane":
+			airsaneUSB, runAirsane = addKey(airsaneUSB, ss.USB), true
+		case "sim":
+			runAirsane = true
+		default:
+			return Pod{}, fmt.Errorf("render: unknown scanner family %q", ss.Family)
+		}
+	}
+
+	var mains []Container
+	if len(ippUSB) > 0 {
+		mains = append(mains, Container{
+			Name: "ipp-usb", Image: deviceImage, UID: uidRoot, USB: ippUSB,
+			Command: []string{"/usr/local/sbin/ipp-usb"}, Args: []string{"standalone"},
+			Mounts: []Mount{
+				{Vol: "ipp-usb-conf", Path: "/etc/ipp-usb", RO: true},
+				{Vol: "run-dbus", Path: "/run/dbus"},
+				{Vol: "ipp-usb-state", Path: "/var/ipp-usb"},
+				{Vol: "ipp-usb-log", Path: "/var/log/ipp-usb"},
+			},
+			Res: [4]string{"10m", "32Mi", "500m", "128Mi"},
+		})
+	}
+	for _, fam := range cat.Printers {
+		keys := pappl[fam.ID]
+		if len(keys) == 0 {
+			continue
+		}
+		// Each app keeps its state in its own subdirectory of the shared
+		// volumes, so two apps in one pod never touch each other's files.
+		sub := fam.ID
+		c := Container{
+			Name: "printer-app-" + fam.ID, Image: ImageRef(p.Registry, p.Tag, fam.Image, p.Overrides), UID: uidRoot, USB: keys,
+			Command: []string{"/usr/local/bin/" + fam.App},
+			// log-file=- logs to stderr, so nothing is written under the read-only root.
+			Args: []string{"-o", "server-port=" + strconv.Itoa(fam.Port), "-o", "log-file=-", "server"},
+			Mounts: []Mount{
+				{Vol: "app-run", Path: "/run", SubPath: sub}, // PAPPL's control socket /run/<app>.sock
+				{Vol: "run-dbus", Path: "/run/dbus"},
+				{Vol: "app-state", Path: "/var/lib/" + fam.App, SubPath: sub},
+				{Vol: "app-spool", Path: "/var/spool/" + fam.App, SubPath: sub},
+				{Vol: "tmp", Path: "/tmp"},
+				{Vol: "app-ssl", Path: "/etc/cups/ssl", SubPath: sub},                // PAPPL's self-signed TLS certificate
+				{Vol: "app-fontconfig", Path: "/var/cache/fontconfig", SubPath: sub}, // the filters' font cache
+			},
+			Res: [4]string{"50m", "64Mi", "2", "1Gi"},
+		}
+		if len(spec.Blobs) > 0 {
+			c.Mounts = append(c.Mounts, Mount{Vol: "blobs", Path: "/blobs", RO: true})
+		}
+		mains = append(mains, c)
+	}
+	for i, ps := range sims {
+		mains = append(mains, Container{
+			Name: "sim-printer-" + strconv.Itoa(i), Image: deviceImage, UID: uidNonroot,
+			Command: []string{"/usr/sbin/ippeveprinter"},
+			Args: []string{
+				"-p", strconv.Itoa(ps.Port),
+				"-f", "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf",
+				"-l", ps.Location, ps.Name,
+			},
+			Mounts: []Mount{{Vol: "run-dbus", Path: "/run/dbus"}, {Vol: "tmp", Path: "/tmp"}},
+			Res:    [4]string{"10m", "16Mi", "500m", "128Mi"},
+		})
+	}
+	if runAirsane {
+		mains = append(mains, airsane(cat, spec, deviceImage, airsaneUSB))
+	}
 	return Pod{Inits: inits, Mains: mains, Config: configData(cat, spec)}, nil
+}
+
+// addKey appends k to keys unless it is already there.
+func addKey(keys []device.USBKey, k device.USBKey) []device.USBKey {
+	if slices.Contains(keys, k) {
+		return keys
+	}
+	return append(keys, k)
 }
 
 func fetchBlobs(spec *device.Spec, image string) Container {
@@ -340,17 +428,23 @@ func fetchBlobs(spec *device.Spec, image string) Container {
 	return Container{
 		Name: "fetch-blobs", Image: image, UID: uidNonroot,
 		Command: []string{"/pagewire"}, Args: args,
-		Mounts: []Mount{{"blobs", "/blobs", false}, {"run-pagewire", "/run/pagewire", false}},
+		Mounts: []Mount{{Vol: "blobs", Path: "/blobs"}, {Vol: "run-pagewire", Path: "/run/pagewire"}},
 		Res:    [4]string{"10m", "32Mi", "500m", "256Mi"},
 	}
 }
 
-func airsane(cat *catalog.Catalog, spec *device.Spec, image string, uid int64, usb bool) Container {
+// airsane serves the airsane scanners' devices (usb) and the simulated
+// scanner; it runs as root only when it has a USB device.
+func airsane(cat *catalog.Catalog, spec *device.Spec, image string, usb []device.USBKey) Container {
 	port := 0
 	for _, s := range cat.Scanners {
-		if s.ID == spec.Scanner {
+		if s.ID == "airsane" {
 			port = s.Port
 		}
+	}
+	uid := int64(uidNonroot)
+	if len(usb) > 0 {
+		uid = uidRoot
 	}
 	c := Container{
 		Name: "airsane", Image: image, UID: uid, USB: usb,
@@ -363,15 +457,15 @@ func airsane(cat *catalog.Catalog, spec *device.Spec, image string, uid int64, u
 		},
 		Env: []EnvVar{{Name: "SANE_CONFIG_DIR", Value: "/etc/pagewire/sane.d:"}},
 		Mounts: []Mount{
-			{"airsane-conf", "/etc/pagewire/airsane", true},
-			{"sane-conf", "/etc/pagewire/sane.d", true},
-			{"run-dbus", "/run/dbus", false},
-			{"tmp", "/tmp", false},
+			{Vol: "airsane-conf", Path: "/etc/pagewire/airsane", RO: true},
+			{Vol: "sane-conf", Path: "/etc/pagewire/sane.d", RO: true},
+			{Vol: "run-dbus", Path: "/run/dbus"},
+			{Vol: "tmp", Path: "/tmp"},
 		},
 		Res: [4]string{"20m", "32Mi", "1", "512Mi"},
 	}
 	if len(spec.Blobs) > 0 {
-		c.Mounts = append(c.Mounts, Mount{"blobs", "/blobs", true})
+		c.Mounts = append(c.Mounts, Mount{Vol: "blobs", Path: "/blobs", RO: true})
 	}
 	return c
 }
@@ -383,7 +477,7 @@ func (c Container) build(usbResource string, used map[string]bool) *corev1ac.Con
 	lim := corev1.ResourceList{
 		corev1.ResourceCPU: resource.MustParse(c.Res[2]), corev1.ResourceMemory: resource.MustParse(c.Res[3]),
 	}
-	if c.USB {
+	if c.usesUSB() {
 		req[corev1.ResourceName(usbResource)] = resource.MustParse("1")
 		lim[corev1.ResourceName(usbResource)] = resource.MustParse("1")
 	}
@@ -422,15 +516,19 @@ func (c Container) build(usbResource string, used map[string]bool) *corev1ac.Con
 		if m.RO {
 			vm.WithReadOnly(true)
 		}
+		if m.SubPath != "" {
+			vm.WithSubPath(m.SubPath)
+		}
 		out.WithVolumeMounts(vm)
 	}
 	return out
 }
 
-func volume(name, blobPVC string) *corev1ac.VolumeApplyConfiguration {
+// volume is the pod volume name; configMap is the slot's ConfigMap.
+func volume(name, configMap, blobPVC string) *corev1ac.VolumeApplyConfiguration {
 	v := corev1ac.Volume().WithName(name)
 	items := func(keys ...string) *corev1ac.ConfigMapVolumeSourceApplyConfiguration {
-		s := corev1ac.ConfigMapVolumeSource().WithName(DeviceName)
+		s := corev1ac.ConfigMapVolumeSource().WithName(configMap)
 		for _, k := range keys {
 			s.WithItems(corev1ac.KeyToPath().WithKey(k).WithPath(k))
 		}
@@ -470,19 +568,34 @@ var ippUSBConf = `[network]
 `
 
 func configMap(data map[string]string, p Params) *corev1ac.ConfigMapApplyConfiguration {
-	return corev1ac.ConfigMap(DeviceName, p.Namespace).
-		WithLabels(map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager}).
+	name := SlotName(p.Slot)
+	return corev1ac.ConfigMap(name, p.Namespace).
+		WithLabels(map[string]string{NameLabel: name, ManagedByLabel: FieldManager}).
 		WithOwnerReferences(ownerRef(p.Owner)).
 		WithData(data)
 }
 
 // configData is the device config files, keyed by file name.
 func configData(cat *catalog.Catalog, spec *device.Spec) map[string]string {
-	backends := spec.SaneBackends
-	switch {
-	case spec.Mode == device.ModeSimulated:
-		backends = []string{"test"}
-	case len(backends) == 0:
+	// dll.conf: the sorted union of the airsane scanners' backends (the
+	// default ones for a scanner without any), plus "test" for the simulated
+	// scanner; the default backends, in catalog order, when that leaves nothing
+	// (probe, printers only).
+	var backends []string
+	for _, ss := range spec.Scanners {
+		switch {
+		case ss.Family == "sim":
+			backends = append(backends, "test")
+		case ss.Family != "airsane":
+		case len(ss.SaneBackends) == 0:
+			backends = append(backends, cat.DefaultSaneBackends...)
+		default:
+			backends = append(backends, ss.SaneBackends...)
+		}
+	}
+	slices.Sort(backends)
+	backends = slices.Compact(backends)
+	if len(backends) == 0 {
 		backends = cat.DefaultSaneBackends
 	}
 	return map[string]string{

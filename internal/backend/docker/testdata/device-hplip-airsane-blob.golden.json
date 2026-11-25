@@ -416,17 +416,17 @@
         "--token-file",
         "/var/run/pagewire/token",
         "--pod-uid",
-        "docker-23e9c00eea5e",
+        "docker-60324838b29e",
         "--dbus-address",
         "unix:path=/run/dbus/system_bus_socket",
         "--inventory",
         "/run/pagewire/inventory.json",
         "--blob-status",
         "/run/pagewire/blobs.json",
+        "--workload",
+        "",
         "--blob-dir",
-        "/blobs",
-        "--pappl-url",
-        "ipp://127.0.0.1:8002/ipp/system"
+        "/blobs"
       ],
       "Healthcheck": {
         "Test": [
@@ -703,7 +703,7 @@
     }
   },
   {
-    "name": "printer-app",
+    "name": "printer-app-hplip",
     "runOnce": false,
     "config": {
       "Hostname": "",
@@ -735,7 +735,7 @@
         "/usr/local/bin/hplip-printer-app"
       ],
       "Labels": {
-        "io.github.thephaseless.pagewire.container": "printer-app",
+        "io.github.thephaseless.pagewire.container": "printer-app-hplip",
         "io.github.thephaseless.pagewire.init": "false",
         "io.github.thephaseless.pagewire.managed-by": "pagewire",
         "io.github.thephaseless.pagewire.usb-device": "/dev/bus/usb/001/007"

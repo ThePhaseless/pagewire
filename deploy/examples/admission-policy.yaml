@@ -1,8 +1,10 @@
 # Optional. The printing namespace runs at the privileged Pod Security level because
-# the device pod needs hostNetwork. This policy takes back the rest: pods in that
-# namespace may use hostNetwork, but not privileged containers, hostPath volumes,
-# hostPID, hostIPC, added capabilities or allowPrivilegeEscalation: true. It covers
-# containers, initContainers and ephemeralContainers.
+# the device pod needs hostNetwork, so this policy is the only guard there. Pods may
+# use hostNetwork, but not privileged containers, hostPath volumes, hostPID, hostIPC,
+# added capabilities or allowPrivilegeEscalation: true. Every container must drop
+# ALL capabilities (no NET_RAW on the node's network), and neither the pod nor a
+# container may set an Unconfined seccomp or AppArmor profile. It covers containers,
+# initContainers and ephemeralContainers (kubectl debug needs --profile=restricted).
 # Needs Kubernetes 1.30 or later. Apply it with kubectl apply -f; it is not part of
 # deploy/base because it is cluster-scoped.
 apiVersion: admissionregistration.k8s.io/v1
@@ -46,6 +48,23 @@ spec:
         variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) &&
         variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
       message: added capabilities are not allowed
+    - expression: >-
+        variables.containers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop) &&
+        variables.initContainers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop) &&
+        variables.ephemeralContainers.all(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop)
+      message: containers must drop ALL capabilities
+    - expression: >-
+        !(has(object.spec.securityContext) && has(object.spec.securityContext.seccompProfile) && object.spec.securityContext.seccompProfile.type == 'Unconfined') &&
+        variables.containers.all(c, !(has(c.securityContext) && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'Unconfined')) &&
+        variables.initContainers.all(c, !(has(c.securityContext) && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'Unconfined')) &&
+        variables.ephemeralContainers.all(c, !(has(c.securityContext) && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'Unconfined'))
+      message: Unconfined seccomp profiles are not allowed
+    - expression: >-
+        !(has(object.spec.securityContext) && has(object.spec.securityContext.appArmorProfile) && object.spec.securityContext.appArmorProfile.type == 'Unconfined') &&
+        variables.containers.all(c, !(has(c.securityContext) && has(c.securityContext.appArmorProfile) && c.securityContext.appArmorProfile.type == 'Unconfined')) &&
+        variables.initContainers.all(c, !(has(c.securityContext) && has(c.securityContext.appArmorProfile) && c.securityContext.appArmorProfile.type == 'Unconfined')) &&
+        variables.ephemeralContainers.all(c, !(has(c.securityContext) && has(c.securityContext.appArmorProfile) && c.securityContext.appArmorProfile.type == 'Unconfined'))
+      message: Unconfined AppArmor profiles are not allowed
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

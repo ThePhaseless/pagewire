@@ -18,6 +18,8 @@ import (
 var (
 	hex4Re     = regexp.MustCompile(`^[0-9a-f]{4}$`)
 	pwgMediaRe = regexp.MustCompile(`^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$`)
+	keywordRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}$`)
+	entryIDRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 )
 
 var structValidator = func() *validator.Validate {
@@ -32,6 +34,8 @@ var structValidator = func() *validator.Validate {
 	}
 	must(v.RegisterValidation("hex4", func(fl validator.FieldLevel) bool { return hex4Re.MatchString(fl.Field().String()) }))
 	must(v.RegisterValidation("pwgmedia", func(fl validator.FieldLevel) bool { return pwgMediaRe.MatchString(fl.Field().String()) }))
+	must(v.RegisterValidation("ippkeyword", func(fl validator.FieldLevel) bool { return keywordRe.MatchString(fl.Field().String()) }))
+	must(v.RegisterValidation("entryid", func(fl validator.FieldLevel) bool { return entryIDRe.MatchString(fl.Field().String()) }))
 	must(v.RegisterValidation("nocontrol", func(fl validator.FieldLevel) bool {
 		return !strings.ContainsFunc(fl.Field().String(), unicode.IsControl)
 	}))
@@ -47,9 +51,24 @@ func Parse(b []byte) (*Config, error) {
 }
 
 func parse(b []byte) (*Config, *ast.File, error) {
+	// Decode onto the defaults so missing keys keep them, but leave the two
+	// required keys empty so their absence is reported.
+	c := Default("")
+	c.APIVersion = ""
+	file, err := decode(b, &c, func(body ast.Node) { fillDefaults(body, &c) })
+	if err != nil {
+		return nil, nil, err
+	}
+	return &c, file, nil
+}
+
+// decode parses b as one YAML document, decodes it strictly onto c (a pointer
+// to a struct holding its defaults), calls fill with the document body and
+// runs the struct checks.
+func decode(b []byte, c any, fill func(body ast.Node)) (*ast.File, error) {
 	file, err := parser.ParseBytes(b, 0)
 	if err != nil {
-		return nil, nil, &ErrorList{Errors: []FieldError{yamlError(nil, err)}}
+		return nil, &ErrorList{Errors: []FieldError{yamlError(nil, err)}}
 	}
 	var body ast.Node
 	if len(file.Docs) > 0 {
@@ -57,36 +76,97 @@ func parse(b []byte) (*Config, *ast.File, error) {
 	}
 	if len(file.Docs) > 1 {
 		line, col := position(file.Docs[1])
-		return nil, nil, &ErrorList{Errors: []FieldError{{Line: line, Column: col, Message: "multiple YAML documents are not supported"}}}
+		return nil, &ErrorList{Errors: []FieldError{{Line: line, Column: col, Message: "multiple YAML documents are not supported"}}}
 	}
-
-	// Decode onto the defaults so missing keys keep them, but leave the two
-	// required keys empty so their absence is reported.
-	c := Default("")
-	c.APIVersion = ""
 	if body != nil {
-		literalStrings(body, reflect.TypeFor[Config]())
-		if err := yaml.NodeToValue(body, &c, yaml.Strict()); err != nil {
-			return nil, nil, &ErrorList{Errors: []FieldError{yamlError(body, err)}}
+		literalStrings(body, reflect.TypeOf(c))
+		if err := yaml.NodeToValue(body, c, yaml.Strict()); err != nil {
+			return nil, &ErrorList{Errors: []FieldError{yamlError(body, err)}}
 		}
 	}
-	if c.Licenses.AcceptedEULAs == nil {
-		c.Licenses.AcceptedEULAs = []EULARef{}
-	}
+	fill(body)
 
-	if err := structValidator.Struct(&c); err != nil {
+	if err := structValidator.Struct(c); err != nil {
 		var verrs validator.ValidationErrors
 		if !errors.As(err, &verrs) {
-			return nil, nil, err
+			return nil, err
 		}
 		el := &ErrorList{}
 		for _, fe := range verrs {
 			el.Errors = append(el.Errors, FieldError{Path: namespacePointer(fe.Namespace()), Message: validationMessage(fe)})
 		}
 		locate(body, el)
-		return nil, nil, el
+		return nil, el
 	}
-	return &c, file, nil
+	return file, nil
+}
+
+// fillDefaults fills what decoding onto Default cannot: the defaults inside
+// list entries, and empty lists for null or missing ones. enabled is true
+// when its key is absent or null.
+func fillDefaults(body ast.Node, c *Config) {
+	or := func(s *string, def string) {
+		if *s == "" {
+			*s = def
+		}
+	}
+	for i := range c.Printers {
+		p := &c.Printers[i]
+		if !hasKey(body, fmt.Sprintf("/printers/%d", i), "enabled") {
+			p.Enabled = true
+		}
+		or(&p.Mode, ModeUSB)
+		or(&p.Driver, Auto)
+	}
+	for i := range c.Scanners {
+		s := &c.Scanners[i]
+		if !hasKey(body, fmt.Sprintf("/scanners/%d", i), "enabled") {
+			s.Enabled = true
+		}
+		or(&s.Mode, ModeUSB)
+		or(&s.Backend, BackendAuto)
+	}
+	for i := range c.IgnoredDevices {
+		if c.IgnoredDevices[i].Roles == nil {
+			c.IgnoredDevices[i].Roles = []string{}
+		}
+	}
+	if c.Printers == nil {
+		c.Printers = []Printer{}
+	}
+	if c.Scanners == nil {
+		c.Scanners = []Scanner{}
+	}
+	if c.IgnoredDevices == nil {
+		c.IgnoredDevices = []IgnoredDevice{}
+	}
+	if c.Licenses.AcceptedEULAs == nil {
+		c.Licenses.AcceptedEULAs = []EULARef{}
+	}
+}
+
+// hasKey reports whether the mapping at the JSON pointer has key with a
+// non-null value.
+//
+// shortcut: only literal keys count, so an enabled key that reaches an entry
+// through a merge key (<<: *base) is not seen; resolve merges if configs use them.
+func hasKey(body ast.Node, pointer, key string) bool {
+	n := body
+	for _, seg := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+		if n == nil {
+			return false
+		}
+		n = child(unwrap(n), seg)
+	}
+	if n == nil {
+		return false
+	}
+	v := child(unwrap(n), key)
+	if v == nil {
+		return false
+	}
+	_, null := unwrap(v).(*ast.NullNode)
+	return !null
 }
 
 // literalStrings replaces every integer, float or bool scalar that sits at a
@@ -181,6 +261,9 @@ func validationMessage(fe validator.FieldError) string {
 		if isString {
 			return "must be at least " + fe.Param() + " characters"
 		}
+		if fe.Kind() == reflect.Slice {
+			return "must have at least " + fe.Param() + " entries"
+		}
 		return "must be at least " + fe.Param()
 	case "max":
 		if isString {
@@ -191,6 +274,10 @@ func validationMessage(fe validator.FieldError) string {
 		return "must be 4 lowercase hex digits"
 	case "pwgmedia":
 		return "must be a PWG self-describing media name such as iso_a4_210x297mm"
+	case "ippkeyword":
+		return "must be a lower-case IPP keyword"
+	case "entryid":
+		return "must be 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash"
 	case "nocontrol":
 		return "must not contain control characters"
 	case "startsnotwith":
@@ -201,8 +288,8 @@ func validationMessage(fe validator.FieldError) string {
 	return "fails the " + fe.Tag() + " check"
 }
 
-// namespacePointer turns "Config.licenses.acceptedEulas[0].id" into
-// "/licenses/acceptedEulas/0/id".
+// namespacePointer turns "Config.printers[0].defaults.media" into
+// "/printers/0/defaults/media".
 func namespacePointer(ns string) string {
 	_, rest, _ := strings.Cut(ns, ".")
 	rest = strings.NewReplacer("[", ".", "]", "").Replace(rest)

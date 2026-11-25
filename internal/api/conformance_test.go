@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,11 +70,20 @@ func (f *statusFake) Current() apitypes.Status {
 func (f *statusFake) Subscribe() (<-chan apitypes.Status, func()) { return f.ch, func() {} }
 
 type setupFake struct {
-	s     apitypes.Setup
-	eulas map[string]apitypes.EULA // nil: the real controller's (pending)
+	s       apitypes.Setup
+	eulas   map[string]apitypes.EULA // nil: the real controller's (pending)
+	detects *int                     // counts Detect calls when set
+	err     error                    // Detect's error
 }
 
 func (f setupFake) Setup() apitypes.Setup { return f.s }
+
+func (f setupFake) Detect(context.Context) error {
+	if f.detects != nil {
+		*f.detects++
+	}
+	return f.err
+}
 
 func (f setupFake) EULA(id string) (apitypes.EULA, bool) {
 	if f.eulas == nil {
@@ -97,6 +107,23 @@ type printerFake struct {
 	jobCalls  int
 	cancelErr error
 	canceled  []int
+}
+
+// printersFake holds the printers by entry id; others are unknown.
+type printersFake struct {
+	byID map[string]*printerFake
+	err  error // returned for every known id when set (ErrNoPrinter)
+}
+
+func (f *printersFake) Printer(id string) (Printer, error) {
+	p, ok := f.byID[id]
+	if !ok {
+		return nil, ErrUnknownPrinter
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return p, nil
 }
 
 type submission struct {
@@ -183,6 +210,8 @@ func (f *printerFake) calls() int {
 
 type scansFake struct {
 	mu       sync.Mutex
+	ids      []string // known, enabled scanner ids
+	capsIDs  []string // the ids Caps was asked for
 	caps     apitypes.ScannerCaps
 	capsErr  error
 	startErr error
@@ -193,7 +222,15 @@ type scansFake struct {
 	canceled int
 }
 
-func (f *scansFake) Caps(context.Context) (apitypes.ScannerCaps, error) { return f.caps, f.capsErr }
+func (f *scansFake) Caps(_ context.Context, id string) (apitypes.ScannerCaps, error) {
+	f.mu.Lock()
+	f.capsIDs = append(f.capsIDs, id)
+	f.mu.Unlock()
+	if !slices.Contains(f.ids, id) {
+		return apitypes.ScannerCaps{}, ErrUnknownScanner
+	}
+	return f.caps, f.capsErr
+}
 
 func (f *scansFake) Start(set apitypes.ScanSettings) (apitypes.Scan, error) {
 	if err := scanning.Validate(set); err != nil {
@@ -202,7 +239,7 @@ func (f *scansFake) Start(set apitypes.ScanSettings) (apitypes.Scan, error) {
 	if f.startErr != nil {
 		return apitypes.Scan{}, f.startErr
 	}
-	sc := apitypes.Scan{ID: "0123456789abcdef", State: "scanning", CreatedAt: time.Now(), Format: set.Format, Settings: set}
+	sc := apitypes.Scan{ID: "0123456789abcdef", Scanner: set.Scanner, State: "scanning", CreatedAt: time.Now(), Format: set.Format, Settings: set}
 	f.mu.Lock()
 	f.scans = append(f.scans, sc)
 	f.mu.Unlock()
@@ -277,7 +314,9 @@ type testEnv struct {
 	path     string
 	store    *store.Store
 	status   *statusFake
-	printer  *printerFake
+	printer  *printerFake // printer "p1"
+	printers *printersFake
+	caps     *device.PrinterCaps // PrinterCaps for every id; nil: not known
 	scans    *scansFake
 	hub      *Hub
 	mu       sync.Mutex
@@ -290,6 +329,18 @@ type testEnv struct {
 
 func check(b []byte) (*config.Config, error) { return config.Check(b, catalog.Known()) }
 
+// migrate is serve's store normaliser: config.Migrate without its bool.
+func migrate(b []byte) ([]byte, error) {
+	out, _, err := config.Migrate(b)
+	return out, err
+}
+
+func (e *testEnv) setCaps(c *device.PrinterCaps) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.caps = c
+}
+
 func newEnv(t *testing.T, mod ...func(*Deps)) *testEnv {
 	t.Helper()
 	e := &testEnv{
@@ -297,11 +348,13 @@ func newEnv(t *testing.T, mod ...func(*Deps)) *testEnv {
 		path:    filepath.Join(t.TempDir(), "pagewire.yaml"),
 		status:  &statusFake{st: emptyStatus(t), ch: make(chan apitypes.Status, 1)},
 		printer: &printerFake{formats: []string{printing.FormatPDF, printing.FormatJPEG}},
-		scans:   &scansFake{pageDir: t.TempDir()},
+		scans:   &scansFake{pageDir: t.TempDir(), ids: []string{"s1"}},
 		hub:     NewHub(),
 		cfg:     config.Default("Printer"),
 	}
-	e.store = store.New(e.path, func(b []byte) error { _, err := check(b); return err })
+	e.printers = &printersFake{byID: map[string]*printerFake{"p1": e.printer}}
+	// As serve builds it: every write is migrated to v2 first.
+	e.store = store.New(e.path, func(b []byte) error { _, err := check(b); return err }, store.WithNormalize(migrate))
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
 	t.Cleanup(cancel)
@@ -314,9 +367,17 @@ func newEnv(t *testing.T, mod ...func(*Deps)) *testEnv {
 			defer e.mu.Unlock()
 			return e.lastGood
 		},
-		Status:          e.status,
-		Setup:           setupFake{s: emptySetup(t)},
-		Printer:         e.printer,
+		Status:   e.status,
+		Setup:    setupFake{s: emptySetup(t)},
+		Printers: e.printers,
+		PrinterCaps: func(string) (device.PrinterCaps, bool) {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.caps == nil {
+				return device.PrinterCaps{}, false
+			}
+			return *e.caps, true
+		},
 		Scans:           e.scans,
 		Hub:             e.hub,
 		BaseContext:     ctx,
@@ -390,6 +451,8 @@ func multipartBody(t *testing.T, parts ...[3]string) (io.Reader, string) {
 }
 
 const goodOptions = `{"copies":1,"sides":"one-sided","colorMode":"auto","media":"iso_a4_210x297mm","quality":"normal"}`
+
+const printPath = "/api/v1/printers/p1/print"
 
 const samplePDF = "%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
@@ -479,9 +542,9 @@ func validateDef(t *testing.T, def string, body []byte) {
 
 type nopBackend struct{}
 
-func (nopBackend) Apply(context.Context, *device.Spec) error { return nil }
-func (nopBackend) Observe(context.Context) (device.Observation, error) {
-	return device.Observation{Phase: "absent"}, nil
+func (nopBackend) Apply(context.Context, []*device.Spec) error { return nil }
+func (nopBackend) Observe(context.Context) ([]device.Observation, error) {
+	return []device.Observation{{Phase: "absent"}}, nil
 }
 
 // realController is a controller before any input: the empty state.
@@ -499,33 +562,51 @@ var textSHA = strings.Repeat("a", 64)
 func populatedUSB(t *testing.T) (apitypes.Status, apitypes.Setup) {
 	t.Helper()
 	inv := catalog.Fixture("ippusb-mfp")
-	inv.ProbedAt = time.Date(2026, 11, 24, 17, 0, 0, 123456789, cet)
-	dec, err := catalog.Decide(inv, config.Default("x").Device)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dec.Device == nil {
+	dev := inv.Devices[0]
+	cat := catalog.Default()
+	sel := &config.USB{VendorID: dev.VendorID, ProductID: dev.ProductID, Serial: dev.Serial}
+	p := config.Printer{ID: "p1", Name: "MFP", Enabled: true, Mode: config.ModeUSB, USB: sel, Driver: config.Auto}
+	s := config.Scanner{ID: "s1", Name: "MFP scanner", Enabled: true, Mode: config.ModeUSB, USB: sel, Backend: config.BackendAuto}
+	pdec, sdec := cat.DecidePrinter(&dev, p), cat.DecideScanner(&dev, s)
+	if pdec.Device == nil || sdec.Device == nil {
 		t.Fatal("usb decision without device")
 	}
 	at := time.Date(2026, 11, 24, 18, 30, 0, 0, cet)
+	uri, url := "ipp://192.168.1.20:60000/ipp/print", "http://192.168.1.20:60000/eSCL"
 	st := apitypes.Status{
 		Config: apitypes.StatusConfig{State: "applied", Etag: "abc", AppliedEtag: "abc", ChangedAt: at},
-		Device: apitypes.StatusDevice{
-			Phase: "ready", Mode: "usb", Decision: &dec, Inventory: &inv, Message: "",
+		Phase:  "ready",
+		Printers: []apitypes.StatusPrinter{{
+			ID: "p1", Name: "MFP", Enabled: true, Phase: "ready", Decision: &pdec, Device: &dev,
+			Warnings:  []apitypes.Warning{{Option: "colorMode", Value: "auto", Using: "monochrome", Message: "colorMode auto is not offered by this printer; it uses monochrome"}},
+			Available: true, URI: uri, State: "idle",
+			Formats: []string{printing.FormatPDF}, Media: []string{"iso_a4_210x297mm"},
+			Markers:      []apitypes.Marker{{Name: "Black", Color: "#000000", Level: 80}},
+			Capabilities: device.PrinterCaps{Media: []string{"iso_a4_210x297mm"}, MediaDefault: "iso_a4_210x297mm", CopiesMax: 99},
+			Connect:      apitypes.PrinterConnect{DNSSDName: "MFP", IPPURIs: []string{uri}},
+		}},
+		Scanners: []apitypes.StatusScanner{{
+			ID: "s1", Name: "MFP scanner", Enabled: true, Phase: "ready", Decision: &sdec, Device: &dev,
+			Available: true, URL: url, State: "idle",
+			Capabilities: apitypes.ScannerCaps{Sources: []string{"platen"}, Resolutions: []int{300}, ColorModes: []string{"color"}, Intents: []string{"document"}},
+			Connect:      apitypes.ScannerConnect{DNSSDName: "MFP", ESCLURLs: []string{url}},
+		}},
+		Workloads: []apitypes.StatusWorkload{{
+			Phase: "running", Mode: "usb",
 			Advertised: []apitypes.AdvertisedService{{Type: "_ipp._tcp", Name: "MFP", Port: 60000}},
 			Blobs:      []device.BlobStatus{{ID: "hplip-plugin", Version: "3.24.4", State: "installed"}},
-		},
-		Printer: apitypes.StatusPrinter{
-			Available: true, URI: "ipp://192.168.1.20:60000/ipp/print", State: "idle",
-			Formats: []string{printing.FormatPDF}, Media: []string{"iso_a4_210x297mm"},
-			Markers: []apitypes.Marker{{Name: "Black", Color: "#000000", Level: 80}},
-		},
-		Scanner:   apitypes.StatusScanner{Available: true, URL: "http://192.168.1.20:60000/eSCL", State: "idle"},
-		Reconcile: []apitypes.ReconcileItem{{Item: "device", OK: true, At: at}},
-		Connect:   apitypes.Connect{DNSSDName: "MFP", IPPURIs: []string{"ipp://192.168.1.20:60000/ipp/print"}},
+		}},
+		Devices:   []apitypes.DetectedDevice{{Device: dev, CanPrint: true, CanScan: true, PrinterID: "p1", ScannerID: "s1", PrinterDecision: &pdec, ScannerDecision: &sdec}},
+		Reconcile: []apitypes.ReconcileItem{{Item: "workload/default", OK: true, At: at}},
 	}
+	np, ns := p, s
+	np.Defaults, ns.Defaults = config.PrintDefaults{}, config.ScanDefaults{}
 	setup := apitypes.Setup{
-		Backend: "k8s", USBResourceConfigured: true, Inventory: &inv, Decision: &dec,
+		Backend: "k8s", USBResourceConfigured: true,
+		Devices: []apitypes.DetectedDevice{{
+			Device: dev, CanPrint: true, CanScan: true, SuggestedPrinter: &np, SuggestedScanner: &ns,
+			PrinterDecision: &pdec, ScannerDecision: &sdec,
+		}},
 		EULAs: []apitypes.SetupEULA{{
 			ID: "hplip-plugin", Version: "3.24.4", Title: "HP", Vendor: "HP", Summary: "s",
 			State: apitypes.EULAAvailable, TextSHA256: &textSHA,
@@ -537,50 +618,52 @@ func populatedUSB(t *testing.T) (apitypes.Status, apitypes.Setup) {
 
 func populatedSimulated(t *testing.T) (apitypes.Status, apitypes.Setup) {
 	t.Helper()
-	sel := config.Default("x").Device
-	sel.Mode = config.ModeSimulated
-	dec, err := catalog.Decide(device.Inventory{}, sel)
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := config.Printer{ID: "p1", Name: "Simulated", Enabled: true, Mode: config.ModeSimulated, Driver: config.Auto}
+	dec := catalog.Default().DecidePrinter(nil, p)
 	if dec.Device != nil {
 		t.Fatal("simulated decision with a device")
 	}
 	st := realController().Current()
 	st.Config.State = "applied"
-	st.Device.Phase, st.Device.Mode, st.Device.Decision = "ready", "simulated", &dec
+	st.Phase = "ready"
+	st.Printers = []apitypes.StatusPrinter{{
+		ID: "p1", Name: "Simulated", Enabled: true, Phase: "ready", Decision: &dec, State: "unknown",
+	}}
+	sdec := catalog.Default().DecideScanner(nil, config.Scanner{ID: "s1", Name: "Simulated scanner", Enabled: true, Mode: config.ModeSimulated})
+	// Every list nil, connect.esclUrls included: the encoder answers [].
+	st.Scanners = []apitypes.StatusScanner{{ID: "s1", Name: "Simulated scanner", Enabled: true, Phase: "deploying", Decision: &sdec, State: "unknown"}}
 	setup := realController().Setup()
-	setup.Decision = &dec
-	setup.Suggested.Device.Mode = config.ModeSimulated
+	setup.Suggested.Printers = []config.Printer{p}
 	return st, setup
 }
 
 // routeDefs maps every public route to the $defs entry of its success body
 // ("" for routes without a JSON success body). A route missing here fails.
 var routeDefs = map[string]string{
-	"GET /api/v1/config":               "ConfigResponse",
-	"GET /api/v1/config/raw":           "",
-	"PUT /api/v1/config":               "ConfigResponse",
-	"PATCH /api/v1/config":             "ConfigResponse",
-	"GET /api/v1/setup":                "Setup",
-	"GET /api/v1/eulas/{id}":           "EULA",
-	"GET /api/v1/status":               "Status",
-	"GET /api/v1/events":               "",
-	"POST /api/v1/print":               "Job",
-	"GET /api/v1/jobs":                 "Job[]",
-	"GET /api/v1/jobs/{id}":            "Job",
-	"DELETE /api/v1/jobs/{id}":         "",
-	"GET /api/v1/scanner":              "ScannerCaps",
-	"POST /api/v1/scans":               "Scan",
-	"GET /api/v1/scans":                "Scan[]",
-	"GET /api/v1/scans/{id}":           "Scan",
-	"GET /api/v1/scans/{id}/pages/{n}": "",
-	"GET /api/v1/scans/{id}/download":  "",
-	"DELETE /api/v1/scans/{id}":        "Scan", // 202 on a running scan; 204 has no body
-	"/api/":                            "",
-	"GET /healthz":                     "",
-	"GET /readyz":                      "",
-	"/":                                "",
+	"GET /api/v1/config":                      "ConfigResponse",
+	"GET /api/v1/config/raw":                  "",
+	"PUT /api/v1/config":                      "ConfigResponse",
+	"PATCH /api/v1/config":                    "ConfigResponse",
+	"GET /api/v1/setup":                       "Setup",
+	"POST /api/v1/setup/detect":               "",
+	"GET /api/v1/eulas/{id}":                  "EULA",
+	"GET /api/v1/status":                      "Status",
+	"GET /api/v1/events":                      "",
+	"POST /api/v1/printers/{id}/print":        "PrintResult",
+	"GET /api/v1/printers/{id}/jobs":          "Job[]",
+	"GET /api/v1/printers/{id}/jobs/{job}":    "Job",
+	"DELETE /api/v1/printers/{id}/jobs/{job}": "",
+	"GET /api/v1/scanners/{id}/capabilities":  "ScannerCaps",
+	"POST /api/v1/scans":                      "Scan",
+	"GET /api/v1/scans":                       "Scan[]",
+	"GET /api/v1/scans/{id}":                  "Scan",
+	"GET /api/v1/scans/{id}/pages/{n}":        "",
+	"GET /api/v1/scans/{id}/download":         "",
+	"DELETE /api/v1/scans/{id}":               "Scan", // 202 on a running scan; 204 has no body
+	"/api/":                                   "",
+	"GET /healthz":                            "",
+	"GET /readyz":                             "",
+	"/":                                       "",
 }
 
 type conformance struct {
@@ -630,20 +713,21 @@ func TestConformanceEmpty(t *testing.T) {
 	c := &conformance{t: t, e: e, checked: map[string]bool{}}
 	c.call("GET /api/v1/status", "GET", "/api/v1/status", "", 200)
 	c.call("GET /api/v1/setup", "GET", "/api/v1/setup", "", 200)
-	c.call("GET /api/v1/jobs", "GET", "/api/v1/jobs", "", 200)
+	c.call("GET /api/v1/printers/{id}/jobs", "GET", "/api/v1/printers/p1/jobs", "", 200)
 	c.call("GET /api/v1/scans", "GET", "/api/v1/scans", "", 200)
 	c.call("GET /api/v1/config", "GET", "/api/v1/config", "", 404)
-	c.call("GET /api/v1/jobs/{id}", "GET", "/api/v1/jobs/7", "", 404)
+	c.call("GET /api/v1/printers/{id}/jobs/{job}", "GET", "/api/v1/printers/p1/jobs/7", "", 404)
 	c.call("GET /api/v1/scans/{id}", "GET", "/api/v1/scans/0123456789abcdef", "", 404)
 	e.scans.capsErr = scanning.ErrNoScanner
-	c.call("GET /api/v1/scanner", "GET", "/api/v1/scanner", "", 503)
-	if body := c.call("GET /api/v1/status", "GET", "/api/v1/status", "", 200); !bytes.Contains(body, []byte(`"mode":"none"`)) {
+	c.call("GET /api/v1/scanners/{id}/capabilities", "GET", "/api/v1/scanners/s1/capabilities", "", 503)
+	if body := c.call("GET /api/v1/status", "GET", "/api/v1/status", "", 200); !bytes.Contains(body, []byte(`"phase":"none"`)) ||
+		!bytes.Contains(body, []byte(`"printers":[]`)) {
 		t.Fatalf("empty Status is not the initial Status: %s", body)
 	}
 	// Every route again, with nil slices and zero values in the fakes.
 	checked := runRoutes(t, realController().Current(), realController().Setup(), false)
 	for pattern, def := range routeDefs {
-		if def != "" && pattern != "GET /api/v1/jobs/{id}" && pattern != "GET /api/v1/scans/{id}" && pattern != "DELETE /api/v1/scans/{id}" && !checked[pattern] {
+		if def != "" && pattern != "GET /api/v1/printers/{id}/jobs/{job}" && pattern != "GET /api/v1/scans/{id}" && pattern != "DELETE /api/v1/scans/{id}" && !checked[pattern] {
 			t.Errorf("route %s (%s) never validated in the empty state", pattern, def)
 		}
 	}
@@ -653,6 +737,9 @@ func runPopulated(t *testing.T, st apitypes.Status, setup apitypes.Setup) map[st
 	t.Helper()
 	return runRoutes(t, st, setup, true)
 }
+
+// v2Body is a v2 config body with one simulated printer.
+const v2Body = `{"apiVersion":"pagewire/v2","name":"Office","printers":[{"id":"p1","name":"Office","mode":"simulated","defaults":{}}]}`
 
 // runRoutes walks every JSON route. Unpopulated, the fakes hold nil slices and
 // zero values, and the by-id GETs answer 404.
@@ -665,12 +752,12 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 	errMsg := "jammed"
 	scans := []apitypes.Scan{
 		{
-			ID: "00000000000000aa", State: "completed", CreatedAt: time.Date(2026, 11, 24, 10, 0, 0, 0, cet), Pages: 2, Format: "pdf",
-			Settings: apitypes.ScanSettings{Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"},
+			ID: "00000000000000aa", Scanner: "s1", State: "completed", CreatedAt: time.Date(2026, 11, 24, 10, 0, 0, 0, cet), Pages: 2, Format: "pdf",
+			Settings: apitypes.ScanSettings{Scanner: "s1", Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"},
 		},
 		{
-			ID: "00000000000000bb", State: "failed", CreatedAt: time.Date(2026, 11, 24, 10, 5, 0, 0, cet), Format: "jpeg",
-			Settings: apitypes.ScanSettings{Source: "platen", Resolution: 150, ColorMode: "grayscale", Format: "jpeg"}, Error: &errMsg,
+			ID: "00000000000000bb", Scanner: "s1", State: "failed", CreatedAt: time.Date(2026, 11, 24, 10, 5, 0, 0, cet), Format: "jpeg",
+			Settings: apitypes.ScanSettings{Scanner: "s1", Source: "platen", Resolution: 150, ColorMode: "grayscale", Format: "jpeg", Intent: "photo"}, Error: &errMsg,
 		},
 	}
 	fake := setupFake{s: setup}
@@ -687,7 +774,8 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 	if populated {
 		e.printer.jobs = jobs
 		e.scans.scans = scans
-		e.scans.caps = apitypes.ScannerCaps{Sources: []string{"platen", "adf"}, Resolutions: []int{150, 300}, ColorModes: []string{"color"}, ADF: true}
+		e.scans.caps = apitypes.ScannerCaps{Sources: []string{"platen", "adf"}, Resolutions: []int{150, 300}, ColorModes: []string{"color"}, ADF: true, Intents: []string{"document"}}
+		e.setCaps(&device.PrinterCaps{ColorModes: []string{"monochrome"}, ColorModeDefault: "monochrome", CopiesMax: 99})
 		byID = 200
 	} else {
 		// No job to read back: POST /print answers with its fallback job.
@@ -698,15 +786,22 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 
 	c.call("GET /api/v1/status", "GET", "/api/v1/status", "", 200)
 	c.call("GET /api/v1/setup", "GET", "/api/v1/setup", "", 200)
+	c.call("POST /api/v1/setup/detect", "POST", "/api/v1/setup/detect", "", 202)
 	c.call("GET /api/v1/eulas/{id}", "GET", "/api/v1/eulas/hplip-plugin", "", 200)
 	c.call("GET /api/v1/eulas/{id}", "GET", "/api/v1/eulas/no-such-eula", "", 404)
-	c.call("GET /api/v1/jobs", "GET", "/api/v1/jobs", "", 200)
-	c.call("GET /api/v1/jobs/{id}", "GET", "/api/v1/jobs/2", "", byID)
-	c.call("GET /api/v1/scanner", "GET", "/api/v1/scanner", "", 200)
+	c.call("GET /api/v1/printers/{id}/jobs", "GET", "/api/v1/printers/p1/jobs", "", 200)
+	c.call("GET /api/v1/printers/{id}/jobs", "GET", "/api/v1/printers/nope/jobs", "", 404)
+	c.call("GET /api/v1/printers/{id}/jobs/{job}", "GET", "/api/v1/printers/p1/jobs/2", "", byID)
+	c.call("GET /api/v1/scanners/{id}/capabilities", "GET", "/api/v1/scanners/s1/capabilities", "", 200)
+	c.call("GET /api/v1/scanners/{id}/capabilities", "GET", "/api/v1/scanners/nope/capabilities", "", 404)
 	c.call("GET /api/v1/scans", "GET", "/api/v1/scans", "", 200)
 	c.call("GET /api/v1/scans/{id}", "GET", "/api/v1/scans/00000000000000bb", "", byID)
-	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`, 202)
-	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"source":"glass","resolution":300,"colorMode":"color","format":"pdf"}`, 422)
+	if !populated {
+		e.scans.caps = apitypes.ScannerCaps{Sources: []string{"platen"}, Resolutions: []int{300}, ColorModes: []string{"color"}}
+	}
+	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"scanner":"s1","source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`, 202)
+	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"scanner":"s1","source":"glass","resolution":300,"colorMode":"color","format":"pdf"}`, 422)
+	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"scanner":"nope","source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`, 404)
 	if populated {
 		e.scans.running = "00000000000000bb"
 		c.call("DELETE /api/v1/scans/{id}", "DELETE", "/api/v1/scans/00000000000000bb", "", 202)
@@ -716,22 +811,22 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 
 	body, ct := multipartBody(t, [3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF})
 	b, _ := io.ReadAll(body)
-	c.call("POST /api/v1/print", "POST", "/api/v1/print", string(b), 202, "Content-Type", ct)
+	c.call("POST /api/v1/printers/{id}/print", "POST", printPath, string(b), 202, "Content-Type", ct)
+	c.call("POST /api/v1/printers/{id}/print", "POST", "/api/v1/printers/nope/print", string(b), 404, "Content-Type", ct)
 
-	// Config: applied without device.usb, PUT and PATCH success, both 412s, invalid.
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"Office","device":{"mode":"simulated"}}`, 201,
-		"If-None-Match", "*")
+	// Config: applied without usb, PUT and PATCH success, both 412s, invalid.
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", v2Body, 201, "If-None-Match", "*")
 	body1 := c.call("GET /api/v1/config", "GET", "/api/v1/config", "", 200)
-	if bytes.Contains(body1, []byte(`"usb"`)) {
-		t.Fatalf("config without device.usb has a usb key: %s", body1)
+	if bytes.Contains(body1, []byte(`"usb"`)) || hasEmptyKey(string(body1)) {
+		t.Fatalf("config without usb or defaults has a usb or empty key: %s", body1)
 	}
 	stale := e.etag()
-	c.call("PATCH /api/v1/config", "PATCH", "/api/v1/config", `{"location":"Hall"}`, 200,
+	c.call("PATCH /api/v1/config", "PATCH", "/api/v1/config", `{"name":"Hall"}`, 200,
 		"If-Match", quote(stale), "Content-Type", "application/merge-patch+json")
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"Office 2"}`, 200, "If-Match", quote(e.etag()))
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"x"}`, 412, "If-Match", quote(stale))
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"x","bogus":1}`, 422, "If-Match", quote(e.etag()))
-	e.writeFile("apiVersion: pagewire/v1\nname: [\n")
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v2","name":"Office 2"}`, 200, "If-Match", quote(e.etag()))
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v2","name":"x"}`, 412, "If-Match", quote(stale))
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v2","name":"x","bogus":1}`, 422, "If-Match", quote(e.etag()))
+	e.writeFile("apiVersion: pagewire/v2\nname: [\n")
 	rec := e.do("PATCH", "/api/v1/config", strings.NewReader(`{"name":"y"}`), "If-Match", quote(stale), "Content-Type", "application/merge-patch+json")
 	if rec.Code != 412 {
 		t.Fatalf("412 against invalid file: %d %s", rec.Code, rec.Body)
@@ -759,10 +854,13 @@ func TestConformancePopulatedSimulated(t *testing.T) {
 	runPopulated(t, st, setup)
 	e := newEnv(t, func(d *Deps) { d.Setup = setupFake{s: setup} })
 	e.status.st = st
-	for _, target := range []string{"/api/v1/status", "/api/v1/setup"} {
-		rec := e.do("GET", target, nil)
-		if !bytes.Contains(rec.Body.Bytes(), []byte(`"device":null`)) {
-			t.Fatalf("%s: decision.device is not null: %s", target, rec.Body)
+	rec := e.do("GET", "/api/v1/status", nil)
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"decision":{`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"device":null`)) {
+		t.Fatalf("simulated printer: decision.device is not null: %s", rec.Body)
+	}
+	for _, want := range []string{`"esclUrls":[]`, `"ippUris":[]`, `"intents":[]`, `"warnings":[]`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("status lacks %s: %s", want, rec.Body)
 		}
 	}
 }
@@ -777,9 +875,9 @@ func TestConformanceSSEPayloads(t *testing.T) {
 		{apitypes.EventStatus, "Status", realController().Current()},
 		{apitypes.EventStatus, "Status", usb},
 		{apitypes.EventConfig, "ConfigEvent", apitypes.ConfigEvent{Etag: "abc"}},
-		{apitypes.EventJob, "Job", apitypes.Job{ID: 1, Name: "a", State: "pending", CreatedAt: time.Now().In(cet)}},
+		{apitypes.EventJob, "Job", apitypes.Job{ID: 1, Printer: "p1", Name: "a", State: "pending", CreatedAt: time.Now().In(cet)}},
 		{apitypes.EventScan, "Scan", apitypes.Scan{
-			ID: "00000000000000aa", State: "failed", CreatedAt: time.Now().In(cet), Format: "pdf",
+			ID: "00000000000000aa", Scanner: "s1", State: "failed", CreatedAt: time.Now().In(cet), Format: "pdf",
 			Settings: apitypes.ScanSettings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"}, Error: &errMsg,
 		}},
 	}
@@ -809,4 +907,19 @@ func parseFrame(t *testing.T, frame []byte) (string, []byte) {
 		}
 	}
 	return ev, data
+}
+
+func TestDetect(t *testing.T) {
+	calls := 0
+	e := newEnv(t, func(d *Deps) { d.Setup = setupFake{s: emptySetup(t), detects: &calls} })
+	if rec := e.do("POST", "/api/v1/setup/detect", nil); rec.Code != 202 || rec.Body.Len() != 0 || calls != 1 {
+		t.Fatalf("detect: %d %q, %d Detect calls", rec.Code, rec.Body, calls)
+	}
+	e = newEnv(t, func(d *Deps) {
+		d.Setup = setupFake{s: emptySetup(t), detects: &calls, err: errors.New("pods: forbidden")}
+	})
+	p := wantProblem(t, e.do("POST", "/api/v1/setup/detect", nil), 503, "detect-failed")
+	if calls != 2 || strings.Contains(p.Detail, "forbidden") {
+		t.Fatalf("%d Detect calls; detail %q leaks the raw error", calls, p.Detail)
+	}
 }

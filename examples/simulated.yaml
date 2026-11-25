@@ -1,5 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json
-apiVersion: pagewire/v1
-name: Simulated printer
-device:
-  mode: simulated
+apiVersion: pagewire/v2
+name: Simulated
+printers:
+  - id: printer
+    name: Simulated printer       # the test printer's queue and DNS-SD name
+    mode: simulated               # test printer, no USB resource
+scanners:
+  - id: scanner
+    name: Simulated scanner
+    mode: simulated               # SANE test scanner; at most one scanner may be simulated

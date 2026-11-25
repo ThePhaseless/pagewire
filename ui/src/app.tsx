@@ -1,4 +1,5 @@
-// The app shell: header with the device name and live status, navigation, banners, routes and toasts.
+// The app shell: header with the installation name and live status, navigation, banners, routes
+// and toasts.
 import { type ReactNode, useEffect, useState } from "react";
 import { RouterProvider } from "react-aria-components";
 import { api } from "./api/client";
@@ -7,7 +8,9 @@ import {
   type EventStore,
   EventsContext,
   useConnected,
-  usePrinterNotFound,
+  useEnabledPrinters,
+  useEnabledScanners,
+  useNothingFound,
   useStatus,
 } from "./api/events";
 import {
@@ -34,7 +37,9 @@ import { Settings } from "./views/Settings";
 import { Setup } from "./views/Setup";
 import { Status as StatusView } from "./views/Status";
 
-const views: Record<Route, () => ReactNode> = {
+export type Views = Record<Route, () => ReactNode>;
+
+const defaultViews: Views = {
   "/": StatusView,
   "/print": Print,
   "/scan": Scan,
@@ -49,17 +54,20 @@ const nav: { to: Route; label: string; icon: IconName }[] = [
   { to: "/settings", label: strings.nav.settings, icon: "settings" },
 ];
 
-/** Overall health for the header dot, from the device phase. */
+/**
+ * Overall health for the header dot, from the overall phase. Probing happens only before setup,
+ * so "No device found" outranks "Not set up": nothing usable is plugged in for the wizard.
+ */
 export function overallTone(
   status: Status | null,
   connected: boolean,
-  printerNotFound = false,
+  nothingFound = false,
 ): { tone: Tone; label: string; pulse: boolean } {
   if (!connected) return { tone: "idle", label: strings.connection.offline, pulse: false };
+  if (nothingFound) return { tone: "problem", label: strings.connection.notFound, pulse: false };
   if (status?.config.state === "missing")
     return { tone: "idle", label: strings.connection.idle, pulse: false };
-  if (printerNotFound) return { tone: "problem", label: strings.connection.notFound, pulse: false };
-  switch (status?.device.phase) {
+  switch (status?.phase) {
     case "ready":
       return { tone: "ok", label: strings.connection.ready, pulse: false };
     case "probing":
@@ -68,13 +76,15 @@ export function overallTone(
     case "degraded":
     case "error":
       return { tone: "problem", label: strings.connection.problem, pulse: false };
+    case "none":
+      return { tone: "idle", label: strings.connection.nothingInUse, pulse: false };
     default:
       return { tone: "idle", label: strings.connection.idle, pulse: false };
   }
 }
 
-/** The configured device name, refreshed whenever the config file's ETag changes. */
-function useDeviceName(status: Status | null): string | null {
+/** The configured name (the UI title), refreshed whenever the config file's ETag changes. */
+function useConfigName(status: Status | null): string | null {
   const [name, setName] = useState<string | null>(null);
   const etag = status?.config.etag;
   const state = status?.config.state;
@@ -166,15 +176,29 @@ function Banners({
   );
 }
 
-function Shell() {
+/** Print and Scan are hidden while no printer or scanner is enabled. */
+function useHiddenRoutes(status: Status | null): Route[] {
+  const printers = useEnabledPrinters();
+  const scanners = useEnabledScanners();
+  // Unknown until the first Status: hide nothing, so a reload on /print stays there.
+  if (status === null || status.config.state === "missing") return [];
+  return [
+    ...(printers.length === 0 ? (["/print"] as const) : []),
+    ...(scanners.length === 0 ? (["/scan"] as const) : []),
+  ];
+}
+
+function Shell({ views }: { views: Views }) {
   const path = usePath();
   useLinkInterception();
   useFocusOnNavigate();
   const status = useStatus();
   const connected = useConnected();
   const offline = useOffline(connected);
-  const name = useDeviceName(status);
+  const name = useConfigName(status);
   const configMissing = status?.config.state === "missing";
+  const hidden = useHiddenRoutes(status);
+  const pathHidden = (hidden as string[]).includes(path);
   useDocumentTitle(name ?? strings.appName);
 
   // A problem belongs to the page it happened on. Keyed on the path: wizard steps change only the hash.
@@ -183,10 +207,13 @@ function Shell() {
 
   useEffect(() => {
     if (configMissing && path !== "/setup") navigate("/setup", { replace: true, force: true });
-  }, [configMissing, path]);
+    else if (pathHidden) navigate("/", { replace: true, force: true });
+  }, [configMissing, path, pathHidden]);
 
-  const View = (views as Record<string, (() => ReactNode) | undefined>)[path] ?? NotFound;
-  const health = overallTone(status, connected, usePrinterNotFound());
+  const View = pathHidden
+    ? views["/"]
+    : ((views as Record<string, (() => ReactNode) | undefined>)[path] ?? NotFound);
+  const health = overallTone(status, connected, useNothingFound());
   const showNav = !configMissing;
 
   return (
@@ -209,18 +236,20 @@ function Shell() {
       {showNav && (
         <nav className="app-nav" aria-label={strings.nav.label}>
           <ul>
-            {nav.map((item) => (
-              <li key={item.to}>
-                <a
-                  href={item.to}
-                  className="app-nav-link"
-                  aria-current={path === item.to ? "page" : undefined}
-                >
-                  <Icon name={item.icon} size={22} />
-                  <span>{item.label}</span>
-                </a>
-              </li>
-            ))}
+            {nav
+              .filter((item) => !hidden.includes(item.to))
+              .map((item) => (
+                <li key={item.to}>
+                  <a
+                    href={item.to}
+                    className="app-nav-link"
+                    aria-current={path === item.to ? "page" : undefined}
+                  >
+                    <Icon name={item.icon} size={22} />
+                    <span>{item.label}</span>
+                  </a>
+                </li>
+              ))}
           </ul>
         </nav>
       )}
@@ -233,7 +262,14 @@ function Shell() {
   );
 }
 
-export function App({ store = defaultStore }: { store?: EventStore }) {
+export function App({
+  store = defaultStore,
+  views = defaultViews,
+}: {
+  store?: EventStore;
+  /** The page per route; tests pass stand-ins to check the shell alone. */
+  views?: Views;
+}) {
   useEffect(() => {
     store.start();
     return () => store.stop();
@@ -241,7 +277,7 @@ export function App({ store = defaultStore }: { store?: EventStore }) {
   return (
     <EventsContext value={store}>
       <RouterProvider navigate={(to) => navigate(String(to))}>
-        <Shell />
+        <Shell views={views} />
       </RouterProvider>
     </EventsContext>
   );

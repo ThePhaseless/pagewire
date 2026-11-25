@@ -1,0 +1,1042 @@
+[
+  {
+    "name": "probe",
+    "runOnce": true,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "agent",
+        "probe",
+        "--out",
+        "/run/pagewire/inventory.json"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "sha256:self",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/pagewire"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "probe",
+        "io.github.thephaseless.pagewire.init": "true",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 67108864,
+      "NanoCpus": 200000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": [
+        "c 189:* rw"
+      ],
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-run",
+          "Target": "/run/pagewire",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "bind",
+          "Source": "/dev/bus/usb",
+          "Target": "/dev/bus/usb",
+          "ReadOnly": true
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "dbus",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "101:101",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "--config-file=/etc/pagewire/dbus.conf",
+        "--nofork",
+        "--nopidfile"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/bin/dbus-daemon"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "dbus",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 33554432,
+      "NanoCpus": 100000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "avahi",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "102:102",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "--no-drop-root",
+        "--no-chroot",
+        "--no-rlimits",
+        "-f",
+        "/etc/pagewire/avahi-daemon.conf"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "CMD",
+          "/usr/sbin/avahi-daemon",
+          "-c"
+        ],
+        "Interval": 5000000000,
+        "Timeout": 3000000000,
+        "StartPeriod": 30000000000,
+        "Retries": 3
+      },
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/sbin/avahi-daemon"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "avahi",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Tmpfs": {
+        "/run": "mode=1777"
+      },
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 33554432,
+      "NanoCpus": 100000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "agent",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "agent",
+        "run",
+        "--control-plane-url",
+        "http://pagewire.printing.svc:8081",
+        "--token-file",
+        "/var/run/pagewire/token",
+        "--pod-uid",
+        "docker-923a690b8bd7",
+        "--dbus-address",
+        "unix:path=/run/dbus/system_bus_socket",
+        "--inventory",
+        "/run/pagewire/inventory.json",
+        "--blob-status",
+        "/run/pagewire/blobs.json",
+        "--workload",
+        "",
+        "--blob-dir",
+        "/blobs"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "sha256:self",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/pagewire"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "agent",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 134217728,
+      "NanoCpus": 200000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": null,
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-token",
+          "Target": "/var/run/pagewire",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-run",
+          "Target": "/run/pagewire",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-blobs",
+          "Target": "/blobs",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "ipp-usb",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "standalone"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/local/sbin/ipp-usb"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "ipp-usb",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire",
+        "io.github.thephaseless.pagewire.usb-device": "/dev/bus/usb/001/007"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Tmpfs": {
+        "/var/ipp-usb": "mode=1777",
+        "/var/log/ipp-usb": "mode=1777"
+      },
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 134217728,
+      "NanoCpus": 500000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": [
+        {
+          "PathOnHost": "/dev/bus/usb/001/007",
+          "PathInContainer": "/dev/bus/usb/001/007",
+          "CgroupPermissions": "rw"
+        }
+      ],
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-config",
+          "Target": "/etc/ipp-usb",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "printer-app-legacy",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [],
+      "Cmd": [
+        "-o",
+        "server-port=8005",
+        "-o",
+        "log-file=-",
+        "server"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/pagewire-driver-legacy:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/local/bin/legacy-printer-app"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "printer-app-legacy",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire",
+        "io.github.thephaseless.pagewire.usb-device": "/dev/bus/usb/001/009"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Tmpfs": {
+        "/etc/cups/ssl": "mode=1777",
+        "/run": "mode=1777",
+        "/var/cache/fontconfig": "mode=1777"
+      },
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 1073741824,
+      "NanoCpus": 2000000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": [
+        {
+          "PathOnHost": "/dev/bus/usb/001/009",
+          "PathInContainer": "/dev/bus/usb/001/009",
+          "CgroupPermissions": "rw"
+        }
+      ],
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/var/lib/legacy-printer-app",
+          "VolumeOptions": {
+            "NoCopy": true,
+            "Labels": {
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
+            }
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/var/spool/legacy-printer-app",
+          "VolumeOptions": {
+            "NoCopy": true,
+            "Labels": {
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
+            }
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/tmp",
+          "VolumeOptions": {
+            "Labels": {
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
+            }
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  },
+  {
+    "name": "airsane",
+    "runOnce": false,
+    "config": {
+      "Hostname": "",
+      "Domainname": "",
+      "User": "0:0",
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "AttachStderr": false,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [
+        "SANE_CONFIG_DIR=/etc/pagewire/sane.d:"
+      ],
+      "Cmd": [
+        "--listen-port=8090",
+        "--hotplug=false",
+        "--options-file=/etc/pagewire/airsane/options.conf",
+        "--ignore-list=/etc/pagewire/airsane/ignore.conf",
+        "--access-file=/etc/pagewire/airsane/access.conf"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "NONE"
+        ]
+      },
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
+      "Volumes": null,
+      "WorkingDir": "",
+      "Entrypoint": [
+        "/usr/local/bin/airsaned"
+      ],
+      "Labels": {
+        "io.github.thephaseless.pagewire.container": "airsane",
+        "io.github.thephaseless.pagewire.init": "false",
+        "io.github.thephaseless.pagewire.managed-by": "pagewire",
+        "io.github.thephaseless.pagewire.usb-device": "/dev/bus/usb/001/009,/dev/bus/usb/001/011"
+      },
+      "StopTimeout": 10
+    },
+    "hostConfig": {
+      "Binds": null,
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "Type": "",
+        "Config": null
+      },
+      "NetworkMode": "host",
+      "PortBindings": null,
+      "RestartPolicy": {
+        "Name": "on-failure",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "VolumeDriver": "",
+      "VolumesFrom": null,
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CgroupnsMode": "",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IpcMode": "",
+      "Cgroup": "",
+      "Links": null,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyRootfs": true,
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "UTSMode": "",
+      "UsernsMode": "host",
+      "ShmSize": 0,
+      "Isolation": "",
+      "CpuShares": 0,
+      "Memory": 536870912,
+      "NanoCpus": 1000000000,
+      "CgroupParent": "",
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": null,
+      "BlkioDeviceReadBps": null,
+      "BlkioDeviceWriteBps": null,
+      "BlkioDeviceReadIOps": null,
+      "BlkioDeviceWriteIOps": null,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "Devices": [
+        {
+          "PathOnHost": "/dev/bus/usb/001/009",
+          "PathInContainer": "/dev/bus/usb/001/009",
+          "CgroupPermissions": "rw"
+        },
+        {
+          "PathOnHost": "/dev/bus/usb/001/011",
+          "PathInContainer": "/dev/bus/usb/001/011",
+          "CgroupPermissions": "rw"
+        }
+      ],
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "MemoryReservation": 0,
+      "MemorySwap": 0,
+      "MemorySwappiness": null,
+      "OomKillDisable": null,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "IOMaximumIOps": 0,
+      "IOMaximumBandwidth": 0,
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-config",
+          "Target": "/etc/pagewire/airsane",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-config",
+          "Target": "/etc/pagewire/sane.d",
+          "ReadOnly": true,
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Source": "pagewire-device-dbus",
+          "Target": "/run/dbus",
+          "VolumeOptions": {
+            "NoCopy": true
+          }
+        },
+        {
+          "Type": "volume",
+          "Target": "/tmp",
+          "VolumeOptions": {
+            "Labels": {
+              "io.github.thephaseless.pagewire.managed-by": "pagewire"
+            }
+          }
+        }
+      ],
+      "MaskedPaths": null,
+      "ReadonlyPaths": null
+    }
+  }
+]

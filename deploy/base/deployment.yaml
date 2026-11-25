@@ -45,7 +45,8 @@ spec:
             - name: internal
               containerPort: 8081
           env:
-            # Must equal <generic-device-plugin --domain>/<device name>, see
+            # Must equal <generic-device-plugin --domain>/<device name>, whose one group
+            # lists every USB printer and scanner pagewire may use; see
             # deploy/examples/generic-device-plugin.yaml. Empty disables USB (simulated only).
             - name: PAGEWIRE_USB_RESOURCE
               value: devic.es/printer

@@ -1,40 +1,89 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json
 #
-# pagewire config with every key. Only apiVersion and name are required;
-# every other key has the default shown unless noted.
-apiVersion: pagewire/v1          # required, always pagewire/v1
+# pagewire config with every key. Only apiVersion and name are required, and
+# inside a printer or scanner only id and name; every other key has the
+# default shown unless noted. A pagewire/v1 file is rewritten as this format
+# on start.
+apiVersion: pagewire/v2          # required, always pagewire/v2
 
-# Required, 1 to 63 characters, no control characters. UI title, and the queue
-# and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise
-# the device's own names.
-name: Living room printer
+# Required, 1 to 63 characters, no control characters, not starting with -.
+# The UI title.
+name: Home
 
-location: Living room             # printer-location, 0 to 127 characters (default "")
+# Printers pagewire serves (default []).
+printers:
+  - id: living-room              # required, 1 to 32 of a-z, 0-9 and -, not starting or ending with -; unique across printers and scanners
+    # Required, 1 to 63 characters, unique among printers (ignoring case). The
+    # queue and DNS-SD name of PAPPL and simulated printers; ipp-usb and
+    # AirSane advertise the device's own names.
+    name: Living room printer
+    location: Living room         # printer-location, 0 to 127 characters (default "")
+    enabled: true                 # false keeps the entry but does not serve it
+    mode: usb                     # usb | simulated (test printer, no USB resource)
+    usb:                          # selects the device; only with mode usb. At most one usb printer may leave it out (default: the first printer found)
+      vendorId: "03f0"            # 4 lowercase hex digits
+      productId: "2754"           # 4 lowercase hex digits (03f0:2754 is the sim's default device)
+      serial: ""                  # optional
+    driver: auto                  # auto | ipp-usb | ps | hplip | gutenprint | ghostscript | legacy
+    # driverName: samsung--scx-4300--2-0-0-en  # optional exact driver name from the printer application (default: chosen automatically)
+    # Job defaults for web print and the PAPPL queue. Every key is optional;
+    # a key left out uses the printer's own default.
+    defaults:
+      media: iso_a4_210x297mm     # PWG self-describing media name, e.g. na_letter_8.5x11in
+      # mediaSource: auto         # tray keyword the printer reports: auto, main, tray-1, manual, ...
+      # mediaType: stationery     # media type keyword the printer reports: stationery, photographic-glossy, ...
+      # sides: one-sided          # one-sided | two-sided-long-edge | two-sided-short-edge
+      # colorMode: auto           # auto | color | monochrome
+      # quality: normal           # draft | normal | high
+      # resolution: 600           # dots per inch, 75 to 2400
+      # contentOptimize: auto     # auto | graphic | photo | text | text-and-graphic
+      # orientation: portrait     # portrait | landscape | reverse-landscape | reverse-portrait
+      # numberUp: 1               # pages per sheet, 1 to 16
+      # printScaling: auto        # auto | auto-fit | fill | fit | none
+      # outputBin: face-down      # output bin keyword the printer reports: face-down, top, tray-1, ...
+      # finishings: none          # one finishings keyword: none, staple, punch, ...
 
-device:
-  mode: usb                       # usb | simulated (test printer and SANE test scanner, no USB resource)
-  usb:                            # optional selector when several USB devices are visible; only with mode usb (default: none)
-    vendorId: "03f0"              # 4 lowercase hex digits
-    productId: "2754"             # 4 lowercase hex digits (03f0:2754 is the sim's default device)
-    serial: ""                    # optional
-  driver: auto                    # auto | ipp-usb | ps | hplip | gutenprint | ghostscript | legacy
-  # driverName: samsung--scx-4300--2-0-0-en  # optional exact driver name from the printer application (default: chosen automatically)
-  scanner: auto                   # auto | ipp-usb | airsane | none
+# Scanners pagewire serves (default []).
+scanners:
+  - id: living-room-scanner       # required, rules as a printer id
+    name: Living room scanner     # required, 1 to 63 characters: the scanner's name in the UI
+    location: Living room         # 0 to 127 characters (default "")
+    enabled: true                 # false keeps the entry but does not serve it
+    mode: usb                     # usb | simulated (SANE test scanner, no USB resource); at most one scanner may be simulated
+    usb:                          # as for printers; the same device as a printer for a multifunction printer
+      vendorId: "03f0"
+      productId: "2754"
+      serial: ""
+    backend: auto                 # auto | ipp-usb | airsane
+    # Defaults of the web scan form. Every key is optional; a key left out uses
+    # the scanner's own default (pdf for format).
+    defaults:
+      # source: platen            # platen | adf | adf-duplex
+      # resolution: 300           # 75 to 1200
+      # colorMode: color          # color | grayscale | blackandwhite
+      # intent: document          # document | text-and-graphic | photo | preview | object | business-card
+      format: pdf                 # pdf | jpeg
+  # A second scanner, such as a standalone flatbed:
+  # - id: flatbed
+  #   name: Flatbed scanner
+  #   usb:
+  #     vendorId: "04a9"
+  #     productId: "1904"
+  #     serial: ""
+
+# USB devices the setup wizard does not offer again (default []). roles is
+# printer, scanner or both; an ignored role cannot also be in use.
+ignoredDevices: []
+# ignoredDevices:
+#   - vendorId: "046d"
+#     productId: "c31c"
+#     serial: ""
+#     roles: [printer, scanner]
 
 print:
-  defaults:
-    media: iso_a4_210x297mm       # PWG self-describing media name, e.g. na_letter_8.5x11in
-    sides: one-sided              # one-sided | two-sided-long-edge | two-sided-short-edge
-    colorMode: auto               # auto | color | monochrome
-    quality: normal               # draft | normal | high
   maxUploadMiB: 50                # 1 to 500
 
 scan:
-  defaults:
-    source: platen                # platen | adf | adf-duplex
-    resolution: 300               # 75 to 1200
-    colorMode: color              # color | grayscale | blackandwhite
-    format: pdf                   # pdf | jpeg
   retentionDays: 7                # 0 (keep forever) to 3650
 
 licenses:

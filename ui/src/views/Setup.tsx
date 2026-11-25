@@ -1,12 +1,16 @@
-// The setup wizard: five steps that build the first config from setup.suggested, then follow
-// Status until the device is ready. The current step lives in the URL hash.
+// The setup wizard, for the first run and for "Detect and add devices" (/setup?add=1). Four
+// steps choose devices and build their entries from setup.devices; then the wizard follows Status
+// until the devices run, offers their defaults from the live capabilities, and shows how to
+// connect. The current form step lives in the URL hash.
 import { useEffect, useState } from "react";
 import { api, ConflictError, ProblemError, problemMessage } from "../api/client";
 import { useStatus } from "../api/events";
 import { acceptedSha, EulaAccept, withAccepted } from "../components/EulaAccept";
+import { OptionField } from "../components/OptionField";
 import {
   Button,
   Card,
+  DeviceStatusBadge,
   Disclosure,
   InlineError,
   LinkButton,
@@ -19,50 +23,281 @@ import {
 import {
   type Config,
   ConfigSchema,
-  DeviceSchema,
+  type DetectedDevice,
+  type EULARef,
+  type IgnoredDevice,
+  type Printer,
+  type PrinterDecision,
+  PrinterSchema,
+  type Scanner,
+  type ScannerDecision,
+  ScannerSchema,
   type Setup as SetupDTO,
   type Status,
+  type StatusPrinter,
+  type StatusScanner,
   type USBDevice,
 } from "../gen/api";
-import { navigate, onNextFrameUnlessUserActs } from "../router";
+import {
+  type FieldKind,
+  type OptionValue,
+  optionState,
+  printerGroups,
+  scannerGroups,
+  setDefault,
+} from "../lib/options";
+import { navigate, onNextFrameUnlessUserActs, useQueryParam } from "../router";
 import { strings } from "../strings";
 import { hasPrinterInterface, isNeverPrinterOrScanner } from "../usb";
 import { setupStrings as s } from "./Setup.strings";
 import "./Setup.css";
 
-const STEPS = ["detect", "name", "driver", "defaults", "review"] as const;
+const STEPS = ["devices", "names", "drivers", "review"] as const;
 type Step = (typeof STEPS)[number];
+/** The progress list also shows the defaults step, which follows once the devices run. */
+const PROGRESS = [...STEPS, "defaults"] as const;
 
 const A4 = "iso_a4_210x297mm";
 const LETTER = "na_letter_8.5x11in";
-const RESOLUTIONS = [75, 150, 300, 600, 1200];
 
 /** The paper size people in this locale expect: Letter in the US and Canada, A4 elsewhere. */
 export function mediaForLanguage(lang: string): string {
   return /^en-(us|ca)$/i.test(lang) ? LETTER : A4;
 }
 
-function fromSuggested(c: Config): Config {
-  const media = mediaForLanguage(navigator.language);
-  return { ...c, print: { ...c.print, defaults: { ...c.print.defaults, media } } };
-}
-
 function stepFromHash(): Step {
   const h = window.location.hash.slice(1);
-  return (STEPS as readonly string[]).includes(h) ? (h as Step) : "detect";
+  return (STEPS as readonly string[]).includes(h) ? (h as Step) : "devices";
 }
 
-const family = (id: string) => s.families[id] ?? id;
-const options = (labels: Record<string, string>) =>
-  Object.entries(labels).map(([id, label]) => ({ id, label }));
+const family = (id: string) => strings.device.families[id] ?? id;
 
 // Module level, so the reload timer is not restarted by every render.
 const reloadApp = () => window.location.assign("/");
 
+type Role = "printer" | "scanner";
+const ROLES: Role[] = ["printer", "scanner"];
+
+/** One detected device and what each of its roles is: offered now, in use, or not offered. */
+type Row = { key: string; d: DetectedDevice; offered: Role[]; inUse: Role[]; notOffered: Role[] };
+
+const suggestionOf = (d: DetectedDevice, role: Role) =>
+  role === "printer" ? d.suggestedPrinter : d.suggestedScanner;
+const configuredId = (d: DetectedDevice, role: Role) =>
+  role === "printer" ? d.printerId : d.scannerId;
+
+// Choices are keyed by the device's identity, not its list position or USB address, so a refetch
+// or a replug keeps them. Two serial-less devices of one model are told apart by their order.
+function rows(devices: DetectedDevice[], offerAgain: string[]): Row[] {
+  const seen = new Map<string, number>();
+  return devices.map((d) => {
+    const id = `${d.node}|${d.device.vendorId}:${d.device.productId}:${d.device.serial}`;
+    const n = (seen.get(id) ?? 0) + 1;
+    seen.set(id, n);
+    const key = n === 1 ? id : `${id}#${n}`;
+    const inUse = ROLES.filter((r) => configuredId(d, r) !== "");
+    const free = ROLES.filter((r) => !inUse.includes(r) && suggestionOf(d, r) !== null);
+    const notOffered = free.filter((r) => d.ignored.includes(r) && !offerAgain.includes(key));
+    return { key, d, inUse, notOffered, offered: free.filter((r) => !notOffered.includes(r)) };
+  });
+}
+
+type Edit = {
+  name?: string;
+  location?: string;
+  driver?: Printer["driver"];
+  backend?: Scanner["backend"];
+};
+
+/** The user's choices. Everything else follows the latest setup data. */
+type Draft = {
+  simulated: boolean;
+  /** `<device key>:<role>` → false for "Don't use"; absent means use. */
+  use: Record<string, boolean>;
+  offerAgain: string[];
+  edits: Record<string, Edit>;
+  /** The installation name (first run); null follows the first chosen device. */
+  title: string | null;
+  /** Accepted licences; null keeps the current config's. */
+  accepted: EULARef[] | null;
+};
+
+const emptyDraft: Draft = {
+  simulated: false,
+  use: {},
+  offerAgain: [],
+  edits: {},
+  title: null,
+  accepted: null,
+};
+
+type Chosen =
+  | { ek: string; role: "printer"; entry: Printer; decision: PrinterDecision | null }
+  | { ek: string; role: "scanner"; entry: Scanner; decision: ScannerDecision | null };
+
+const cut = (text: string, n: number) => [...text].slice(0, n).join("");
+
+function simulatedEntries(name: string): [Printer, Scanner] {
+  const common = { location: "", enabled: true, mode: "simulated" as const, defaults: {} };
+  return [
+    { ...common, id: "printer", name, driver: "auto" },
+    { ...common, id: "scanner", name: cut(`${name} scanner`, 63), backend: "auto" },
+  ];
+}
+
+function withEdit<T extends Printer | Scanner>(entry: T, e: Edit | undefined): T {
+  if (!e) return entry;
+  const { driver, backend, ...common } = e;
+  return {
+    ...entry,
+    ...common,
+    ...("driver" in entry && driver && { driver }),
+    ...("backend" in entry && backend && { backend }),
+  };
+}
+
+function chosenEntries(setup: SetupDTO, draft: Draft, all: Row[]): Chosen[] {
+  if (draft.simulated) {
+    const [p, sc] = simulatedEntries(setup.suggested.name);
+    return [
+      {
+        ek: "sim:printer",
+        role: "printer",
+        entry: withEdit(p, draft.edits["sim:printer"]),
+        decision: null,
+      },
+      {
+        ek: "sim:scanner",
+        role: "scanner",
+        entry: withEdit(sc, draft.edits["sim:scanner"]),
+        decision: null,
+      },
+    ];
+  }
+  const out: Chosen[] = [];
+  for (const r of all) {
+    for (const role of r.offered) {
+      const ek = `${r.key}:${role}`;
+      if (draft.use[ek] === false) continue;
+      if (role === "printer" && r.d.suggestedPrinter)
+        out.push({
+          ek,
+          role,
+          entry: withEdit(r.d.suggestedPrinter, draft.edits[ek]),
+          decision: r.d.printerDecision,
+        });
+      if (role === "scanner" && r.d.suggestedScanner)
+        out.push({
+          ek,
+          role,
+          entry: withEdit(r.d.suggestedScanner, draft.edits[ek]),
+          decision: r.d.scannerDecision,
+        });
+    }
+  }
+  return out;
+}
+
+const sameDevice = (i: IgnoredDevice, u: USBDevice) =>
+  i.vendorId === u.vendorId && i.productId === u.productId && (i.serial === u.serial || !i.serial);
+
+function ignore(list: IgnoredDevice[], u: USBDevice, role: Role): IgnoredDevice[] {
+  if (list.some((i) => sameDevice(i, u) && i.roles.includes(role))) return list;
+  const hit = list.find(
+    (i) => i.vendorId === u.vendorId && i.productId === u.productId && i.serial === u.serial,
+  );
+  if (hit) return list.map((i) => (i === hit ? { ...i, roles: [...i.roles, role] } : i));
+  return [
+    ...list,
+    { vendorId: u.vendorId, productId: u.productId, serial: u.serial, roles: [role] },
+  ];
+}
+
+/** Without `role` for `u`; an entry left with no role is dropped (roles may not be empty). */
+function unignore(list: IgnoredDevice[], u: USBDevice, role: Role): IgnoredDevice[] {
+  return list.flatMap((i) => {
+    if (!sameDevice(i, u)) return [i];
+    const roles = i.roles.filter((r) => r !== role);
+    return roles.length ? [{ ...i, roles }] : [];
+  });
+}
+
+/** The licences the chosen printers need or offer: the only ones the wizard asks about. */
+function shownEulas(setup: SetupDTO, chosen: Chosen[]) {
+  const ids = new Set(
+    chosen.flatMap((c) =>
+      c.role === "printer" && c.decision
+        ? [...c.decision.requiredEulas, ...c.decision.optionalEulas]
+        : [],
+    ),
+  );
+  return setup.eulas.filter((e) => ids.has(e.id));
+}
+
+const eulaKey = (r: { id: string; version: string }) => `${r.id}@${r.version}`;
+
+type Added = { printers: string[]; scanners: string[] };
+
+/**
+ * `base` with the chosen entries appended (ids made unique), "Don't use" recorded in
+ * ignoredDevices, used roles taken out of it, and the licences the wizard showed.
+ */
+function compose(
+  base: Config,
+  setup: SetupDTO,
+  draft: Draft,
+  all: Row[],
+  chosen: Chosen[],
+): { config: Config; added: Added } {
+  const taken = new Set([...base.printers, ...base.scanners].map((e) => e.id));
+  const unique = (id: string) => {
+    let out = id;
+    for (let i = 2; taken.has(out); i++) out = `${id.slice(0, 31 - String(i).length)}-${i}`;
+    taken.add(out);
+    return out;
+  };
+  const printers = [...base.printers];
+  const scanners = [...base.scanners];
+  for (const c of chosen) {
+    if (c.role === "printer") printers.push({ ...c.entry, id: unique(c.entry.id) });
+    else scanners.push({ ...c.entry, id: unique(c.entry.id) });
+  }
+  let ignoredDevices = base.ignoredDevices;
+  if (!draft.simulated) {
+    for (const r of all) {
+      for (const role of r.offered) {
+        ignoredDevices =
+          draft.use[`${r.key}:${role}`] === false
+            ? ignore(ignoredDevices, r.d.device, role)
+            : unignore(ignoredDevices, r.d.device, role);
+      }
+    }
+  }
+  const shown = new Set(shownEulas(setup, chosen).map(eulaKey));
+  const accepted = draft.accepted ?? base.licenses.acceptedEulas;
+  const acceptedEulas = [
+    ...base.licenses.acceptedEulas.filter((r) => !shown.has(eulaKey(r))),
+    ...accepted.filter((r) => shown.has(eulaKey(r))),
+  ];
+  return {
+    config: { ...base, printers, scanners, ignoredDevices, licenses: { acceptedEulas } },
+    added: {
+      printers: printers.slice(base.printers.length).map((p) => p.id),
+      scanners: scanners.slice(base.scanners.length).map((sc) => sc.id),
+    },
+  };
+}
+
+/** Text for an error from saving: the server's problem, or the wizard's own message. */
+function errorText(err: unknown): string {
+  if (err instanceof ProblemError || err instanceof ConflictError) return problemMessage(err);
+  return err instanceof Error ? err.message : problemMessage(err);
+}
+
 export type SetupProps = {
-  /** How long to wait for the device to become ready before saying so. */
+  /** How long to wait for the devices to become ready before saying so. */
   readyTimeoutMs?: number;
-  /** Called after a 412 (another session created the config first). */
+  /** Called after a first-run 412 (another session created the config first). */
   reload?: () => void;
   reloadDelayMs?: number;
 };
@@ -73,20 +308,26 @@ export function Setup({
   reloadDelayMs = 3000,
 }: SetupProps = {}) {
   const status = useStatus();
+  const addQuery = useQueryParam("add") === "1";
   const [setup, setSetup] = useState<SetupDTO | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [attempt, setAttempt] = useState(0);
-  // The user's draft. Until the first edit it follows the latest setup.suggested.
-  const [edited, setEdited] = useState<Config | null>(null);
-  const [step, setStep] = useState<Step>("detect");
+  // Add mode: the config the new devices join (its ids, ignored devices and licences).
+  const [current, setCurrent] = useState<Config | null>(null);
+  const [configError, setConfigError] = useState<unknown>(null);
+  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [step, setStep] = useState<Step>("devices");
   const [tried, setTried] = useState(false);
-  const [flow, setFlow] = useState<"form" | "applying" | "done">("form");
+  const [flow, setFlow] = useState<"form" | "applying" | "defaults" | "done">("form");
+  const [added, setAdded] = useState<Added>({ printers: [], scanners: [] });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<unknown>(null);
   const [conflict, setConflict] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
+  // "idle", "asked", or the error POST /setup/detect answered.
+  const [detect, setDetect] = useState<unknown>("idle");
 
-  // The draft is not kept across reloads, so a reload starts again at Detect.
+  // The draft is not kept across reloads, so a reload starts again at the first step.
   useEffect(() => {
     if (window.location.hash)
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -95,14 +336,22 @@ export function Setup({
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // GET /setup has no event of its own: refetch whenever the probe's Status changes.
-  const inv = status?.device.inventory;
-  const refreshKey = [
-    inv?.probedAt,
-    inv?.devices.length,
-    status?.device.phase,
-    status?.device.message,
-  ].join("|");
+  // GET /setup has no event of its own: refetch whenever the detected devices change.
+  const refreshKey = JSON.stringify([
+    status?.phase,
+    status?.message,
+    status?.devices.map((d) => [
+      d.node,
+      d.device.bus,
+      d.device.address,
+      d.device.serial,
+      d.printerId,
+      d.scannerId,
+      d.ignored,
+      d.canPrint,
+      d.canScan,
+    ]),
+  ]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey and attempt are refetch triggers
   useEffect(() => {
     if (flow !== "form") return;
@@ -122,14 +371,45 @@ export function Setup({
     };
   }, [refreshKey, attempt, flow]);
 
+  const adding = setup !== null && !setup.required && addQuery;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is the retry trigger
   useEffect(() => {
-    if (
-      flow === "applying" &&
-      status?.config.state === "applied" &&
-      status.device.phase === "ready"
-    )
-      setFlow("done");
-  }, [flow, status]);
+    if (!adding) return;
+    let live = true;
+    setConfigError(null);
+    api.getConfig().then(
+      (r) => {
+        if (!live) return;
+        if (r.config) setCurrent(r.config);
+        else setConfigError(new Error(s.configInvalid));
+      },
+      (err) => {
+        if (live) setConfigError(err);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [adding, attempt]);
+
+  const allIds = [...added.printers, ...added.scanners];
+  const statusOf = (id: string) =>
+    status?.printers.find((p) => p.id === id) ?? status?.scanners.find((x) => x.id === id);
+  // New entries appear in Status only once their config is applied.
+  const running =
+    status?.config.state === "applied" &&
+    allIds.every((id) => {
+      const phase = statusOf(id)?.phase;
+      return phase === "ready" || phase === "degraded";
+    });
+  // With nothing added, the empty Status is the next page, once it no longer says "missing"
+  // (the shell sends every page back here while the config is missing).
+  const nothingAdded = allIds.length === 0;
+  useEffect(() => {
+    if (flow !== "applying" || !running) return;
+    if (nothingAdded) navigate("/", { force: true });
+    else setFlow("defaults");
+  }, [flow, running, nothingAdded]);
 
   useEffect(() => {
     if (flow !== "applying") return;
@@ -138,31 +418,42 @@ export function Setup({
   }, [flow, readyTimeoutMs]);
 
   useEffect(() => {
-    if (!conflict) return;
+    if (!conflict || adding) return;
     const t = setTimeout(reload, reloadDelayMs);
     return () => clearTimeout(t);
-  }, [conflict, reload, reloadDelayMs]);
+  }, [conflict, adding, reload, reloadDelayMs]);
 
-  // Applying and Done replace the pressed button, so move focus to their heading.
+  // Later stages replace the pressed button, so move focus to their heading.
   useEffect(() => {
     if (flow !== "form") document.querySelector<HTMLElement>(".setup-view h1")?.focus();
   }, [flow]);
 
-  if (flow === "applying") return <Applying status={status} timedOut={timedOut} />;
-  if (flow === "done") return <Done status={status} />;
+  if (flow === "applying") return <Applying status={status} ids={allIds} timedOut={timedOut} />;
+  if (flow === "defaults")
+    return (
+      <DefaultsStep
+        status={status}
+        added={added}
+        title={addQuery ? s.addTitle : s.title}
+        onDone={() => setFlow("done")}
+      />
+    );
+  if (flow === "done") return <Done status={status} added={added} />;
 
-  if (!setup) {
+  const base = adding ? current : setup?.suggested;
+  const failed = loadError ?? (adding ? configError : null);
+  if (!setup || !base) {
     return (
       <div className="setup-view">
         <PageHeader title={strings.nav.setup} />
-        {loadError ? (
+        {failed ? (
           <InlineError
             action={
               <Button onPress={() => setAttempt((a) => a + 1)}>{strings.buttons.retry}</Button>
             }
           >
             <p>{s.loadFailed}</p>
-            <p>{problemMessage(loadError)}</p>
+            <p>{errorText(failed)}</p>
           </InlineError>
         ) : (
           <p role="status">{strings.loading}</p>
@@ -171,24 +462,35 @@ export function Setup({
     );
   }
 
-  if (!setup.required && !conflict) {
+  if (!setup.required && !adding && !conflict) {
     return (
       <div className="setup-view">
         <PageHeader
           title={s.alreadyDone.title}
           description={s.alreadyDone.body}
           actions={
-            <LinkButton href="/settings" variant="primary">
-              {s.alreadyDone.action}
-            </LinkButton>
+            <>
+              <LinkButton href="/setup?add=1">{s.alreadyDone.add}</LinkButton>
+              <LinkButton href="/settings" variant="primary">
+                {s.alreadyDone.action}
+              </LinkButton>
+            </>
           }
         />
       </div>
     );
   }
 
-  const draft = edited ?? fromSuggested(setup.suggested);
-  const update = (fn: (c: Config) => Config) => setEdited(fn(draft));
+  const all = rows(setup.devices, draft.offerAgain);
+  const chosen = chosenEntries(setup, draft, all);
+  // Prefilled with the first chosen device's own name, not with edits to that device's name.
+  const title =
+    draft.title ??
+    chosenEntries(setup, { ...draft, edits: {} }, all)[0]?.entry.name ??
+    setup.suggested.name;
+  const change = (fn: (d: Draft) => Draft) => setDraft(fn);
+  const edit = (ek: string, e: Edit) =>
+    change((d) => ({ ...d, edits: { ...d.edits, [ek]: { ...d.edits[ek], ...e } } }));
   const idx = STEPS.indexOf(step);
   const go = (to: Step) => {
     setTried(false);
@@ -196,15 +498,32 @@ export function Setup({
     navigate(`#${to}`);
   };
 
-  const nameOk = ConfigSchema.shape.name.safeParse(draft.name).success;
-  const locationOk = ConfigSchema.shape.location.safeParse(draft.location).success;
-  const chosenSimulated = edited?.device.mode === "simulated";
   const canContinue =
-    step !== "detect" ||
-    (draft.device.mode === "simulated" ? chosenSimulated : setup.decision !== null);
+    step !== "devices" ||
+    draft.simulated ||
+    all.some((r) => r.offered.length + r.inUse.length + r.notOffered.length > 0);
+
+  const takenNames = (adding ? base.printers : []).map((p) => p.name.toLowerCase());
+  const chosenNames = chosen
+    .filter((c) => c.role === "printer")
+    .map((c) => c.entry.name.toLowerCase());
+  const nameError = (c: Chosen) => {
+    if (!PrinterSchema.shape.name.safeParse(c.entry.name).success) return s.names.nameInvalid;
+    const n = c.entry.name.toLowerCase();
+    if (
+      c.role === "printer" &&
+      (takenNames.includes(n) || chosenNames.filter((x) => x === n).length > 1)
+    )
+      return s.names.nameTaken;
+    return undefined;
+  };
+  const locationOk = (c: Chosen) =>
+    PrinterSchema.shape.location.safeParse(c.entry.location).success;
+  const titleOk = adding || ConfigSchema.shape.name.safeParse(title).success;
+  const namesOk = titleOk && chosen.every((c) => !nameError(c) && locationOk(c));
 
   const next = () => {
-    if (step === "name" && !(nameOk && locationOk)) {
+    if (step === "names" && !namesOk) {
       setTried(true);
       // After the error messages render, take keyboard users to the first one.
       onNextFrameUnlessUserActs(() =>
@@ -212,32 +531,37 @@ export function Setup({
       );
       return;
     }
-    setEdited(draft);
     const to = STEPS[idx + 1];
     if (to) go(to);
   };
 
-  const chooseSimulated = () => {
-    setEdited({ ...draft, device: { mode: "simulated", driver: "auto", scanner: "auto" } });
-    go("name");
-  };
-
   const finish = async () => {
     if (submitting) return;
-    // Only licences the wizard showed (and therefore asked about) are written.
-    const shown = new Set(setup.eulas.map((e) => `${e.id}@${e.version}`));
-    const body: Config = {
-      ...draft,
-      licenses: {
-        acceptedEulas: draft.licenses.acceptedEulas.filter((r) =>
-          shown.has(`${r.id}@${r.version}`),
-        ),
-      },
-    };
     setSubmitting(true);
     setSubmitError(null);
+    setConflict(false);
     try {
-      await api.createConfig(body);
+      let result: Added;
+      if (adding) {
+        // Join the file as it is now, never the copy read when the wizard opened.
+        const now = await api.getConfig();
+        if (!now.config) throw new Error(s.configInvalid);
+        const { config, added: a } = compose(now.config, setup, draft, all, chosen);
+        const { printers, scanners, ignoredDevices, licenses } = config;
+        await api.patchConfig({ printers, scanners, ignoredDevices, licenses }, now.etag);
+        result = a;
+      } else {
+        const { config, added: a } = compose(
+          { ...setup.suggested, name: title },
+          setup,
+          draft,
+          all,
+          chosen,
+        );
+        await api.createConfig(config);
+        result = a;
+      }
+      setAdded(result);
       setFlow("applying");
     } catch (err) {
       if (err instanceof ConflictError) setConflict(true);
@@ -247,66 +571,106 @@ export function Setup({
     }
   };
 
+  const askDetect = () => {
+    setDetect("asked");
+    api.detect().catch((err) => setDetect(err));
+  };
+
   return (
     <div className="setup-view">
-      <p className="setup-eyebrow">
-        {s.title} · {s.stepOf(idx + 1, STEPS.length)}
-      </p>
-      <ol className="setup-steps" aria-label={s.progressLabel}>
-        {STEPS.map((st, i) => (
-          <li
-            key={st}
-            aria-current={st === step ? "step" : undefined}
-            data-done={i < idx || undefined}
-          >
-            <span className="setup-step-number tabular" aria-hidden="true">
-              {i + 1}
-            </span>
-            <span className="setup-step-label">{s.steps[st]}</span>
-          </li>
-        ))}
-      </ol>
+      <Progress current={step} title={adding ? s.addTitle : s.title} />
       <PageHeader
         title={s.steps[step]}
         description={descriptions[step]}
-        documentTitle={s.stepTitle(idx + 1, STEPS.length, s.steps[step])}
+        documentTitle={s.stepTitle(idx + 1, PROGRESS.length, s.steps[step])}
       />
 
-      {step === "detect" && (
-        <Detect
+      {step === "devices" && (
+        <Devices
           setup={setup}
           status={status}
-          chosenSimulated={chosenSimulated}
-          onSimulated={chooseSimulated}
-          onUsb={() => update((d) => ({ ...d, device: setup.suggested.device }))}
+          all={all}
+          draft={draft}
+          change={change}
+          detect={detect}
+          onDetect={askDetect}
         />
       )}
-      {step === "name" && (
-        <Card>
-          <TextField
-            label={s.name.nameLabel}
-            description={s.name.nameHint}
-            value={draft.name}
-            onChange={(name) => update((d) => ({ ...d, name }))}
-            errorMessage={tried && !nameOk ? s.name.nameInvalid : undefined}
-            isRequired
-          />
-          <TextField
-            label={s.name.locationLabel}
-            description={s.name.locationHint}
-            value={draft.location}
-            onChange={(location) => update((d) => ({ ...d, location }))}
-            errorMessage={tried && !locationOk ? s.name.locationInvalid : undefined}
-          />
-        </Card>
+      {step === "names" && (
+        <>
+          {!adding && (
+            <Card>
+              <TextField
+                label={s.names.titleLabel}
+                description={s.names.titleHint}
+                value={title}
+                onChange={(t) => change((d) => ({ ...d, title: t }))}
+                errorMessage={tried && !titleOk ? s.names.nameInvalid : undefined}
+                isRequired
+              />
+            </Card>
+          )}
+          {chosen.length === 0 && <p>{s.names.nothingChosen}</p>}
+          {chosen.map((c) => (
+            <Card
+              key={c.ek}
+              title={
+                c.role === "printer"
+                  ? s.names.printerTitle(c.entry.name)
+                  : s.names.scannerTitle(c.entry.name)
+              }
+            >
+              <TextField
+                label={s.names.nameLabel}
+                description={c.role === "printer" ? s.names.printerHint : s.names.scannerHint}
+                value={c.entry.name}
+                onChange={(name) => edit(c.ek, { name })}
+                errorMessage={tried ? nameError(c) : undefined}
+                isRequired
+              />
+              <TextField
+                label={s.names.locationLabel}
+                description={s.names.locationHint}
+                value={c.entry.location}
+                onChange={(location) => edit(c.ek, { location })}
+                errorMessage={tried && !locationOk(c) ? s.names.locationInvalid : undefined}
+              />
+            </Card>
+          ))}
+        </>
       )}
-      {step === "driver" && <Driver setup={setup} draft={draft} update={update} />}
-      {step === "defaults" && <Defaults draft={draft} update={update} />}
-      {step === "review" && <Review setup={setup} draft={draft} />}
+      {step === "drivers" && (
+        <Drivers
+          setup={setup}
+          draft={draft}
+          chosen={chosen}
+          accepted={draft.accepted ?? base.licenses.acceptedEulas}
+          edit={edit}
+          setAccepted={(accepted) => change((d) => ({ ...d, accepted }))}
+        />
+      )}
+      {step === "review" && (
+        <Review
+          setup={setup}
+          draft={draft}
+          all={all}
+          chosen={chosen}
+          title={adding ? undefined : title}
+          accepted={draft.accepted ?? base.licenses.acceptedEulas}
+        />
+      )}
 
       {conflict && (
-        <InlineError action={<Button onPress={reload}>{s.review.reloadNow}</Button>}>
-          <p>{s.review.conflict}</p>
+        <InlineError
+          action={
+            adding ? (
+              <Button onPress={finish}>{s.review.saveAgain}</Button>
+            ) : (
+              <Button onPress={reload}>{s.review.reloadNow}</Button>
+            )
+          }
+        >
+          <p>{adding ? s.review.addConflict : s.review.conflict}</p>
         </InlineError>
       )}
       {submitError !== null && (
@@ -323,19 +687,19 @@ export function Setup({
               </ul>
             </>
           ) : (
-            <p>{problemMessage(submitError)}</p>
+            <p>{errorText(submitError)}</p>
           )}
         </InlineError>
       )}
 
       <div className="setup-actions">
         {idx > 0 && (
-          <Button onPress={() => go(STEPS[idx - 1] ?? "detect")}>{strings.buttons.back}</Button>
+          <Button onPress={() => go(STEPS[idx - 1] ?? "devices")}>{strings.buttons.back}</Button>
         )}
         {step === "review" ? (
           // No isPending: the button unmounts on success, and React Aria's pending announcement
           // would be left pointing at nothing.
-          <Button variant="primary" onPress={finish} isDisabled={conflict}>
+          <Button variant="primary" onPress={finish} isDisabled={conflict && !adding}>
             {submitting ? s.review.finishing : s.review.finish}
           </Button>
         ) : (
@@ -349,40 +713,99 @@ export function Setup({
 }
 
 const descriptions: Record<Step, string> = {
-  detect: s.detect.description,
-  name: s.name.description,
-  driver: s.driver.description,
-  defaults: s.defaults.description,
+  devices: s.detect.description,
+  names: s.names.description,
+  drivers: s.drivers.description,
   review: s.review.description,
 };
 
-function Detect({
+function Progress({ current, title }: { current: (typeof PROGRESS)[number]; title: string }) {
+  const idx = PROGRESS.indexOf(current);
+  return (
+    <>
+      <p className="setup-eyebrow">
+        {title} · {s.stepOf(idx + 1, PROGRESS.length)}
+      </p>
+      <ol className="setup-steps" aria-label={s.progressLabel}>
+        {PROGRESS.map((st, i) => (
+          <li
+            key={st}
+            aria-current={st === current ? "step" : undefined}
+            data-done={i < idx || undefined}
+          >
+            <span className="setup-step-number tabular" aria-hidden="true">
+              {i + 1}
+            </span>
+            <span className="setup-step-label">{s.steps[st]}</span>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
+function deviceName(d: DetectedDevice, simulated: boolean) {
+  const name = d.device.product || s.detect.unnamedDevice;
+  return simulated ? s.detect.simulatedName(name) : name;
+}
+
+function DeviceText({ d }: { d: DetectedDevice }) {
+  const dev = d.device;
+  const simulated =
+    d.suggestedPrinter?.mode === "simulated" || d.suggestedScanner?.mode === "simulated";
+  return (
+    <>
+      <span className="setup-device-name">{deviceName(d, simulated)}</span>
+      <span className="setup-device-meta">
+        {[
+          dev.manufacturer,
+          s.detect.usbIds(dev.vendorId, dev.productId),
+          dev.serial && s.detect.serial(dev.serial),
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </span>
+    </>
+  );
+}
+
+function Devices({
   setup,
   status,
-  chosenSimulated,
-  onSimulated,
-  onUsb,
+  all,
+  draft,
+  change,
+  detect,
+  onDetect,
 }: {
   setup: SetupDTO;
   status: Status | null;
-  chosenSimulated: boolean;
-  onSimulated: () => void;
-  onUsb: () => void;
+  all: Row[];
+  draft: Draft;
+  change: (fn: (d: Draft) => Draft) => void;
+  detect: unknown;
+  onDetect: () => void;
 }) {
-  const message = status?.device.message ?? "";
+  const message = status?.message ?? "";
   const simButton = (primary: boolean) => (
-    <Button variant={primary ? "primary" : "secondary"} onPress={onSimulated}>
+    <Button
+      variant={primary ? "primary" : "secondary"}
+      onPress={() => change((d) => ({ ...d, simulated: true }))}
+    >
       {s.detect.useSimulated}
     </Button>
   );
+  const nameOf = (role: Role, id: string) =>
+    (role === "printer" ? status?.printers : status?.scanners)?.find((e) => e.id === id)?.name ??
+    id;
 
-  if (chosenSimulated) {
+  if (draft.simulated) {
     return (
       <Card title={s.detect.simulatedTitle}>
         <p>{s.detect.simulatedBody}</p>
         {setup.usbResourceConfigured && (
           <div>
-            <Button variant="quiet" onPress={onUsb}>
+            <Button variant="quiet" onPress={() => change((d) => ({ ...d, simulated: false }))}>
               {s.detect.useUsb}
             </Button>
           </div>
@@ -412,156 +835,216 @@ function Detect({
     );
   }
 
-  const inventory = status?.device.inventory ?? setup.inventory;
-  if (!inventory) {
+  const detectAgain = (
+    <div className="setup-detect">
+      <Button onPress={onDetect}>{s.detect.detectAgain}</Button>
+      {detect === "asked" && <p role="status">{s.detect.detecting}</p>}
+      {detect !== "asked" && detect !== "idle" && (
+        <InlineError>
+          <p>{errorText(detect)}</p>
+        </InlineError>
+      )}
+    </div>
+  );
+
+  if (all.length === 0) {
     return (
       <Card title={s.detect.searchingTitle}>
         <p role="status">{message || s.detect.waiting}</p>
         <p>{s.detect.plugInHint}</p>
-        <div>{simButton(false)}</div>
+        <div className="setup-row-actions">
+          {simButton(false)}
+          {detectAgain}
+        </div>
       </Card>
     );
   }
 
-  const d = setup.decision;
-  const matched = d?.device;
-  const isMatched = (dev: USBDevice) =>
-    matched?.bus === dev.bus && matched?.address === dev.address;
-  const others = inventory.devices.filter((dev) => isNeverPrinterOrScanner(dev) && !isMatched(dev));
-  const shown = inventory.devices
-    .filter((dev) => !others.includes(dev))
-    .sort((a, b) => Number(hasPrinterInterface(b)) - Number(hasPrinterInterface(a)));
-  const deviceList = (devices: USBDevice[]) => (
+  const roleless = (r: Row) => r.offered.length + r.inUse.length + r.notOffered.length === 0;
+  const hidden = all.filter((r) => roleless(r) && isNeverPrinterOrScanner(r.d.device));
+  const shown = all
+    .filter((r) => !hidden.includes(r) && (r.offered.length || r.inUse.length || roleless(r)))
+    .sort(
+      (a, b) => Number(hasPrinterInterface(b.d.device)) - Number(hasPrinterInterface(a.d.device)),
+    );
+  const ignored = all.filter((r) => r.notOffered.length > 0);
+  const usable = all.some((r) => !roleless(r));
+
+  const choice = (r: Row, role: Role) => {
+    const ek = `${r.key}:${role}`;
+    return (
+      <RadioGroup
+        key={role}
+        label={s.detect.roleLabel[role]}
+        orientation="horizontal"
+        options={[
+          { id: "use", label: s.detect.use[role] },
+          { id: "skip", label: s.detect.dontUse },
+        ]}
+        value={draft.use[ek] === false ? "skip" : "use"}
+        onChange={(v) => change((d) => ({ ...d, use: { ...d.use, [ek]: v === "use" } }))}
+      />
+    );
+  };
+  const deviceList = (list: Row[]) => (
     <ul className="setup-devices">
-      {devices.map((dev) => (
-        <li key={`${dev.bus}-${dev.address}`}>
-          <span className="setup-device-name">
-            {inventory.simulated
-              ? s.detect.simulatedName(dev.product || s.detect.unnamedDevice)
-              : dev.product || s.detect.unnamedDevice}
-          </span>
-          <span className="setup-device-meta">
-            {[
-              dev.manufacturer,
-              s.detect.usbIds(dev.vendorId, dev.productId),
-              dev.serial && s.detect.serial(dev.serial),
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
+      {list.map((r) => (
+        <li key={r.key}>
+          <DeviceText d={r.d} />
+          {r.inUse.map((role) => (
+            <p key={role} className="setup-device-use">
+              {s.detect.inUse(role, nameOf(role, configuredId(r.d, role)))}
+            </p>
+          ))}
+          {roleless(r) && <p className="setup-device-use">{s.detect.cannotUse}</p>}
+          {r.offered.length > 0 && (
+            <div className="setup-device-choices">{r.offered.map((role) => choice(r, role))}</div>
+          )}
         </li>
       ))}
     </ul>
   );
+
   return (
     <>
       <Card title={s.detect.devicesTitle}>
-        {inventory.devices.length === 0 && <p>{s.detect.noDevices}</p>}
-        {shown.length > 0 && deviceList(shown)}
-        {others.length > 0 && (
-          <Disclosure title={s.detect.otherDevices(others.length)}>{deviceList(others)}</Disclosure>
+        {!usable && (
+          <>
+            <p role="status">{message || s.detect.noUsable}</p>
+            <p>{s.detect.plugInHint}</p>
+            <div>{simButton(false)}</div>
+          </>
         )}
+        {shown.length > 0 && deviceList(shown)}
+        {hidden.length > 0 && (
+          <Disclosure title={s.detect.otherDevices(hidden.length)}>{deviceList(hidden)}</Disclosure>
+        )}
+        {detectAgain}
       </Card>
-      {d ? (
-        <Card title={s.detect.choiceTitle}>
-          <dl className="setup-facts">
-            <dt>{s.detect.printerLabel}</dt>
-            <dd>{d.printer ? family(d.printer) : s.detect.noPrinterDriver}</dd>
-            <dt>{s.detect.scannerLabel}</dt>
-            <dd>{family(d.scanner || "none")}</dd>
-          </dl>
-          {d.rule === "none" && <NoDriver device={d.device} />}
-          <Disclosure title={strings.technicalDetails}>
-            <dl className="setup-facts">
-              <dt>{s.detect.ruleLabel}</dt>
-              <dd>{s.rules[d.rule]}</dd>
-            </dl>
+      {ignored.length > 0 && (
+        <Card>
+          <Disclosure title={s.detect.notOffered(ignored.length)}>
+            <p>{s.detect.notOfferedHint}</p>
+            <ul className="setup-devices">
+              {ignored.map((r) => (
+                <li key={r.key}>
+                  <DeviceText d={r.d} />
+                  <span className="setup-device-meta">{s.detect.ignoredRoles(r.notOffered)}</span>
+                  <div>
+                    <Button
+                      variant="quiet"
+                      onPress={() =>
+                        change((d) => ({ ...d, offerAgain: [...d.offerAgain, r.key] }))
+                      }
+                    >
+                      {s.detect.offerAgain}
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </Disclosure>
-        </Card>
-      ) : (
-        <Card title={s.detect.searchingTitle}>
-          <p role="status">{message || s.detect.noPrinter}</p>
-          <p>{s.detect.plugInHint}</p>
-          <div>{simButton(false)}</div>
         </Card>
       )}
     </>
   );
 }
 
-type Update = (fn: (c: Config) => Config) => void;
-
-function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; update: Update }) {
-  const d = setup.decision;
-  const simulated = draft.device.mode === "simulated";
-  const auto = (id: string | undefined) =>
-    id === undefined ? s.driver.automaticUnknown : s.driver.automatic(family(id));
-  const setAccepted = (id: string, version: string, sha: string | null) =>
-    update((c) => ({
-      ...c,
-      licenses: { acceptedEulas: withAccepted(c.licenses.acceptedEulas, id, version, sha) },
-    }));
+function Drivers({
+  setup,
+  draft,
+  chosen,
+  accepted,
+  edit,
+  setAccepted,
+}: {
+  setup: SetupDTO;
+  draft: Draft;
+  chosen: Chosen[];
+  accepted: EULARef[];
+  edit: (ek: string, e: Edit) => void;
+  setAccepted: (list: EULARef[]) => void;
+}) {
+  const eulas = shownEulas(setup, chosen);
+  const auto = (d: { family: string } | null) =>
+    d ? s.drivers.automatic(family(d.family)) : s.drivers.automaticUnknown;
 
   return (
     <>
-      <Card>
-        {simulated ? (
-          <p>{s.driver.simulated}</p>
+      {draft.simulated ? (
+        <Card>
+          <p>{s.drivers.simulated}</p>
+        </Card>
+      ) : (
+        chosen.map((c) =>
+          c.role === "printer" ? (
+            <Card key={c.ek} title={s.names.printerTitle(c.entry.name)}>
+              {c.decision?.rule === "none" ? (
+                <NoDriver device={c.decision.device} hint={s.drivers.noDriverHint} />
+              ) : (
+                c.decision && <p>{s.drivers.explained(family(c.decision.family))}</p>
+              )}
+              <Select
+                label={s.drivers.driverLabel}
+                options={PrinterSchema.shape.driver.options.map((id) => ({
+                  id,
+                  label:
+                    id !== "auto"
+                      ? family(id)
+                      : c.decision?.rule === "none"
+                        ? s.drivers.automaticNone
+                        : auto(c.decision),
+                }))}
+                value={c.entry.driver}
+                onChange={(k) =>
+                  k != null && edit(c.ek, { driver: PrinterSchema.shape.driver.parse(k) })
+                }
+              />
+              {c.decision && (
+                <Disclosure title={strings.technicalDetails}>
+                  <dl className="setup-facts">
+                    <dt>{s.drivers.ruleLabel}</dt>
+                    <dd>{strings.device.rules[c.decision.rule]}</dd>
+                  </dl>
+                </Disclosure>
+              )}
+            </Card>
+          ) : (
+            <Card key={c.ek} title={s.names.scannerTitle(c.entry.name)}>
+              {c.decision && <p>{s.drivers.scannerExplained(family(c.decision.family))}</p>}
+              <Disclosure title={strings.technicalDetails}>
+                {c.decision && (
+                  <dl className="setup-facts">
+                    <dt>{s.drivers.ruleLabel}</dt>
+                    <dd>{strings.device.scannerRules[c.decision.rule]}</dd>
+                  </dl>
+                )}
+                <Select
+                  label={s.drivers.backendLabel}
+                  options={ScannerSchema.shape.backend.options.map((id) => ({
+                    id,
+                    label: id === "auto" ? auto(c.decision) : family(id),
+                  }))}
+                  value={c.entry.backend}
+                  onChange={(k) =>
+                    k != null && edit(c.ek, { backend: ScannerSchema.shape.backend.parse(k) })
+                  }
+                />
+              </Disclosure>
+            </Card>
+          ),
+        )
+      )}
+      <Card title={s.drivers.licencesTitle}>
+        {eulas.length === 0 ? (
+          <p>{s.drivers.noLicences}</p>
         ) : (
-          <>
-            {d?.rule === "none" ? (
-              <NoDriver device={d.device} hint={s.driver.noDriverHint} />
-            ) : (
-              d && <p>{s.driver.explained(family(d.printer), family(d.scanner || "none"))}</p>
-            )}
-            <Select
-              label={s.driver.driverLabel}
-              options={DeviceSchema.shape.driver.options.map((id) => ({
-                id,
-                label:
-                  id !== "auto"
-                    ? family(id)
-                    : d?.rule === "none"
-                      ? s.driver.automaticNone
-                      : auto(d?.printer),
-              }))}
-              value={draft.device.driver}
-              onChange={(k) =>
-                k != null &&
-                update((c) => ({
-                  ...c,
-                  device: { ...c.device, driver: DeviceSchema.shape.driver.parse(k) },
-                }))
-              }
-            />
-            <Select
-              label={s.driver.scannerLabel}
-              options={DeviceSchema.shape.scanner.options.map((id) => ({
-                id,
-                label: id === "auto" ? auto(d ? d.scanner || "none" : undefined) : family(id),
-              }))}
-              value={draft.device.scanner}
-              onChange={(k) =>
-                k != null &&
-                update((c) => ({
-                  ...c,
-                  device: { ...c.device, scanner: DeviceSchema.shape.scanner.parse(k) },
-                }))
-              }
-            />
-          </>
-        )}
-      </Card>
-      <Card title={s.driver.licencesTitle}>
-        {setup.eulas.length === 0 ? (
-          <p>{s.driver.noLicences}</p>
-        ) : (
-          setup.eulas.map((e) => (
+          eulas.map((e) => (
             <EulaAccept
               key={e.id}
               eula={e}
-              accepted={acceptedSha(draft.licenses.acceptedEulas, e.id, e.version)}
-              onChange={(sha) => setAccepted(e.id, e.version, sha)}
+              accepted={acceptedSha(accepted, e.id, e.version)}
+              onChange={(sha) => setAccepted(withAccepted(accepted, e.id, e.version, sha))}
             />
           ))
         )}
@@ -570,113 +1053,83 @@ function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; upda
   );
 }
 
-function Defaults({ draft, update }: { draft: Config; update: Update }) {
-  const p = draft.print.defaults;
-  const sc = draft.scan.defaults;
-  const setPrint = (patch: Partial<Config["print"]["defaults"]>) =>
-    update((c) => ({ ...c, print: { ...c.print, defaults: { ...c.print.defaults, ...patch } } }));
-  const setScan = (patch: Partial<Config["scan"]["defaults"]>) =>
-    update((c) => ({ ...c, scan: { ...c.scan, defaults: { ...c.scan.defaults, ...patch } } }));
-  const media = options(s.defaults.mediaOptions);
-  if (!media.some((m) => m.id === p.media)) media.push({ id: p.media, label: p.media });
-  const S = ConfigSchema.shape;
-
-  return (
-    <>
-      <Card title={s.defaults.printTitle}>
-        <Select
-          label={s.defaults.media}
-          options={media}
-          value={p.media}
-          onChange={(k) => k != null && setPrint({ media: String(k) })}
-        />
-        <RadioGroup
-          label={s.defaults.sides}
-          options={options(s.defaults.sidesOptions)}
-          value={p.sides}
-          onChange={(v) => setPrint({ sides: S.print.shape.defaults.shape.sides.parse(v) })}
-        />
-      </Card>
-      <Card title={s.defaults.scanTitle}>
-        <RadioGroup
-          label={s.defaults.source}
-          options={options(s.defaults.sourceOptions)}
-          value={sc.source}
-          onChange={(v) => setScan({ source: S.scan.shape.defaults.shape.source.parse(v) })}
-        />
-        <Select
-          label={s.defaults.resolution}
-          options={RESOLUTIONS.map((n) => ({ id: String(n), label: s.defaults.dpi(n) }))}
-          value={String(sc.resolution)}
-          onChange={(k) => k != null && setScan({ resolution: Number(k) })}
-        />
-        <RadioGroup
-          label={s.defaults.colorMode}
-          options={options(s.defaults.colorOptions)}
-          value={sc.colorMode}
-          onChange={(v) => setScan({ colorMode: S.scan.shape.defaults.shape.colorMode.parse(v) })}
-        />
-        <RadioGroup
-          label={s.defaults.format}
-          options={options(s.defaults.formatOptions)}
-          value={sc.format}
-          onChange={(v) => setScan({ format: S.scan.shape.defaults.shape.format.parse(v) })}
-        />
-      </Card>
-    </>
-  );
-}
-
-function Review({ setup, draft }: { setup: SetupDTO; draft: Config }) {
-  const simulated = draft.device.mode === "simulated";
-  const titles = new Map(setup.eulas.map((e) => [`${e.id}@${e.version}`, e.title]));
-  const licences = draft.licenses.acceptedEulas
-    .map((r) => titles.get(`${r.id}@${r.version}`))
+function Review({
+  setup,
+  draft,
+  all,
+  chosen,
+  title,
+  accepted,
+}: {
+  setup: SetupDTO;
+  draft: Draft;
+  all: Row[];
+  chosen: Chosen[];
+  title: string | undefined;
+  accepted: EULARef[];
+}) {
+  const shown = new Map(shownEulas(setup, chosen).map((e) => [eulaKey(e), e.title]));
+  const licences = accepted
+    .map((r) => shown.get(eulaKey(r)))
     .filter((t): t is string => t !== undefined);
-  const p = draft.print.defaults;
-  const sc = draft.scan.defaults;
-  const d = s.defaults;
+  const describe = (c: Chosen) => {
+    const where = c.entry.location ? ` (${c.entry.location})` : "";
+    if (draft.simulated) return `${c.entry.name}${where} · ${s.review.simulatedDevice}`;
+    const driver =
+      c.role === "printer"
+        ? c.entry.driver === "auto"
+          ? s.drivers.automaticUnknown
+          : family(c.entry.driver)
+        : c.entry.backend === "auto"
+          ? s.drivers.automaticUnknown
+          : family(c.entry.backend);
+    return `${c.entry.name}${where} · ${driver}`;
+  };
+  const list = (role: Role) => {
+    const items = chosen.filter((c) => c.role === role);
+    return items.length ? (
+      <ul className="setup-review-list">
+        {items.map((c) => (
+          <li key={c.ek}>{describe(c)}</li>
+        ))}
+      </ul>
+    ) : (
+      s.review.none
+    );
+  };
+  const declined = draft.simulated
+    ? []
+    : all.filter((r) => r.offered.some((role) => draft.use[`${r.key}:${role}`] === false));
+  const noDriver = chosen.filter(
+    (c) => c.role === "printer" && c.entry.driver === "auto" && c.decision?.rule === "none",
+  );
   return (
     <Card>
       <dl className="setup-facts">
-        <dt>{s.review.name}</dt>
-        <dd>{draft.name}</dd>
-        <dt>{s.review.location}</dt>
-        <dd>{draft.location || s.review.noLocation}</dd>
-        <dt>{s.review.device}</dt>
-        <dd>{simulated ? s.review.simulatedDevice : s.review.usbDevice}</dd>
-        {!simulated && (
+        {title !== undefined && (
           <>
-            <dt>{s.review.driver}</dt>
-            <dd>
-              {draft.device.driver === "auto"
-                ? s.driver.automaticUnknown
-                : family(draft.device.driver)}
-            </dd>
-            <dt>{s.review.scanner}</dt>
-            <dd>
-              {draft.device.scanner === "auto"
-                ? s.driver.automaticUnknown
-                : family(draft.device.scanner)}
-            </dd>
+            <dt>{s.review.title}</dt>
+            <dd>{title}</dd>
+          </>
+        )}
+        <dt>{s.review.printers}</dt>
+        <dd>{list("printer")}</dd>
+        <dt>{s.review.scanners}</dt>
+        <dd>{list("scanner")}</dd>
+        {declined.length > 0 && (
+          <>
+            <dt>{s.review.notUsed}</dt>
+            <dd>{declined.map((r) => deviceName(r.d, false)).join(", ")}</dd>
           </>
         )}
         <dt>{s.review.licences}</dt>
         <dd>{licences.length ? licences.join(", ") : s.review.noLicences}</dd>
-        <dt>{s.review.printDefaults}</dt>
-        <dd>{[d.mediaOptions[p.media] ?? p.media, d.sidesOptions[p.sides]].join(", ")}</dd>
-        <dt>{s.review.scanDefaults}</dt>
-        <dd>
-          {[
-            d.sourceOptions[sc.source],
-            d.dpi(sc.resolution),
-            d.colorOptions[sc.colorMode],
-            d.formatOptions[sc.format],
-          ].join(", ")}
-        </dd>
       </dl>
-      {!simulated && draft.device.driver === "auto" && setup.decision?.rule === "none" && (
-        <NoDriver device={setup.decision.device} hint={s.review.noDriverHint} />
+      {noDriver.map(
+        (c) =>
+          c.role === "printer" && (
+            <NoDriver key={c.ek} device={c.decision?.device ?? null} hint={s.review.noDriverHint} />
+          ),
       )}
     </Card>
   );
@@ -684,16 +1137,17 @@ function Review({ setup, draft }: { setup: SetupDTO; draft: Config }) {
 
 /** The no-driver state: what the printer reported, so the user can look up a driver for it. */
 function NoDriver({ device, hint }: { device: USBDevice | null; hint?: string }) {
+  const t = strings.device.noDriver;
   return (
     <div>
-      <p>{s.noDriver.title}</p>
+      <p>{t.title}</p>
       <p>
         {device?.deviceId ? (
           <>
-            {s.noDriver.deviceId} <code>{device.deviceId}</code>
+            {t.deviceId} <code>{device.deviceId}</code>
           </>
         ) : (
-          s.noDriver.noDeviceId
+          t.noDeviceId
         )}
       </p>
       {hint && <p>{hint}</p>}
@@ -701,14 +1155,46 @@ function NoDriver({ device, hint }: { device: USBDevice | null; hint?: string })
   );
 }
 
-function Applying({ status, timedOut }: { status: Status | null; timedOut: boolean }) {
-  const message = status?.device.message;
+function addedEntries(status: Status | null, added: Added) {
+  const pick = <T extends { id: string }>(list: T[] | undefined, ids: string[]) =>
+    ids.flatMap((id) => list?.find((e) => e.id === id) ?? []);
+  return {
+    printers: pick<StatusPrinter>(status?.printers, added.printers),
+    scanners: pick<StatusScanner>(status?.scanners, added.scanners),
+  };
+}
+
+function Applying({
+  status,
+  ids,
+  timedOut,
+}: {
+  status: Status | null;
+  ids: string[];
+  timedOut: boolean;
+}) {
+  const entries = [...(status?.printers ?? []), ...(status?.scanners ?? [])].filter((e) =>
+    ids.includes(e.id),
+  );
   return (
     <div className="setup-view">
       <PageHeader title={s.applying.title} description={s.applying.description} />
       <Card>
         <ProgressBar label={s.applying.progress} />
-        {message && <p role="status">{message}</p>}
+        {entries.length > 0 && (
+          <div role="status">
+            <ul className="setup-devices">
+              {entries.map((e) => (
+                <li key={e.id}>
+                  <span className="setup-device-name">
+                    {e.name} <DeviceStatusBadge phase={e.phase} />
+                  </span>
+                  {e.message && <span className="setup-device-meta">{e.message}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </Card>
       {timedOut && (
         <InlineError action={<LinkButton href="/">{s.applying.goToStatus}</LinkButton>}>
@@ -719,30 +1205,183 @@ function Applying({ status, timedOut }: { status: Status | null; timedOut: boole
   );
 }
 
-function Done({ status }: { status: Status | null }) {
-  const c = status?.connect;
+type Changes = Record<string, OptionValue>;
+
+/**
+ * Defaults per new device from its live capabilities (A15), with the same control as Settings.
+ * Save re-reads the config and patches only the edited arrays, changing only the edited keys.
+ */
+function DefaultsStep({
+  status,
+  added,
+  title,
+  onDone,
+}: {
+  status: Status | null;
+  added: Added;
+  title: string;
+  onDone: () => void;
+}) {
+  const [changes, setChanges] = useState<Record<string, Changes>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const { printers, scanners } = addedEntries(status, added);
+  const locale = mediaForLanguage(navigator.language);
+
+  // What the step would write per entry: the user's choices over the locale's paper size,
+  // which is preselected when the printer offers it and does not already default to it.
+  const pending = new Map<string, Changes>();
+  for (const p of printers) {
+    const auto: Changes = {};
+    const media = optionState("media", p.available ? p.capabilities : undefined, "printer");
+    if (media.values.includes(locale) && media.deviceDefault !== locale) auto.media = locale;
+    pending.set(`printer:${p.id}`, { ...auto, ...changes[`printer:${p.id}`] });
+  }
+  for (const sc of scanners) pending.set(`scanner:${sc.id}`, { ...changes[`scanner:${sc.id}`] });
+  const hasChanges = [...pending.values()].some((c) =>
+    Object.values(c).some((v) => v !== "" && v !== 0),
+  );
+
+  const set = (key: string, kind: FieldKind, value: OptionValue) =>
+    setChanges((c) => ({ ...c, [key]: { ...c[key], [kind]: value } }));
+  const applied = <D extends object>(role: Role, id: string, defaults: D): D | undefined => {
+    const c = pending.get(`${role}:${id}`);
+    if (!c || Object.keys(c).length === 0) return undefined;
+    return Object.entries(c).reduce((d, [k, v]) => setDefault(d, k as FieldKind, v), defaults);
+  };
+
+  const save = async () => {
+    if (!hasChanges) return onDone();
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      // The file as it is now: other entries and other keys stay exactly as they are.
+      const now = await api.getConfig();
+      if (!now.config) throw new Error(s.configInvalid);
+      const patch: Record<string, unknown> = {};
+      let p = false;
+      const nextPrinters = now.config.printers.map((e) => {
+        const d = applied("printer", e.id, e.defaults);
+        if (!d) return e;
+        p = true;
+        return { ...e, defaults: d };
+      });
+      let sc = false;
+      const nextScanners = now.config.scanners.map((e) => {
+        const d = applied("scanner", e.id, e.defaults);
+        if (!d) return e;
+        sc = true;
+        return { ...e, defaults: d };
+      });
+      if (p) patch.printers = nextPrinters;
+      if (sc) patch.scanners = nextScanners;
+      await api.patchConfig(patch, now.etag);
+      onDone();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const card = (role: Role, e: StatusPrinter | StatusScanner) => {
+    const key = `${role}:${e.id}`;
+    const caps = e.available ? e.capabilities : undefined;
+    const groups = role === "printer" ? printerGroups : scannerGroups;
+    return (
+      <Card key={key} title={e.name}>
+        {groups.map((g) => (
+          <section key={g.id} className="setup-option-group" aria-label={g.title}>
+            <h3>{g.title}</h3>
+            {g.kinds.map((kind: FieldKind) => (
+              <OptionField
+                key={kind}
+                kind={kind}
+                device={role}
+                mode="defaults"
+                state={optionState(kind, caps, role)}
+                value={pending.get(key)?.[kind]}
+                onChange={(v) => set(key, kind, v)}
+              />
+            ))}
+          </section>
+        ))}
+      </Card>
+    );
+  };
+
+  return (
+    <div className="setup-view">
+      <Progress current="defaults" title={title} />
+      <PageHeader
+        title={s.steps.defaults}
+        description={s.defaults.description}
+        documentTitle={s.stepTitle(PROGRESS.length, PROGRESS.length, s.steps.defaults)}
+      />
+      {printers.map((e) => card("printer", e))}
+      {scanners.map((e) => card("scanner", e))}
+      {error !== null && (
+        <InlineError
+          action={
+            error instanceof ConflictError && <Button onPress={save}>{s.defaults.saveAgain}</Button>
+          }
+        >
+          <p>{error instanceof ConflictError ? s.defaults.conflict : errorText(error)}</p>
+        </InlineError>
+      )}
+      <div className="setup-actions">
+        <Button variant="quiet" onPress={onDone}>
+          {s.defaults.skip}
+        </Button>
+        <Button variant="primary" onPress={save}>
+          {saving ? s.defaults.saving : hasChanges ? s.defaults.save : s.defaults.keep}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function Done({ status, added }: { status: Status | null; added: Added }) {
+  const { printers, scanners } = addedEntries(status, added);
+  const connected = [
+    ...printers.map((p) => ({
+      id: p.id,
+      name: p.name,
+      dnssd: p.connect.dnssdName,
+      ipp: p.connect.ippUris,
+      escl: [] as string[],
+    })),
+    ...scanners.map((sc) => ({
+      id: sc.id,
+      name: sc.name,
+      dnssd: sc.connect.dnssdName,
+      ipp: [] as string[],
+      escl: sc.connect.esclUrls,
+    })),
+  ].filter((c) => c.dnssd || c.ipp.length > 0 || c.escl.length > 0);
   return (
     <div className="setup-view">
       <PageHeader title={s.done.title} description={s.done.description} />
-      {c && (c.dnssdName || c.ippUris.length > 0 || c.esclUrls.length > 0) && (
-        <Card>
-          <p>{s.done.connectHint}</p>
+      {connected.length > 0 && <p>{s.done.connectHint}</p>}
+      {connected.map((c) => (
+        <Card key={c.id} title={c.name}>
           <dl className="setup-facts">
-            {c.dnssdName && (
+            {c.dnssd && (
               <>
                 <dt>{s.done.networkName}</dt>
-                <dd>{c.dnssdName}</dd>
+                <dd>{c.dnssd}</dd>
               </>
             )}
-            {c.ippUris.map((u) => (
+            {c.ipp.map((u) => (
               <Fact key={u} label={s.done.printerAddress} value={u} />
             ))}
-            {c.esclUrls.map((u) => (
+            {c.escl.map((u) => (
               <Fact key={u} label={s.done.scannerAddress} value={u} />
             ))}
           </dl>
         </Card>
-      )}
+      ))}
       <div className="setup-actions">
         <LinkButton href="/" variant="primary">
           {s.done.goToStatus}

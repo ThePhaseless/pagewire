@@ -16,8 +16,16 @@ function apply(target: unknown, patch: unknown): unknown {
 }
 
 const base = {
-  name: "Printer",
-  device: { mode: "usb", usb: { vendorId: "03f0", productId: "2b17", serial: "" } },
+  name: "Home",
+  printers: [
+    {
+      id: "hp",
+      mode: "usb",
+      usb: { vendorId: "03f0", productId: "2b17", serial: "" },
+      defaults: { sides: "one-sided" } as Record<string, string>,
+    },
+    { id: "samsung", mode: "usb", defaults: {} as Record<string, string> },
+  ],
   print: { maxUploadMiB: 50 },
   licenses: { acceptedEulas: [{ id: "a", version: "1" }] },
 };
@@ -33,18 +41,28 @@ describe("diff", () => {
     });
   });
 
-  test("removing the USB selector sends null", () => {
-    const edited = structuredClone(base) as Record<string, unknown> & typeof base;
-    delete (edited.device as { usb?: unknown }).usb;
+  test("removing a printer's USB selector sends the whole printers list", () => {
+    const edited = structuredClone(base);
+    delete (edited.printers[0] as { usb?: unknown }).usb;
     const patch = diff(base, edited);
-    expect(patch).toEqual({ device: { usb: null } });
-    expect(JSON.stringify(patch)).toBe('{"device":{"usb":null}}');
+    expect(patch).toEqual({ printers: edited.printers });
+    expect(patch.printers).toHaveLength(2);
   });
 
-  test("a key set to undefined also becomes null", () => {
-    expect(diff(base, { ...base, device: { mode: "usb", usb: undefined } })).toEqual({
-      device: { usb: null },
-    });
+  test("a default removed from one entry sends the list with the other entry unchanged", () => {
+    const edited = structuredClone(base);
+    delete edited.printers[0]?.defaults.sides;
+    const patch = diff(base, edited) as { printers: typeof base.printers };
+    expect(patch.printers[0]?.defaults).toEqual({});
+    expect(patch.printers[1]).toEqual(base.printers[1]);
+  });
+
+  test("a removed key, or one set to undefined, becomes null", () => {
+    const edited = structuredClone(base) as Record<string, unknown> & typeof base;
+    delete (edited.print as { maxUploadMiB?: number }).maxUploadMiB;
+    expect(diff(base, edited)).toEqual({ print: { maxUploadMiB: null } });
+    expect(JSON.stringify(diff(base, edited))).toBe('{"print":{"maxUploadMiB":null}}');
+    expect(diff(base, { ...base, print: undefined })).toEqual({ print: null });
   });
 
   test("arrays are replaced whole", () => {
@@ -61,16 +79,17 @@ describe("diff", () => {
   });
 
   test("an added object is sent whole", () => {
-    const from = { device: { mode: "usb" } };
-    const usb = { vendorId: "04b8", productId: "0001", serial: "" };
-    expect(diff(from, { device: { mode: "usb", usb } })).toEqual({ device: { usb } });
+    const from = { scan: { retentionDays: 7 } };
+    const extra = { a: 1, b: "two" };
+    expect(diff(from, { scan: { retentionDays: 7, extra } })).toEqual({ scan: { extra } });
   });
 
   test("applying the patch to the base gives the edited config", () => {
-    const edited = structuredClone(base) as typeof base & { location?: string };
+    const edited = structuredClone(base) as typeof base & { scan?: { retentionDays: number } };
     edited.name = "Office";
-    edited.location = "Hall";
-    edited.device.usb.serial = "X1";
+    edited.scan = { retentionDays: 3 };
+    const usb = edited.printers[0]?.usb;
+    if (usb) usb.serial = "X1";
     edited.licenses.acceptedEulas = [];
     expect(apply(base, diff(base, edited))).toEqual(edited);
   });
@@ -80,13 +99,15 @@ describe("changedPaths and valueAt", () => {
   test("lists leaf pointers, with arrays and null as leaves", () => {
     const patch = {
       name: "x",
-      device: { usb: null, driver: "ps" },
+      print: { maxUploadMiB: null, extra: 2 },
+      printers: [{ id: "hp" }],
       licenses: { acceptedEulas: [{ id: "a", version: "1" }] },
     };
     expect(changedPaths(patch)).toEqual([
       "/name",
-      "/device/usb",
-      "/device/driver",
+      "/print/maxUploadMiB",
+      "/print/extra",
+      "/printers",
       "/licenses/acceptedEulas",
     ]);
   });
@@ -96,9 +117,9 @@ describe("changedPaths and valueAt", () => {
   });
 
   test("valueAt follows a pointer and gives undefined for a missing key", () => {
-    expect(valueAt(base, "/device/usb/vendorId")).toBe("03f0");
+    expect(valueAt(base, "/print/maxUploadMiB")).toBe(50);
     expect(valueAt(base, "/licenses/acceptedEulas")).toEqual([{ id: "a", version: "1" }]);
-    expect(valueAt(base, "/device/usb/nope")).toBeUndefined();
+    expect(valueAt(base, "/print/nope")).toBeUndefined();
     expect(valueAt(null, "/name")).toBeUndefined();
   });
 });

@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "vendorId": "04a9",
+      "productId": "1904",
+      "serial": "FAKE0011",
+      "manufacturer": "Canon",
+      "product": "CanoScan LiDE 100",
+      "bus": 1,
+      "address": 11,
+      "interfaces": [
+        {"class": 255, "subClass": 255, "protocol": 255}
+      ],
+      "deviceId": ""
+    }
+  ],
+  "probedAt": "2026-11-24T12:00:00Z",
+  "simulated": false
+}

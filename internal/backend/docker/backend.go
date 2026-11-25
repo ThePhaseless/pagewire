@@ -38,6 +38,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/usb"
 )
@@ -60,9 +61,8 @@ const (
 	gateRecheck       = 5 * time.Second
 	maxRetryWait      = 5 * time.Minute
 	defaultHealthWait = 60 * time.Second
-	msgNoPrinter      = "no USB printer on this host"
-	msgNoDevice       = "waiting for the matched printer's USB device node"
-	printerClass      = 7
+	msgNoPrinter      = "no USB printer or scanner on this host"
+	msgNoDevice       = "waiting for the USB device nodes of " // + the entry ids, comma-separated
 )
 
 var (
@@ -109,21 +109,22 @@ type Backend struct {
 	selfMu sync.Mutex
 	self   string
 
-	mu      sync.Mutex
-	applied bool    // a successful Apply recorded want
-	want    *wanted // nil: no workload
-	restart bool
-	gated   bool              // usb or probe spec and no printer on the host
-	usbDev  *device.USBDevice // the controller's matched printer
-	nextDev *device.USBDevice // usbDev once the next Apply succeeds, if staged
-	staged  bool              // nextDev waits for the next Apply
-	noDev   bool              // the USB daemons are left out: usbDev is not attached
-	done    string            // workload hash of the last finished rollout or adoption
-	busy    string            // current rollout step
-	err     string            // last rollout error
-	cancel  context.CancelFunc
-	logged  string // last error logged, so a stuck rollout logs once
-	fails   int    // consecutive failed converges since the last success or new want
+	mu       sync.Mutex
+	applied  bool    // a successful Apply recorded want
+	want     *wanted // nil: no workload
+	restart  bool
+	gated    bool               // usb or probe spec and no wanted device on the host
+	usbDevs  []device.USBDevice // the controller's bound devices, sorted by Key
+	nextDevs []device.USBDevice // usbDevs once the next Apply succeeds, if staged
+	staged   bool               // nextDevs waits for the next Apply
+	noDev    bool               // every USB daemon is left out: none of its devices has a node
+	waiting  []string           // entry ids whose device has no usbfs node, sorted
+	done     string             // workload hash of the last finished rollout or adoption
+	busy     string             // current rollout step
+	err      string             // last rollout error
+	cancel   context.CancelFunc
+	logged   string // last error logged, so a stuck rollout logs once
+	fails    int    // consecutive failed converges since the last success or new want
 
 	wake chan struct{}
 
@@ -162,10 +163,20 @@ func (b *Backend) poke() {
 	}
 }
 
-// Apply records spec as the wanted workload and wakes the worker. A failing
-// Apply changes no backend state. A nil spec removes the workload.
-func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
-	if spec == nil {
+// Apply records the one spec as the wanted workload and wakes the worker. A
+// failing Apply changes no backend state. Empty specs remove the workload; the
+// host is one node-less workload, so more than one spec, or a spec naming a
+// node, is an error.
+func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
+	switch {
+	case len(specs) > 1:
+		return fmt.Errorf("docker: %d device workloads; the host runs one", len(specs))
+	case len(specs) == 1 && specs[0] == nil:
+		return errors.New("docker: nil spec")
+	case len(specs) == 1 && specs[0].Node != "":
+		return fmt.Errorf("docker: spec for node %q; the host runs one node-less workload", specs[0].Node)
+	}
+	if len(specs) == 0 {
 		b.mu.Lock()
 		b.applied, b.want, b.fails = true, nil, 0
 		b.takeStaged()
@@ -176,6 +187,7 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 		b.poke()
 		return nil
 	}
+	spec := specs[0]
 	h := spec.Hash
 	if len(h) < 12 { // the pod UID takes 12 characters of it
 		h = device.SpecHash(spec)
@@ -186,7 +198,7 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	}
 	pod, err := k8s.Plan(spec, k8s.Params{
 		Registry: b.p.Registry, Tag: b.p.Tag, Overrides: b.p.Overrides, AgentURL: b.p.AgentURL,
-		BlobPVC: BlobVolume, SelfImage: self, PodUID: "docker-" + h[:12],
+		BlobPVC: BlobVolume, SelfImage: self, PodUID: "docker-" + h[:12], BlobWorkload: true,
 	})
 	if err != nil {
 		return err
@@ -298,40 +310,47 @@ func (b *Backend) AgentToken(context.Context) (string, error) {
 	return tok, nil
 }
 
-// SetUSBDevice records the controller's matched printer, whose usbfs node the
-// USB daemons get, and wakes the worker when it changed. With beforeApply it
-// only stages d for the next successful Apply.
-func (b *Backend) SetUSBDevice(d *device.USBDevice, beforeApply bool) {
-	var dc *device.USBDevice
-	if d != nil {
-		c := *d
-		c.Interfaces = slices.Clone(d.Interfaces)
-		dc = &c
+// SetUSBDevices records the controller's bound devices, whose usbfs nodes the
+// USB daemons get, and wakes the worker when they changed. With beforeApply it
+// only stages devs for the next successful Apply.
+func (b *Backend) SetUSBDevices(devs []device.USBDevice, beforeApply bool) {
+	dc := make([]device.USBDevice, 0, len(devs))
+	for _, d := range devs {
+		d.Interfaces = slices.Clone(d.Interfaces)
+		dc = append(dc, d)
 	}
+	// Sorted, so the same devices in another order are no change.
+	slices.SortFunc(dc, func(x, y device.USBDevice) int {
+		return cmp.Or(strings.Compare(x.Key().String(), y.Key().String()), cmp.Compare(x.Bus, y.Bus), cmp.Compare(x.Address, y.Address))
+	})
 	b.mu.Lock()
 	if beforeApply {
-		b.nextDev, b.staged = dc, true
+		b.nextDevs, b.staged = dc, true
 		b.mu.Unlock()
 		return
 	}
-	b.nextDev, b.staged = nil, false
-	same := reflect.DeepEqual(b.usbDev, dc)
-	b.usbDev = dc
+	b.nextDevs, b.staged = nil, false
+	same := reflect.DeepEqual(b.usbDevs, dc)
+	b.usbDevs = dc
 	b.mu.Unlock()
 	if !same {
 		b.poke()
 	}
 }
 
-// takeStaged commits a staged device; b.mu is held.
+// takeStaged commits staged devices; b.mu is held.
 func (b *Backend) takeStaged() {
 	if b.staged {
-		b.usbDev, b.nextDev, b.staged = b.nextDev, nil, false
+		b.usbDevs, b.nextDevs, b.staged = b.nextDevs, nil, false
 	}
 }
 
 // RestartPod makes the worker roll the workload out again, probe included.
-func (b *Backend) RestartPod(context.Context) error {
+// The host's one workload is "".
+func (b *Backend) RestartPod(_ context.Context, workload string) error {
+	if workload != "" {
+		return fmt.Errorf("docker: no workload %q; the host runs one node-less workload", workload)
+	}
 	b.mu.Lock()
 	b.restart = true
 	if b.cancel != nil {
@@ -417,33 +436,66 @@ func (b *Backend) list(ctx context.Context) ([]container.Summary, error) {
 	}), nil
 }
 
-// deviceNode returns the usbfs node of d as it is attached now: the same
-// vendor, product and serial, at its recorded address first. A replugged
-// printer has a new address; it is taken only when it is the one such device,
-// so two identical printers wait for the controller's next match. "" when d is
-// nil, not attached or ambiguous. With sysfs unreadable it trusts the recorded
-// address.
-func (b *Backend) deviceNode(d *device.USBDevice) string {
-	if d == nil {
-		return ""
-	}
-	node := func(x device.USBDevice) string { return fmt.Sprintf("%s/%03d/%03d", usbDevDir, x.Bus, x.Address) }
+// attached lists the host's USB devices; ok is false when sysfs is
+// unreadable, which is warned once.
+func (b *Backend) attached() (devs []device.USBDevice, ok bool) {
 	devs, err := usb.Enumerate(b.p.SysRoot)
 	if err != nil {
-		return node(*d)
+		b.warnSysfs.Do(func() { slog.Warn("read USB devices; starting without the device check", "err", err) })
+		return nil, false
 	}
-	same := func(x device.USBDevice) bool {
-		return x.VendorID == d.VendorID && x.ProductID == d.ProductID && x.Serial == d.Serial
+	return devs, true
+}
+
+// deviceNode returns the usbfs node of d as it is attached now (host lists
+// the attached devices; ok false: sysfs unreadable): the same vendor, product
+// and serial, at its recorded address first. A replugged device has a new
+// address; it is taken only when it is the one such device, so two identical
+// devices wait for the controller's next match. "" when d is not attached or
+// ambiguous. With sysfs unreadable it trusts the recorded address.
+func deviceNode(d device.USBDevice, host []device.USBDevice, ok bool) string {
+	node := func(x device.USBDevice) string { return fmt.Sprintf("%s/%03d/%03d", usbDevDir, x.Bus, x.Address) }
+	if !ok {
+		return node(d)
 	}
-	i := slices.IndexFunc(devs, func(x device.USBDevice) bool { return same(x) && x.Bus == d.Bus && x.Address == d.Address })
-	if i >= 0 {
-		return node(devs[i])
+	same := func(x device.USBDevice) bool { return x.Key() == d.Key() }
+	if i := slices.IndexFunc(host, func(x device.USBDevice) bool { return same(x) && x.Bus == d.Bus && x.Address == d.Address }); i >= 0 {
+		return node(host[i])
 	}
-	devs = slices.DeleteFunc(devs, func(x device.USBDevice) bool { return !same(x) })
-	if len(devs) != 1 {
+	host = slices.DeleteFunc(slices.Clone(host), func(x device.USBDevice) bool { return !same(x) })
+	if len(host) != 1 {
 		return ""
 	}
-	return node(devs[0])
+	return node(host[0])
+}
+
+// deviceNodes maps the key of each of devs to its usbfs nodes now, leaving
+// out devices with none.
+func deviceNodes(devs, host []device.USBDevice, ok bool) map[device.USBKey][]string {
+	nodes := map[device.USBKey][]string{}
+	for _, d := range devs {
+		if n := deviceNode(d, host, ok); n != "" {
+			nodes[d.Key()] = append(nodes[d.Key()], n)
+		}
+	}
+	return nodes
+}
+
+// specKeys returns the USB keys of s's entries, without the zero key of
+// simulated ones, and the entry ids of each key.
+func specKeys(s *device.Spec) map[device.USBKey][]string {
+	ids := map[device.USBKey][]string{}
+	for _, p := range s.Printers {
+		if p.USB != (device.USBKey{}) {
+			ids[p.USB] = append(ids[p.USB], p.ID)
+		}
+	}
+	for _, sc := range s.Scanners {
+		if sc.USB != (device.USBKey{}) {
+			ids[sc.USB] = append(ids[sc.USB], sc.ID)
+		}
+	}
+	return ids
 }
 
 func usbMode(s *device.Spec) bool { return s.Mode == device.ModeUSB || s.Mode == device.ModeProbe }
@@ -456,7 +508,7 @@ func (b *Backend) converge(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	w, restart, dev := b.want, b.restart, b.usbDev
+	w, restart, devs := b.want, b.restart, b.usbDevs
 	b.restart = false
 	b.mu.Unlock()
 	rolled := false
@@ -486,27 +538,45 @@ func (b *Backend) converge(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	if usbMode(w.spec) && !b.printerPresent() {
+	var host []device.USBDevice
+	hostOK := false // a simulated spec has no USB daemon and needs no sysfs
+	if usbMode(w.spec) {
+		host, hostOK = b.attached()
+	}
+	if usbMode(w.spec) && !wantedPresent(w.spec, host, hostOK) {
 		b.mu.Lock()
-		b.gated, b.noDev, b.done = true, false, ""
+		b.gated, b.noDev, b.waiting, b.done = true, false, nil, ""
 		b.mu.Unlock()
 		if err := b.teardown(ctx, owned); err != nil {
 			b.fail(ctx, err)
 		}
 		return
 	}
-	// The USB daemons run with the matched printer's node or not at all; the
-	// probe and agent still run, so a replugged or new printer is reported.
+	// Each USB daemon runs with its own devices' nodes or not at all; the
+	// probe and agent still run, so a replugged or new device is reported.
 	ew := *w
-	node := ""
-	if slices.ContainsFunc(w.containers, func(c plannedContainer) bool { return c.usbDaemon }) {
-		node = b.deviceNode(dev)
+	nodes := deviceNodes(devs, host, hostOK)
+	ew.containers = withDevice(w.containers, nodes)
+	var waiting []string
+	for k, ids := range specKeys(w.spec) {
+		if len(nodes[k]) == 0 {
+			waiting = append(waiting, ids...)
+		}
 	}
-	ew.containers = withDevice(w.containers, node)
-	noDev := len(ew.containers) < len(w.containers)
+	slices.Sort(waiting)
+	daemons := func(cs []plannedContainer) int {
+		n := 0
+		for _, c := range cs {
+			if len(c.usb) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	noDev := daemons(w.containers) > 0 && daemons(ew.containers) == 0
 	w = &ew
 	b.mu.Lock()
-	b.gated, b.noDev = false, noDev
+	b.gated, b.noDev, b.waiting = false, noDev, waiting
 	b.mu.Unlock()
 
 	if !restart {
@@ -559,28 +629,28 @@ func (b *Backend) rollout(ctx context.Context, owned []container.Summary, w *wan
 	return b.start(ctx, w)
 }
 
-// printerPresent reports whether any USB device has a printer-class
-// interface. An unreadable sysfs counts as present, so it never blocks forever.
-func (b *Backend) printerPresent() bool {
-	devs, err := usb.Enumerate(b.p.SysRoot)
-	if err != nil {
-		b.warnSysfs.Do(func() { slog.Warn("read USB devices; starting without the printer check", "err", err) })
+// wantedPresent reports whether host has a device s wants: in probe mode any
+// device that can be a printer or scanner, else any device of s's entries. An
+// unreadable sysfs (ok false) counts as present, so it never blocks forever.
+func wantedPresent(s *device.Spec, host []device.USBDevice, ok bool) bool {
+	if !ok {
 		return true
 	}
-	for _, d := range devs {
-		for _, i := range d.Interfaces {
-			if i.Class == printerClass {
-				return true
-			}
+	keys := specKeys(s)
+	cat := catalog.Default()
+	return slices.ContainsFunc(host, func(d device.USBDevice) bool {
+		if s.Mode == device.ModeProbe {
+			p, sc := cat.Roles(d)
+			return p || sc
 		}
-	}
-	return false
+		return len(keys[d.Key()]) > 0
+	})
 }
 
 // healthy reports whether the owned containers are exactly the wanted
 // workload and still up: run-once inits exited 0, the rest running or restarting.
 func (b *Backend) healthy(ctx context.Context, owned []container.Summary, w *wanted) (bool, error) {
-	want := map[string]string{} // name: usbfs node
+	want := map[string]string{} // name: usbfs nodes
 	for _, c := range w.containers {
 		want[c.Opts.Name] = c.Opts.Config.Labels[LabelUSBDevice]
 	}
@@ -874,16 +944,23 @@ func (b *Backend) HostIP(ctx context.Context) string {
 	return "127.0.0.1"
 }
 
-// Observe reports the device workload's state from the listed containers and
-// the worker's progress. Endpoints stay empty: they come from agent reports.
-func (b *Backend) Observe(ctx context.Context) (device.Observation, error) {
+// Observe reports the host's one device workload (Workload "") from the
+// listed containers and the worker's progress. Endpoints stay empty: they come
+// from agent reports. It is pending while no USB daemon has a device node;
+// with only some missing it follows the containers, and the message names the
+// entries still waiting, so a switched-off printer never holds up its siblings.
+func (b *Backend) Observe(ctx context.Context) ([]device.Observation, error) {
 	owned, err := b.list(ctx)
 	if err != nil {
-		return device.Observation{}, fmt.Errorf("list device containers: %w", err)
+		return nil, fmt.Errorf("list device containers: %w", err)
 	}
 	obs := device.Observation{HostIP: b.HostIP(ctx)}
 	b.mu.Lock()
 	w, gated, noDev, done, applied := b.want, b.gated, b.noDev, b.done, b.applied
+	waitMsg := ""
+	if w != nil && len(b.waiting) > 0 {
+		waitMsg = msgNoDevice + strings.Join(b.waiting, ", ")
+	}
 	msg := cmp.Or(b.err, b.busy, "starting")
 	b.mu.Unlock()
 
@@ -911,7 +988,7 @@ func (b *Backend) Observe(ctx context.Context) (device.Observation, error) {
 	case w != nil && done != w.hash:
 		obs.Phase, obs.Message = device.PhasePending, msg
 	case w != nil && noDev:
-		obs.Phase, obs.Message = device.PhasePending, msgNoDevice
+		obs.Phase, obs.Message = device.PhasePending, waitMsg
 	case n == 0:
 		obs.Phase = device.PhaseAbsent
 	case !applied && stopped > 0:
@@ -931,7 +1008,7 @@ func (b *Backend) Observe(ctx context.Context) (device.Observation, error) {
 			}
 		}
 	default:
-		obs.Phase = device.PhaseRunning
+		obs.Phase, obs.Message = device.PhaseRunning, waitMsg
 	}
-	return obs, nil
+	return []device.Observation{obs}, nil
 }

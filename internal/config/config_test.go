@@ -15,62 +15,97 @@ func TestDefault(t *testing.T) {
 	if c.APIVersion != APIVersion || c.Name != "Office" {
 		t.Errorf("apiVersion %q name %q", c.APIVersion, c.Name)
 	}
-	if c.Device.Mode != ModeUSB || c.Device.Driver != Auto || c.Device.Scanner != Auto || c.Device.USB != nil {
-		t.Errorf("device %+v", c.Device)
+	if c.Printers == nil || len(c.Printers) != 0 || c.Scanners == nil || len(c.Scanners) != 0 ||
+		c.IgnoredDevices == nil || len(c.IgnoredDevices) != 0 {
+		t.Errorf("lists %#v %#v %#v, want empty non-nil", c.Printers, c.Scanners, c.IgnoredDevices)
 	}
 	if c.Licenses.AcceptedEULAs == nil || len(c.Licenses.AcceptedEULAs) != 0 {
 		t.Errorf("acceptedEulas %#v, want empty non-nil", c.Licenses.AcceptedEULAs)
 	}
-	if c.Print.MaxUploadMiB != 50 || c.Scan.RetentionDays != 7 || c.Print.Defaults.Media != "iso_a4_210x297mm" || c.Scan.Defaults.Resolution != 300 {
-		t.Errorf("defaults %+v %+v", c.Print, c.Scan)
+	if c.Print.MaxUploadMiB != 50 || c.Scan.RetentionDays != 7 {
+		t.Errorf("limits %+v %+v", c.Print, c.Scan)
 	}
 }
 
-func TestDefaultRoundTripsThroughParse(t *testing.T) {
-	want := Default("Living room printer")
-	b, err := yaml.Marshal(want)
-	if err != nil {
-		t.Fatal(err)
+// devices returns a config with one usb printer and one usb scanner.
+func devices() Config {
+	c := Default("Home")
+	c.Printers = []Printer{{ID: "p", Name: "P", Enabled: true, Mode: ModeUSB, Driver: Auto, USB: &USB{VendorID: "03f0", ProductID: "2b17"}}}
+	c.Scanners = []Scanner{{ID: "s", Name: "S", Enabled: true, Mode: ModeUSB, Backend: BackendAuto, USB: &USB{VendorID: "03f0", ProductID: "2b17"}}}
+	return c
+}
+
+func TestRoundTripsThroughParse(t *testing.T) {
+	full := devices()
+	full.Printers[0].Defaults = PrintDefaults{
+		Media: "iso_a4_210x297mm", MediaSource: "tray-1", MediaType: "stationery", Sides: "one-sided",
+		ColorMode: "monochrome", Quality: "high", Resolution: 600, ContentOptimize: "text", Orientation: "landscape",
+		NumberUp: 2, PrintScaling: "fit", OutputBin: "face-down", Finishings: "staple",
 	}
-	got, err := Parse(b)
-	if err != nil {
-		t.Fatalf("%v\n%s", err, b)
-	}
-	if !reflect.DeepEqual(*got, want) {
-		t.Errorf("\n got  %+v\n want %+v", *got, want)
-	}
-	if strings.Contains(string(b), "usb:") {
-		t.Errorf("YAML of a config without device.usb has a usb key:\n%s", b)
+	full.Scanners[0].Defaults = ScanDefaults{Source: "adf", Resolution: 300, ColorMode: "grayscale", Intent: "photo", Format: "jpeg"}
+	full.Scanners[0].Enabled = false
+	full.IgnoredDevices = []IgnoredDevice{{VendorID: "046d", ProductID: "c31c", Roles: []string{RolePrinter, RoleScanner}}}
+	for name, want := range map[string]Config{"default": Default("Living room printer"), "devices": devices(), "full": full} {
+		t.Run(name, func(t *testing.T) {
+			for enc, marshal := range map[string]func(any) ([]byte, error){"yaml": yaml.Marshal, "json": json.Marshal} {
+				b, err := marshal(want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := Parse(b)
+				if err != nil {
+					t.Fatalf("%s: %v\n%s", enc, err, b)
+				}
+				if !reflect.DeepEqual(*got, want) {
+					t.Errorf("%s:\n got  %+v\n want %+v\n%s", enc, *got, want, b)
+				}
+			}
+		})
 	}
 }
 
-func TestJSONOmitsAbsentUSB(t *testing.T) {
-	b, err := json.Marshal(Default("Printer"))
+func TestJSONShape(t *testing.T) {
+	b, err := json.Marshal(devices())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), `"usb":`) {
-		t.Errorf("JSON of a config without device.usb has a usb key: %s", b)
+	for _, want := range []string{
+		`"defaults":{}`, `"enabled":true`, `"printers":[{`, `"ignoredDevices":[]`, `"acceptedEulas":[]`,
+		`"usb":{"vendorId":"03f0","productId":"2b17","serial":""}`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("JSON lacks %s: %s", want, b)
+		}
 	}
-	if !strings.Contains(string(b), `"acceptedEulas":[]`) {
-		t.Errorf("acceptedEulas not an empty list: %s", b)
-	}
-
-	c := Default("Printer")
-	c.Device.USB = &USB{VendorID: "03f0", ProductID: "2b17"}
+	c := devices()
+	c.Printers[0].USB, c.Scanners[0].USB, c.Scanners[0].Enabled = nil, nil, false
 	b, err = json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"usb":{"vendorId":"03f0","productId":"2b17","serial":""}`) {
-		t.Errorf("usb selector JSON: %s", b)
+	if strings.Contains(string(b), `"usb":`) || !strings.Contains(string(b), `"enabled":false`) {
+		t.Errorf("JSON of a printer without usb or a disabled scanner: %s", b)
+	}
+	y, err := yaml.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(y), "usb:") || !strings.Contains(string(y), "enabled: false") {
+		t.Errorf("YAML of a printer without usb or a disabled scanner:\n%s", y)
+	}
+}
+
+func TestSimulated(t *testing.T) {
+	if !(Printer{Mode: ModeSimulated}).Simulated() || (Printer{Mode: ModeUSB}).Simulated() ||
+		!(Scanner{Mode: ModeSimulated}).Simulated() || (Scanner{Mode: ModeUSB}).Simulated() {
+		t.Error("Simulated()")
 	}
 }
 
 func TestErrorListError(t *testing.T) {
-	el := &ErrorList{Errors: []FieldError{{Path: "/name", Line: 2, Column: 7, Message: "is required"}, {Path: "/device/mode", Message: "bad"}}}
+	el := &ErrorList{Errors: []FieldError{{Path: "/name", Line: 2, Column: 7, Message: "is required"}, {Path: "/printers/0/mode", Message: "bad"}}}
 	got := el.Error()
-	for _, want := range []string{"2:7", "/name", "is required", "/device/mode", "bad"} {
+	for _, want := range []string{"2:7", "/name", "is required", "/printers/0/mode", "bad"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Error() = %q lacks %q", got, want)
 		}
@@ -78,9 +113,10 @@ func TestErrorListError(t *testing.T) {
 }
 
 func TestNumberLikeStringsRoundTrip(t *testing.T) {
-	want := Default("2024")
-	want.Location = "true"
-	want.Device.USB = &USB{VendorID: "0482", ProductID: "0001", Serial: "012345"}
+	want := devices()
+	want.Name = "2024"
+	want.Printers[0].Location = "true"
+	want.Printers[0].USB = &USB{VendorID: "0482", ProductID: "0001", Serial: "012345"}
 	want.Licenses.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24", TextSHA256: testSHA}}
 	b, err := yaml.Marshal(want)
 	if err != nil {
@@ -99,8 +135,9 @@ func TestUnquotedNumberLikeValues(t *testing.T) {
 	// Hand-typed unquoted values must come back as the literal text or fail;
 	// a silent octal or float conversion would break selector matching.
 	for _, tt := range []struct{ src, want string }{
-		{"device:\n  usb:\n    vendorId: 0482\n    productId: \"0001\"\n", "0482"},
-		{"device:\n  usb:\n    vendorId: \"0482\"\n    productId: \"0001\"\n    serial: 012345\n", "012345"},
+		{"printers:\n  - id: p\n    name: P\n    usb:\n      vendorId: 0482\n      productId: \"0001\"\n", "0482"},
+		{"printers:\n  - id: p\n    name: P\n    usb:\n      vendorId: \"0482\"\n      productId: \"0001\"\n      serial: 012345\n", "012345"},
+		{"ignoredDevices:\n  - vendorId: \"0482\"\n    productId: \"0001\"\n    serial: 012345\n    roles: [printer]\n", "012345"},
 		{"licenses:\n  acceptedEulas:\n    - {id: a, version: 3.20}\n", "3.20"},
 	} {
 		c, err := Parse([]byte(minimalYAML + tt.src))
@@ -108,8 +145,13 @@ func TestUnquotedNumberLikeValues(t *testing.T) {
 			continue // a clear rejection is fine
 		}
 		var vals []string
-		if c.Device.USB != nil {
-			vals = append(vals, c.Device.USB.VendorID, c.Device.USB.Serial)
+		for _, p := range c.Printers {
+			if p.USB != nil {
+				vals = append(vals, p.USB.VendorID, p.USB.Serial)
+			}
+		}
+		for _, d := range c.IgnoredDevices {
+			vals = append(vals, d.Serial)
 		}
 		for _, e := range c.Licenses.AcceptedEULAs {
 			vals = append(vals, e.Version)

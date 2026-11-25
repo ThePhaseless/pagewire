@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { PageHeader } from "./components/ui";
-import { navigate, useDocumentTitle, useFocusOnNavigate, useNavigationBlocker } from "./router";
+import {
+  navigate,
+  replaceQueryParam,
+  useDocumentTitle,
+  useFocusOnNavigate,
+  useNavigationBlocker,
+  useQueryParam,
+} from "./router";
 
 afterEach(cleanup);
 
@@ -182,5 +189,38 @@ describe("focus after navigation", () => {
     getByRole("textbox").focus();
     await nextFrame();
     expect(document.activeElement).toBe(getByRole("heading"));
+  });
+});
+
+describe("query parameters", () => {
+  afterEach(() => window.history.replaceState(null, "", "/"));
+
+  test("useQueryParam reads the address and follows navigation", () => {
+    window.history.replaceState(null, "", "/print?printer=hp");
+    const { result } = renderHook(() => useQueryParam("printer"));
+    expect(result.current).toBe("hp");
+    act(() => navigate("/print?printer=canon%20lide"));
+    expect(result.current).toBe("canon lide");
+    act(() => navigate("/print"));
+    expect(result.current).toBeNull();
+  });
+
+  test("replaceQueryParam changes the address in place: no history entry, no focus move", async () => {
+    window.history.replaceState(null, "", "/scan?scanner=hp#top");
+    const { getByRole } = render(<FocusHarness />);
+    const { result } = renderHook(() => useQueryParam("scanner"));
+    getByRole("button").focus();
+    const length = window.history.length;
+    act(() => replaceQueryParam("scanner", "lide"));
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(
+      "/scan?scanner=lide#top",
+    );
+    expect(result.current).toBe("lide");
+    act(() => replaceQueryParam("scanner", null));
+    expect(window.location.search).toBe("");
+    expect(result.current).toBeNull();
+    expect(window.history.length).toBe(length);
+    await nextFrame();
+    expect(document.activeElement).toBe(getByRole("button"));
   });
 });

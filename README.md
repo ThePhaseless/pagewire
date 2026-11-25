@@ -1,8 +1,8 @@
 # pagewire
 
-pagewire turns one USB multifunction printer into a network printer and scanner that phones, tablets and computers find by themselves, plus a web page for printing and scanning from any browser. It runs on Kubernetes or on a single Docker or Podman host, and drives the OpenPrinting daemons (ipp-usb, PAPPL printer applications, AirSane, Avahi) for you. You describe the printer in one YAML file, or let the setup wizard write it.
+pagewire turns USB printers, scanners and multifunction devices, any number of each, into network printers and scanners that phones, tablets and computers find by themselves, plus a web page for printing and scanning from any browser. It runs on Kubernetes or on a single Docker or Podman host, and drives the OpenPrinting daemons (ipp-usb, PAPPL printer applications, AirSane, Avahi) for you. You describe the devices in one YAML file, or let the setup wizard write it.
 
-Clients see an IPP printer that driverless (IPP Everywhere) clients can use, and an eSCL scanner. These are the protocols that AirPrint and Mopria clients speak. pagewire is not certified by Apple, the Mopria Alliance or the Printer Working Group, and it is not affiliated with them. AirPrint, Mopria and IPP Everywhere are trademarks of their owners (see `NOTICE`).
+Clients see IPP printers that driverless (IPP Everywhere) clients can use, and eSCL scanners. These are the protocols that AirPrint and Mopria clients speak. pagewire is not certified by Apple, the Mopria Alliance or the Printer Working Group, and it is not affiliated with them. AirPrint, Mopria and IPP Everywhere are trademarks of their owners (see `NOTICE`).
 
 ## Status
 
@@ -14,11 +14,11 @@ pagewire supports USB printers and multifunction devices that speak IPP over USB
 
 | Part | Runs as | What it does |
 |---|---|---|
-| Control plane | Deployment `pagewire`, image `pagewire` | Web UI and REST API on `:8080`, the agent endpoint on `:8081`. Reads `/data/pagewire.yaml`, picks drivers from its catalog and renders the device pod through the Kubernetes API |
-| Device pod | Deployment `pagewire-device`, owned by the control plane | Host network, so mDNS and the IPP and eSCL ports sit on the node's LAN address. Holds dbus, Avahi, the agent, and then ipp-usb, or a PAPPL printer application plus AirSane |
-| Agent | Sidecar in the device pod, same image as the control plane | Probes USB, sets up the PAPPL print queue over loopback IPP, browses DNS-SD, downloads and checks vendor archives so their licence can be shown, and reports to the control plane every 5 s. It opens no port |
+| Control plane | Deployment `pagewire`, image `pagewire` | Web UI and REST API on `:8080`, the agent endpoint on `:8081`. Reads `/data/pagewire.yaml`, picks drivers from its catalog and renders the device pods through the Kubernetes API |
+| Device pod | One Deployment per node with USB devices, owned by the control plane: `pagewire-device`, then `pagewire-device-1` to `-3` (at most 4 nodes) | Host network, so mDNS and the IPP and eSCL ports sit on the node's LAN address. Holds dbus, Avahi and the agent, plus one daemon per kind that serves all of that node's devices: ipp-usb, one PAPPL printer application per driver family in use, AirSane |
+| Agent | Sidecar in the device pod, same image as the control plane | Probes USB, sets up one PAPPL print queue per printer over loopback IPP, browses DNS-SD, downloads and checks vendor archives so their licence can be shown, and reports to the control plane every 5 s. It opens no port |
 | Device containers (docker backend) | `pagewire-device-*` containers created by the control plane through the Engine API | Same daemons as the device pod, on the host network |
-| Simulated backend | Inside the control plane, outside Kubernetes | In-process virtual printer and scanner, for trying pagewire and for tests |
+| Simulated backend | Inside the control plane, outside Kubernetes | In-process virtual printers and scanners, for trying pagewire and for tests |
 
 pagewire never runs commands itself: it talks IPP, eSCL, D-Bus and the Kubernetes API or the Docker Engine API.
 
@@ -27,23 +27,23 @@ pagewire picks the driver by itself, from the printer's IEEE-1284 device ID and 
 1. A printer that speaks IPP over USB gets ipp-usb, which also handles its scanner. No driver is needed.
 2. Otherwise pagewire looks the printer's maker and model up in the index. When several driver families list it, the order in `driverPriority` in `internal/catalog/catalog.yaml` decides: HPLIP, the classic CUPS drivers, PostScript, Gutenprint, then Ghostscript. Within a family a driver the family recommends wins.
 3. Otherwise a printer whose device ID lists PostScript or PCL gets the matching generic driver.
-4. Otherwise no driver matches. The scanner still runs, the wizard and Status show the device ID the printer reported, and a configured device stays degraded with "No printer driver matches this device. Choose a driver in Settings."
+4. Otherwise no driver matches. A scanner on the same device still runs, the wizard and Status show the device ID the printer reported, and the configured printer stays degraded with "No printer driver matches this device. Choose a driver in Settings."
 
 Scanners go through AirSane, which loads the SANE backends listed for the device's USB IDs in a second generated index (`internal/catalog/sane-usb.tsv`), or a default set when the device is not listed. Status shows which step chose the driver, and its name.
 
-You can override all of this in the config: `device.driver` picks the family (`ps`, `hplip`, `gutenprint`, `ghostscript`, `legacy` or `ipp-usb`), `device.driverName` the exact driver name a printer application lists, and `device.scanner` the scanner. A family without a `driverName` gets its best match for the printer, else its generic driver, else the application's own automatic choice. A `driverName` with `driver: auto` goes to the first family in `driverPriority` that lists it. pagewire rejects a `driverName` with `driver: ipp-usb` or in simulated mode. A `driverName` the chosen family does not list, such as a typo or a driver an image update dropped, leaves pagewire's own choice running (within the chosen family, if you set one) and the device degraded until you change it. If a printer application lacks the driver the index picked, because the image and the index come from different package versions, the queue falls back to the application's own automatic choice and the device shows as degraded. A `driverName` you set never falls back: the queue reports the error instead. To find a name, read the list each driver image carries, for example `docker run --rm ghcr.io/thephaseless/pagewire-driver-legacy:main cat /usr/share/pagewire/drivers.txt`; each line starts with the name. Lines whose device ID has `DRV:Dhpijs` are drivers that need `hpijs`; they are not in the index and cannot be chosen.
+You can override all of this per device in the config: a printer's `driver` picks the family (`ps`, `hplip`, `gutenprint`, `ghostscript`, `legacy` or `ipp-usb`), its `driverName` the exact driver name a printer application lists, and a scanner's `backend` picks `ipp-usb` or `airsane`. A family without a `driverName` gets its best match for the printer, else its generic driver, else the application's own automatic choice. A `driverName` with `driver: auto` goes to the first family in `driverPriority` that lists it. pagewire rejects a `driverName` with `driver: ipp-usb` or in simulated mode. A `driverName` the chosen family does not list, such as a typo or a driver an image update dropped, leaves pagewire's own choice running (within the chosen family, if you set one) and the printer degraded until you change it. If a printer application lacks the driver the index picked, because the image and the index come from different package versions, the queue falls back to the application's own automatic choice and the printer shows as degraded. A `driverName` you set never falls back: the queue reports the error instead. To find a name, read the list each driver image carries, for example `docker run --rm ghcr.io/thephaseless/pagewire-driver-legacy:main cat /usr/share/pagewire/drivers.txt`; each line starts with the name. Lines whose device ID has `DRV:Dhpijs` are drivers that need `hpijs`; they are not in the index and cannot be chosen.
 
 ## Requirements
 
 - Kubernetes 1.33 or newer (the device pod uses native sidecars).
 - A namespace with the `privileged` Pod Security level, because the device pod uses the host network. It mounts no host paths; `deploy/examples/admission-policy.yaml` enforces that.
-- [generic-device-plugin](https://github.com/squat/generic-device-plugin) exposing the printer as an extended resource. Its `--domain` and device name must match `PAGEWIRE_USB_RESOURCE`: `--domain=devic.es` with a device named `printer` gives `devic.es/printer`. If they differ, the device pod stays Pending and looks like an unplugged printer. Use `count: 3`, because up to three containers of the device pod request the printer at once. See `deploy/examples/generic-device-plugin.yaml`.
-- Two ReadWriteOnce volumes: one for the config and scans, one for vendor files. The config watcher relies on inotify, which network RWX file systems do not deliver. The device pod for a USB printer mounts the vendor-file volume, so it must be mountable on the node with the printer.
+- [generic-device-plugin](https://github.com/squat/generic-device-plugin) exposing the printers and scanners as an extended resource, with one group that lists all of them. Its `--domain` and device name must match `PAGEWIRE_USB_RESOURCE`: `--domain=devic.es` with a device named `printer` gives `devic.es/printer`. If they differ, the device pod stays Pending and looks like an unplugged device. Use `count: 8`, because up to eight containers of a device pod request the resource at once. See `deploy/examples/generic-device-plugin.yaml`.
+- Two ReadWriteOnce volumes: one for the config and scans, one for vendor files. The config watcher relies on inotify, which network RWX file systems do not deliver. One device pod mounts the vendor-file volume, so it must be mountable on that pod's node: the node with the USB devices, or with several nodes the one whose printer needs or offers a vendor file, else the first node in name order.
 - An auth proxy in front of the web UI (see Security).
 
 This list is for Kubernetes. For a single Docker or Podman host, see [Deploying with Docker or Podman](#deploying-with-docker-or-podman).
 
-`docs/kubernetes.md` walks through each of these: USB passthrough, the device plugin, the namespace and admission policy, volumes, ingress, the NetworkPolicy, the image tag and the memory limit.
+`docs/kubernetes.md` walks through each of these: USB passthrough, the device plugin, devices on several nodes, the namespace and admission policy, volumes, ingress, the NetworkPolicy, the image tag and the memory limit.
 
 ## Quick start (simulated printer)
 
@@ -61,7 +61,7 @@ It publishes port 8080 on 127.0.0.1 only. If you change that to reach it from an
 
 ## Deploying on Kubernetes
 
-`deploy/base` is a kustomize example: namespace `printing`, a service account with a namespaced Role, the control-plane Deployment, a ClusterIP Service, two PVCs and a NetworkPolicy. Adjust it, then:
+`deploy/base` is a kustomize example: namespace `printing`, a service account with a namespaced Role, an optional ClusterRole that lists nodes (needed only for devices on more than one node; see `docs/kubernetes.md`), the control-plane Deployment, a ClusterIP Service, two PVCs and a NetworkPolicy. Adjust it, then:
 
 ```sh
 kustomize build deploy/base | kubectl apply -f -
@@ -77,18 +77,18 @@ Also:
 
 - GHCR packages may be private after CI first pushes them. Make each `pagewire*` package public in its package settings, or give the cluster a pull secret.
 - Keep the container in `deploy/base/deployment.yaml` named `pagewire` (see Images).
-- Route only port 8080 through your ingress. Port 8081 takes agent reports from the device pod, which runs on the host network: allow it from the address the agent's traffic arrives with. Depending on the CNI that is the node's LAN address or its pod-network address; `deploy/base/networkpolicy.yaml` lists both.
+- Route only port 8080 through your ingress. Port 8081 takes agent reports from the device pods, which run on the host network: allow it from the address the agent's traffic arrives with, on every node with USB devices. Depending on the CNI that is the node's LAN address or its pod-network address; `deploy/base/networkpolicy.yaml` lists both.
 - To lock down the namespace beyond the `privileged` Pod Security level, apply `deploy/examples/admission-policy.yaml` (see `docs/kubernetes.md`).
 
 Open the UI. With no config file the wizard starts, shows what the agent found on USB, and writes the file.
 
 ## Deploying with Docker or Podman
 
-`compose.docker.yaml` runs pagewire on one Linux host with a USB printer, without Kubernetes. The control plane runs with the docker backend and creates the device containers itself through the Docker Engine API: `pagewire-device-probe`, `-dbus`, `-avahi`, `-agent`, then `-ipp-usb`, or a printer application and `-airsane` (plus `-fetch-blobs` for a vendor file). They are the containers of the Kubernetes device pod, on the host network, with read-only root file systems, all capabilities dropped and no privilege escalation. None of them is privileged. Two things differ from Kubernetes: more of them run as uid 0 (see Security), and USB access is set up differently. On Kubernetes the device plugin hands the printer to each container that uses it. Here ipp-usb, the printer application and AirSane get only the matched printer's device node, `/dev/bus/usb/<bus>/<device>`, read-write. A printer that is plugged in again gets a new node, and pagewire recreates these three containers with it. While it cannot find the node, they do not run. The probe, which looks at every USB device to find the printer, gets all of `/dev/bus/usb` through a read-only mount and may open any USB device in it. Scratch space for print spools sits on disk (anonymous volumes), not in memory. Config files and the agent token go into named volumes that are recreated on every rollout.
+`compose.docker.yaml` runs pagewire on one Linux host with USB printers and scanners, without Kubernetes. The control plane runs with the docker backend and creates the device containers itself through the Docker Engine API: `pagewire-device-probe`, `-dbus`, `-avahi`, `-agent`, then whichever of `-ipp-usb`, one printer application per driver family and `-airsane` the configured devices need (plus `-fetch-blobs` for a vendor file). One set serves every device on the host. They are the containers of the Kubernetes device pod, on the host network, with read-only root file systems, all capabilities dropped and no privilege escalation. None of them is privileged. Two things differ from Kubernetes: more of them run as uid 0 (see Security), and USB access is set up differently. On Kubernetes the device plugin hands every device of its group to each container that requests it. Here each daemon gets only the device nodes of the devices it serves, `/dev/bus/usb/<bus>/<device>`, read-write: ipp-usb its IPP-over-USB devices, each printer application its family's printers, AirSane its scanners. A device that is plugged in again gets a new node, and pagewire recreates the device containers with it, the whole set as in a rollout. A daemon none of whose devices is plugged in is left out, and the others keep running. The probe, which looks at every USB device to find printers and scanners, gets all of `/dev/bus/usb` through a read-only mount and may open any USB device in it. Scratch space for print spools sits on disk (anonymous volumes), not in memory. Config files and the agent token go into named volumes that are recreated on every rollout.
 
 Requirements:
 
-- A Linux host with the printer on USB.
+- A Linux host with the printers and scanners on USB.
 - Docker Engine 20.10 or newer, or rootful Podman 4 or newer with its API socket enabled.
 - Docker Compose 2.24.4 or newer (`compose.docker-proxy.yaml` needs it).
 - No avahi-daemon on the host answering on port 5353. Two mDNS responders on one host make discovery unreliable.
@@ -119,8 +119,8 @@ CI runs this path: the Docker Compose CLI against rootful Podman's socket. `podm
 Also:
 
 - Image pinning: set `PAGEWIRE_IMAGE=ghcr.io/thephaseless/pagewire:<version>@sha256:<digest>` and, for the device and driver images, `PAGEWIRE_IMAGE_OVERRIDES` (see Images). The probe, agent and fetch-blobs containers run the image of the control-plane container (named `pagewire`), so they always match its build. Upgrading the control-plane image, or any change to the device images, their config or the agent URL, recreates the device containers once. A control-plane restart with the same image and config keeps them running.
-- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB printer. The control plane starts nothing until a printer appears, and checks again every 5 s. "waiting for the matched printer's USB device node" means pagewire knows which printer to use but cannot find its device node, for example while it is being plugged in again. ipp-usb, the printer application and AirSane stay stopped until the node is back.
-- Connect URIs and the printer address use the source address of the host's default route, read again each time the control plane checks the device. On a host with several networks, or IPv6 only, set `PAGEWIRE_HOST_IP` to the address clients should use.
+- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB device that can print or scan. The control plane starts nothing until one appears, and checks again every 5 s. "waiting for the USB device nodes of <ids>" means pagewire knows which devices to use but cannot find the device nodes of the entries named, for example while one is being plugged in again. A daemon that serves only those devices stays stopped until a node is back; the others keep running.
+- Connect URIs and the printer addresses use the source address of the host's default route, read again each time the control plane checks the device. On a host with several networks, or IPv6 only, set `PAGEWIRE_HOST_IP` to the address clients should use.
 - Vendor files, such as HP's plug-in, go into the `pagewire-blobs` volume, never into an image. The control plane creates the volume when it is missing and never removes it, and a volume of that name you create yourself is used as it is.
 - Memory: the control plane sets its Go memory limit to 80% of its container memory limit (256Mi on Kubernetes), read from the cgroup; `GOMEMLIMIT` overrides it. `compose.docker.yaml` sets no memory limit for the control plane by default, so there is none; add `mem_limit` to get one. The device containers get the same limits as on Kubernetes.
 - Logs: the device containers use the engine's default log driver. Configure log rotation in the daemon (`/etc/docker/daemon.json`).
@@ -159,35 +159,99 @@ The proxy narrows what a compromised control plane can reach, yet creating conta
 
 ## Configuration
 
-One file, by default `/data/pagewire.yaml`. `examples/pagewire.yaml` shows every key with comments, and `schema/config.schema.json` is its JSON Schema (editors with the YAML language server pick it up from the first line). Only `apiVersion` and `name` are required.
+One file, by default `/data/pagewire.yaml`. `examples/pagewire.yaml` shows every key with comments, and `schema/config.schema.json` is its JSON Schema (editors with the YAML language server pick it up from the first line). Only `apiVersion` and `name` are required, and inside each printer or scanner only `id` and `name`.
 
 ```yaml
-apiVersion: pagewire/v1
-name: Living room printer
-device:
-  mode: usb            # or simulated
+apiVersion: pagewire/v2
+name: Home
+printers:
+  - id: office
+    name: Office printer
+    usb: {vendorId: "03f0", productId: "2754"}
+scanners:
+  - id: office-scanner
+    name: Office scanner
+    usb: {vendorId: "03f0", productId: "2754"}
 ```
 
-`name`: Required, 1 to 63 characters, no control characters, not starting with `-`. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names.
+- `name`: required, 1 to 63 characters, no control characters, not starting with `-`. The UI title.
+- `printers` and `scanners`: one entry per device role. A multifunction device used for both is one printer entry and one scanner entry with the same `usb` selector. Each entry has:
+  - `id`: required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash, and unique across printers and scanners. The API and the UI address the device by it.
+  - `name`: required, with the same rules as the top-level `name`; printer names are unique, ignoring case. For PAPPL and simulated printers it is the queue and DNS-SD name. ipp-usb and AirSane advertise the device's own names, so for them `name` changes only what the UI shows. The Status page always shows the advertised name as it was actually browsed.
+  - `location` (0 to 127 characters) and `enabled` (default `true`; `false` keeps the entry but stops serving it).
+  - `mode`: `usb` (default) or `simulated`. At most one scanner may be simulated.
+  - `usb`: `vendorId`, `productId` and an optional `serial` that select the device. An entry without it takes the first device with that role that no other entry selects, so at most one usb printer and one usb scanner may leave it out. The wizard and Settings always write it.
+  - printers: `driver` and `driverName` (see How it works); scanners: `backend`, `auto`, `ipp-usb` or `airsane`.
+  - `defaults`: see below.
+- `ignoredDevices`: USB devices, and the roles of each, that the wizard does not offer again ("Don't use"). On Kubernetes this does not hide the device from the daemons; see "Device plugin" in `docs/kubernetes.md`.
+- `print.maxUploadMiB`, `scan.retentionDays` and `licenses` apply to the whole installation.
 
-So with ipp-usb and AirSane, `name` changes the UI title only, and the name clients see on the network is the one the printer reports. The Status page always shows the advertised name as it was actually browsed.
+### Option defaults
 
-Edit the file through Settings in the UI or by hand. The UI changes only the keys you touched and keeps your comments and blank lines. It sends `If-Match` with the file's ETag, so an edit made on disk in the meantime is never overwritten silently. Hand edits are picked up within seconds.
+Every key under a printer's or scanner's `defaults` is optional. Leave a key out to use the device's own default.
+
+| Printer key | Values |
+|---|---|
+| `media` | a PWG media name, such as `iso_a4_210x297mm` or `na_letter_8.5x11in` |
+| `mediaSource` | a tray the printer reports, such as `auto`, `main`, `tray-1` or `manual` |
+| `mediaType` | a media type the printer reports, such as `stationery` or `photographic-glossy` |
+| `sides` | `one-sided`, `two-sided-long-edge`, `two-sided-short-edge` |
+| `colorMode` | `auto`, `color`, `monochrome` |
+| `quality` | `draft`, `normal`, `high` |
+| `resolution` | dots per inch, 75 to 2400 |
+| `contentOptimize` | `auto`, `graphic`, `photo`, `text`, `text-and-graphic` |
+| `orientation` | `portrait`, `landscape`, `reverse-landscape`, `reverse-portrait` |
+| `numberUp` | pages per sheet, 1 to 16 |
+| `printScaling` | `auto`, `auto-fit`, `fill`, `fit`, `none` |
+| `outputBin` | an output bin the printer reports, such as `face-down` or `tray-1` |
+| `finishings` | one finishing the printer reports, such as `none`, `staple` or `punch` |
+
+| Scanner key | Values |
+|---|---|
+| `source` | `platen`, `adf`, `adf-duplex` |
+| `resolution` | 75 to 1200 |
+| `colorMode` | `color`, `grayscale`, `blackandwhite` |
+| `intent` | `document`, `text-and-graphic`, `photo`, `preview`, `object`, `business-card` |
+| `format` | `pdf` (when left out) or `jpeg`, the file pagewire saves |
+
+Where the defaults apply:
+
+- The Print and Scan pages preselect them.
+- On a printer with a PAPPL driver, pagewire also sets `media`, `mediaSource`, `mediaType`, `sides`, `colorMode`, `quality`, `resolution`, `contentOptimize`, `orientation` and `outputBin` as the queue's defaults, so they reach jobs from every client on the LAN. PAPPL cannot set `numberUp`, `printScaling` or `finishings`, so those apply only to jobs printed from the web page.
+- Every default of an ipp-usb or simulated printer applies only to jobs printed from the web page: those printers have no queue pagewire configures.
+- A default the device does not offer is skipped, and the device uses its own default instead. The Status page shows a warning on that device's card, and saving the device in Settings while it is connected removes the key.
+
+The options come from the device: the printer's IPP attributes and the scanner's eSCL capabilities. The Print and Scan pages hide an option the device does not let you change, because it reports one value or none. Settings and the wizard's defaults step show every option, and grey out one the device cannot change with the reason beside it, such as "This printer only prints one-sided." Once pagewire has read a printer's options, a print request with an option the printer does not offer prints without it and answers with a warning. Once it has read a scanner's capabilities, a scan with a source, colour mode, intent or resolution the scanner does not offer is refused with 422 `invalid-settings`.
+
+pagewire offers no page ranges, job priority, hold or banner pages, label-printer darkness and speed, finishing templates, media margins or colour, scanner image adjustments such as brightness and contrast, or scan areas. Page ranges are free text per job, priority and holds are job administration, and the image adjustments are continuous values with no list to pick from; pagewire always scans the whole area.
+
+### Editing the file
+
+Edit the file through Settings in the UI or by hand. The UI changes only the keys you touched and keeps your comments and blank lines, with one exception: an edit to a printer or scanner rewrites the whole `printers` or `scanners` list, so comments inside that list are lost. The UI sends `If-Match` with the file's ETag, so an edit made on disk in the meantime is never overwritten silently. Hand edits are picked up within seconds.
 
 What happens when a value changes:
 
 | Change | Effect |
 |---|---|
-| `print.defaults`, `location` | Reach the PAPPL queue on the agent's next cycle, within about 5 s. Nothing restarts |
+| A printer's `defaults` and `location` | Reach the PAPPL queue on the agent's next cycle, within about 5 s. Nothing restarts |
+| A scanner's `defaults` and `location` | Apply on the next visit to the Scan page |
 | `print.maxUploadMiB` | Applies to the next upload |
 | `scan.retentionDays` | Applies on the next hourly cleanup; `0` keeps scans forever |
-| `name` with a PAPPL driver | The queue is deleted and recreated under the new name, which drops jobs still waiting in it |
-| `device.mode`, `device.driver`, `device.scanner`, `device.usb`, accepted EULAs; `name` and `location` in simulated mode | The device pod rolls once if the change alters what runs in it |
-| `device.driverName` | Within the same driver family, the queue is deleted and recreated with the new driver on the agent's next cycle, which drops jobs still waiting in it. When the name belongs to another family, the device pod rolls as for `device.driver` |
+| A printer's `name` with a PAPPL driver | The queue is deleted and recreated under the new name, which drops jobs still waiting in it |
+| Adding, removing, enabling or disabling a device; `mode`, `usb`, `driver` or `backend`; accepted EULAs; `name` and `location` of a simulated printer | The device pod of that device's node rolls once if the change alters what runs in it |
+| A printer's `driverName` | Within the same driver family, the queue is deleted and recreated with the new driver on the agent's next cycle, which drops jobs still waiting in it. When the name belongs to another family, the device pod rolls as for `driver` |
 
 The control plane itself never restarts for a config change. An invalid file keeps the last valid config running. The UI shows each error with its line and column and offers to restore the last working settings. While the file is invalid, the upload limit and scan retention follow the last valid config. While it is missing, they follow the defaults.
 
 `pagewire validate <file>...` checks files the same way and prints `file:line:col: message`.
+
+### Migrating from pagewire/v1
+
+pagewire still reads a `pagewire/v1` file, the single-device format with `device`, `location`, `print.defaults` and `scan.defaults`. It turns it into one printer (id `printer`) and one scanner (id `scanner`, named `<name> scanner`) with the same device, driver and defaults; `device.scanner: none` gives no scanner and lists the device under `ignoredDevices` as a scanner. `pagewire validate`, the API and the file watcher all accept v1 this way.
+
+The server rewrites a v1 file as v2 on disk once, when it reads it, and keeps the comments outside the replaced keys. A file that uses flow style, anchors or tags on those keys is rewritten without its comments, under a header line that says so. A v1 body sent to `PUT /api/v1/config` is stored as v2.
+
+When the file cannot be rewritten, for example because its directory is read-only, pagewire runs the migrated config anyway and shows a `config-migration` item under reconcile on the Status page: "The config file is pagewire/v1 and could not be rewritten as pagewire/v2: <error>. pagewire runs the migrated config." It tries again only when the file's content changes or the service restarts, not on a timer. Once a rewrite succeeds, the item turns ok with "config file rewritten as pagewire/v2". An install that never had a v1 file has no such item.
 
 ### Server flags
 
@@ -200,7 +264,7 @@ Each flag has an environment variable:
 | `--config` | `PAGEWIRE_CONFIG` | `/data/pagewire.yaml` |
 | `--data-dir` | `PAGEWIRE_DATA_DIR` | `/data` (scans in `/data/scans`) |
 | `--backend` | `PAGEWIRE_BACKEND` | `k8s` inside Kubernetes; `docker` inside a container that has `DOCKER_HOST` set or the Engine socket mounted; else `sim` |
-| `--sim-device` | `PAGEWIRE_SIM_DEVICE` | `ippusb-mfp`; any fixture in `internal/catalog/fixtures`, or `none` |
+| `--sim-device` | `PAGEWIRE_SIM_DEVICE` | `ippusb-mfp`; any fixture in `internal/catalog/fixtures`, such as `office` (several printers and scanners), or `none` |
 | `--escl-client` | `PAGEWIRE_ESCL_CLIENT` | `mfp`; `xml` selects the fallback client |
 | `--log-level` | `PAGEWIRE_LOG_LEVEL` | `info` |
 | `--k8s-namespace` | `PAGEWIRE_K8S_NAMESPACE` | the service account's namespace |
@@ -220,6 +284,8 @@ Each flag has an environment variable:
 | | `PAGEWIRE_PROXY_SECRET` | empty; set this or `--proxy-secret-file`, not both |
 
 An empty environment variable counts as unset, so it falls back to the default. To pass an empty value, such as `--blob-pvc=`, use the flag.
+
+The control plane sets the agent's flags itself when it renders a device pod. `--workload` names the node the pod serves (empty with one device workload). Each print queue in the agent's desired state carries the address of its own printer application.
 
 ## Drivers and vendor files (EULAs)
 
@@ -260,12 +326,14 @@ Limits:
 | An upload larger than `print.maxUploadMiB` (default 50 MiB) | 413 `too-large` |
 | A PNG whose decoded pixels would take more than 128 MiB | 413 `image-too-large` |
 | A damaged image | 400 `invalid-image` |
+| An option value that is not valid, such as a tray name with spaces or more than 99 copies | 422 `invalid-options` |
+| A printer id that is unknown or disabled | 404 `printer-not-found` |
 | A second PNG conversion while one is running | 429 `too-many-jobs` |
 | More than 32 print jobs from the web page still being followed | 429 `too-many-jobs` |
 
 ## Scanning
 
-A scanned page may be at most 256 MiB, and stored scans may take 1 GiB in total. When stored scans reach 1 GiB, new scans are refused with 507 (`storage-full`) until you delete old scans or they expire after `scan.retentionDays`. A running scan can be cancelled; it leaves no file.
+A scanned page may be at most 256 MiB, and stored scans may take 1 GiB in total. When stored scans reach 1 GiB, new scans are refused with 507 (`storage-full`) until you delete old scans or they expire after `scan.retentionDays`. A running scan can be cancelled; it leaves no file. A scan for a scanner id that is unknown or disabled gets 404 (`scanner-not-found`), and settings that are not valid, or that the scanner does not offer, get 422 (`invalid-settings`).
 
 ## Security
 
@@ -273,10 +341,10 @@ A scanned page may be at most 256 MiB, and stored scans may take 1 GiB in total.
 - `PAGEWIRE_ALLOWED_HOSTS` limits the host names pagewire answers to (421 for others), which blocks DNS rebinding. `PAGEWIRE_PROXY_SECRET` makes the API require a header that only your proxy adds (401 without it), so requests that bypass the proxy fail. `docs/kubernetes.md` explains both.
 - State-changing API calls are refused across origins (Go's `http.CrossOriginProtection`). Pages are served with a strict Content-Security-Policy, `nosniff`, `no-referrer` and same-origin opener and resource policies. API responses and scan downloads are sent with `Cache-Control: no-store`.
 - The agent dials out to the control plane's internal port with a bearer token from a Secret the control plane creates. That connection is plain HTTP inside the cluster. The device pod opens no port of pagewire's own.
-- The control plane's Role names every object it may change, except device pods, which it can only list and delete.
-- On the LAN the device pod serves IPP, eSCL and mDNS on the node's address, like a network printer would. ipp-usb also proxies the printer's own web console, and AirSane's web page on port 8090 can start scans. A web page open in a browser on the LAN can send requests to these ports too. PAPPL's admin pages answer only local clients. Treat the LAN as trusted, or restrict these ports on the node.
+- The control plane's Role names every object it may change, except device pods, which it can only list and delete. The ClusterRole `pagewire-nodes`, which you can leave out with one node, adds only `list` on nodes.
+- On the LAN each device pod serves IPP, eSCL and mDNS on its node's address, like a network printer would. ipp-usb also proxies the printer's own web console, and AirSane's web page on port 8090 can start scans. A web page open in a browser on the LAN can send requests to these ports too. PAPPL's admin pages answer only local clients. Treat the LAN as trusted, or restrict these ports on the node.
 - With the docker backend, the control plane can use the Docker Engine API, which is root-equivalent on the host. It only stops or removes containers and volumes labelled `io.github.thephaseless.pagewire.managed-by=pagewire`, and containers only when their names also start with `pagewire-device-`. `compose.docker-proxy.yaml` narrows that access (see Socket proxy). See `SECURITY.md`.
-- Containers drop all capabilities, run with read-only root file systems and no privilege escalation. On Kubernetes the containers that open the USB device (probe, ipp-usb, the printer application, AirSane) run as uid 0, because device nodes from the device plugin are owned by root. Everything else runs as non-root users. With the docker backend more containers run as uid 0, because Docker has no fsGroup and the containers that write a shared volume need root: the probe in every mode, the agent in probe and usb modes, fetch-blobs, and in usb mode ipp-usb, the printer application and AirSane. dbus, Avahi, and in simulated mode the agent, the simulated printer and AirSane run as non-root users.
+- Containers drop all capabilities, run with read-only root file systems and no privilege escalation. On Kubernetes the containers that open USB devices (probe, ipp-usb, the printer applications, AirSane) run as uid 0, because device nodes from the device plugin are owned by root. Everything else runs as non-root users. With the docker backend more containers run as uid 0, because Docker has no fsGroup and the containers that write a shared volume need root: the probe in every mode, the agent in probe and usb modes, fetch-blobs, and in usb mode ipp-usb, the printer application and AirSane. dbus, Avahi, and in simulated mode the agent, the simulated printer and AirSane run as non-root users.
 
 Report vulnerabilities as described in `SECURITY.md`.
 
@@ -307,7 +375,7 @@ PAGEWIRE_IMAGE_OVERRIDES=device=ghcr.io/thephaseless/pagewire-device:1.2.3@sha25
 
 ## Connecting devices
 
-Phones, tablets and computers on the same network find the printer by themselves. The Status page has these steps too, with the printer's actual name and addresses.
+Phones, tablets and computers on the same network find the printers and scanners by themselves. Each device card on the Status page has these steps too, with that device's actual name and addresses.
 
 - Windows: Settings, Bluetooth & devices, Printers & scanners, Add device, then pick the printer. Windows 11 adds the scanner the same way. If it does not appear, choose Add manually, then "Add a printer using an IP address or hostname", set the device type to IPP Device and paste the printer address from Status.
   - Windows protected print mode: with it on, Windows supports only Mopria-certified printers. pagewire is not certified, so Windows may refuse to add it. To use pagewire from that PC, turn the mode off under Settings, Bluetooth & devices, Printers & scanners, Printer preferences, or print from the web page instead. On a managed PC, Group Policy may keep the mode on.
@@ -315,11 +383,11 @@ Phones, tablets and computers on the same network find the printer by themselves
 - Android: open a document or photo, choose Print, Select a printer, All printers, then pick it. The built-in print service handles it. To scan, use the web page or an app that supports eSCL.
 - Linux: most desktops list the printer by themselves. Otherwise run `lpadmin -p pagewire -E -m everywhere -v <printer address>`. Scanning works through sane-airscan, for example in Document Scanner or Skanlite.
 
-The web page shows each job's state live, from sent through printing to completed, for jobs sent from the web page. Jobs sent from other devices appear in the list, and it refreshes when the printer's state changes.
+The web page shows each job's state live, from sent through printing to completed, for jobs sent from the web page. Jobs sent from other devices appear in the selected printer's list, and it refreshes when that printer's state changes.
 
 ### Tailscale and other VPNs
 
-mDNS does not cross a tailnet, so other devices on the VPN do not discover the printer. Add it with the manual IPP and eSCL addresses from the Status page, using the node's VPN address.
+mDNS does not cross a tailnet, so other devices on the VPN do not discover the printers and scanners. Add it with the manual IPP and eSCL addresses from the Status page, using the node's VPN address.
 
 ## Development
 

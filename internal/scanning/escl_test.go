@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,7 @@ func virtualScanner(t *testing.T, adf bool) (url string, last func() *escl.ScanS
 			Depths:      generic.MakeBitset(abstract.ColorDepth8),
 			Resolutions: []abstract.Resolution{{XResolution: 75, YResolution: 75}, {XResolution: 150, YResolution: 150}},
 		}},
+		Intents: generic.MakeBitset(abstract.IntentDocument, abstract.IntentPhoto),
 	}
 	caps := &abstract.ScannerCapabilities{
 		MakeAndModel:    "Virtual scanner",
@@ -137,6 +139,7 @@ func TestConformanceCaps(t *testing.T) {
 			ColorModes:  []string{"color", "grayscale"},
 			ADF:         true,
 			Duplex:      true,
+			Intents:     []string{"document", "photo"},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("caps = %+v, want %+v", got, want)
@@ -352,8 +355,153 @@ func TestXMLCapsResolutionRange(t *testing.T) {
 		Sources:     []string{"platen"},
 		Resolutions: []int{75, 150, 300, 600},
 		ColorModes:  []string{"color", "blackandwhite"},
+		Intents:     []string{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("caps = %+v, want %+v", got, want)
+	}
+}
+
+// intentCapsXML is a platen plus ADF simplex capabilities document whose
+// SupportedIntents children are named child (scanners use Intent or
+// SupportedIntent).
+func intentCapsXML(child string) string {
+	inputCaps := func(intents ...string) string {
+		var b strings.Builder
+		b.WriteString(`<scan:MinWidth>16</scan:MinWidth><scan:MaxWidth>2550</scan:MaxWidth><scan:MinHeight>16</scan:MinHeight><scan:MaxHeight>3508</scan:MaxHeight>
+  <scan:SettingProfiles><scan:SettingProfile>
+   <scan:ColorModes><scan:ColorMode>RGB24</scan:ColorMode></scan:ColorModes>
+   <scan:SupportedResolutions><scan:DiscreteResolutions><scan:DiscreteResolution><scan:XResolution>300</scan:XResolution><scan:YResolution>300</scan:YResolution></scan:DiscreteResolution></scan:DiscreteResolutions></scan:SupportedResolutions>
+  </scan:SettingProfile></scan:SettingProfiles>
+  <scan:SupportedIntents>`)
+		for _, it := range intents {
+			b.WriteString("<scan:" + child + ">" + it + "</scan:" + child + ">")
+		}
+		b.WriteString("</scan:SupportedIntents>")
+		return b.String()
+	}
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<scan:ScannerCapabilities xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
+ <pwg:Version>2.63</pwg:Version>
+ <scan:Platen><scan:PlatenInputCaps>` + inputCaps("Photo", "Document") + `</scan:PlatenInputCaps></scan:Platen>
+ <scan:Adf><scan:AdfSimplexInputCaps>` + inputCaps("TextAndGraphic", "Document") + `</scan:AdfSimplexInputCaps><scan:FeederCapacity>50</scan:FeederCapacity></scan:Adf>
+</scan:ScannerCapabilities>`
+}
+
+// inputsOf reads the per-source inputs the way each client's Start does.
+func inputsOf(t *testing.T, s Scanner) []input {
+	t.Helper()
+	switch s := s.(type) {
+	case *mfpScanner:
+		_, in, err := s.caps(ctx(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in
+	case *xmlScanner:
+		c, err := s.caps(ctx(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.inputs()
+	}
+	t.Fatalf("unknown client %T", s)
+	return nil
+}
+
+// Both clients read SupportedIntents per source under either child name, and
+// Caps.Intents is their union in eSCL order.
+func TestIntentsBothElementNames(t *testing.T) {
+	for _, child := range []string{"Intent", "SupportedIntent"} {
+		capsXML := intentCapsXML(child)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/eSCL/ScannerCapabilities" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/xml")
+			_, _ = io.WriteString(w, capsXML)
+		}))
+		t.Cleanup(srv.Close)
+		for name, newClient := range clients {
+			t.Run(child+"/"+name, func(t *testing.T) {
+				s, err := newClient(srv.URL + "/eSCL")
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.Capabilities(ctx(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := []string{"document", "text-and-graphic", "photo"}; !reflect.DeepEqual(got.Intents, want) {
+					t.Errorf("Intents = %v, want %v", got.Intents, want)
+				}
+				per := map[string][]string{}
+				for _, in := range inputsOf(t, s) {
+					per[in.source] = in.intents
+				}
+				want := map[string][]string{"platen": {"photo", "document"}, "adf": {"text-and-graphic", "document"}}
+				if !reflect.DeepEqual(per, want) {
+					t.Errorf("intents per source = %v, want %v", per, want)
+				}
+			})
+		}
+	}
+}
+
+// Both clients send a chosen intent, send none when unset, and refuse an
+// intent the chosen input does not list before any job is created.
+func TestConformanceIntent(t *testing.T) {
+	for name, newClient := range clients {
+		t.Run(name, func(t *testing.T) {
+			url, last := virtualScanner(t, false)
+			s, err := newClient(url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			set := settings("platen", 75, "color")
+			set.Intent = "photo"
+			job, err := s.Start(ctx(t), set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ss := last(); ss.Intent == nil || *ss.Intent != escl.Photo {
+				t.Errorf("Intent sent = %v, want Photo", ss.Intent)
+			}
+			readPages(t, s, job)
+
+			job, err = s.Start(ctx(t), settings("platen", 75, "color"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ss := last(); ss.Intent != nil {
+				t.Errorf("Intent sent without one set = %v, want none", *ss.Intent)
+			}
+			readPages(t, s, job)
+
+			set.Intent = "preview" // valid, but the virtual scanner lists only document and photo
+			if _, err := s.Start(ctx(t), set); err == nil || errors.Is(err, ErrInvalidSettings) ||
+				!strings.Contains(err.Error(), "no preview intent for platen") {
+				t.Errorf("unsupported intent: err = %v, want \"scanner has no preview intent for platen\"", err)
+			}
+			set.Intent = "poster"
+			if _, err := s.Start(ctx(t), set); !errors.Is(err, ErrInvalidSettings) {
+				t.Errorf("unknown intent: err = %v, want ErrInvalidSettings", err)
+			}
+		})
+	}
+}
+
+func TestValidateIntent(t *testing.T) {
+	set := settings("platen", 300, "color")
+	for intent, ok := range map[string]bool{"": true, "photo": true, "business-card": true, "poster": false, "Photo": false} {
+		set.Intent = intent
+		err := Validate(set)
+		if ok && err != nil {
+			t.Errorf("Validate(intent %q) = %v, want nil", intent, err)
+		}
+		if !ok && (!errors.Is(err, ErrInvalidSettings) || !strings.Contains(err.Error(), "must be one of document, text-and-graphic, photo")) {
+			t.Errorf("Validate(intent %q) = %v, want ErrInvalidSettings listing the intents", intent, err)
+		}
 	}
 }

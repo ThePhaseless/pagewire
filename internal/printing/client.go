@@ -19,9 +19,11 @@ import (
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 )
 
-// PrintOptions are the job options of a web print (POST /api/v1/print).
+// PrintOptions are the job options of a web print (POST /api/v1/printers/{id}/print).
 type PrintOptions = apitypes.PrintOptions
 
 var (
@@ -52,6 +54,7 @@ type Attributes struct {
 	Media   []string // media-supported
 	Markers []apitypes.Marker
 	URIs    []string // printer-uri-supported
+	Caps    device.PrinterCaps
 }
 
 // Client talks IPP to one printer URI (ipp:// or ipps://) over net/http.
@@ -125,12 +128,22 @@ func (c *Client) do(ctx context.Context, msg *goipp.Message, doc io.Reader) (*go
 	return rsp, nil
 }
 
-// Attributes reads the printer's state, formats, media and supply levels.
+// requestedAttrs is what Attributes asks for: state, supplies and URIs, plus
+// every option attribute ippcaps parses.
+var requestedAttrs = func() []string {
+	r := append([]string{
+		"printer-state", "printer-state-reasons", "document-format-supported", "media-supported",
+		"marker-names", "marker-colors", "marker-levels", "printer-uri-supported",
+	}, ippcaps.Requested...)
+	slices.Sort(r)
+	return slices.Compact(r)
+}()
+
+// Attributes reads the printer's state, formats, media, supply levels and the
+// options it reports (Caps).
 func (c *Client) Attributes(ctx context.Context) (Attributes, error) {
 	m := c.request(goipp.OpGetPrinterAttributes)
-	m.Operation.Add(keywords("requested-attributes",
-		"printer-state", "printer-state-reasons", "document-format-supported", "media-supported",
-		"marker-names", "marker-colors", "marker-levels", "printer-uri-supported"))
+	m.Operation.Add(keywords("requested-attributes", requestedAttrs...))
 	rsp, err := c.do(ctx, m, nil)
 	if err != nil {
 		return Attributes{}, err
@@ -142,6 +155,7 @@ func (c *Client) Attributes(ctx context.Context) (Attributes, error) {
 		Formats: all(p, "document-format-supported"),
 		Media:   all(p, "media-supported"),
 		URIs:    all(p, "printer-uri-supported"),
+		Caps:    ippcaps.Parse(p),
 	}
 	switch first(p, "printer-state") {
 	case "3":
@@ -165,8 +179,6 @@ func (c *Client) Attributes(ctx context.Context) (Attributes, error) {
 	return a, nil
 }
 
-var qualities = map[string]goipp.Integer{"draft": 3, "normal": 4, "high": 5}
-
 // Submit prints r with Create-Job, then Send-Document with
 // last-document=true, streaming r as the HTTP body after the IPP message.
 // format must already have been negotiated (see Negotiate). If Send-Document
@@ -175,19 +187,7 @@ func (c *Client) Submit(ctx context.Context, name, user, format string, r io.Rea
 	m := c.request(goipp.OpCreateJob)
 	m.Operation.Add(goipp.MakeAttribute("requesting-user-name", goipp.TagName, goipp.String(user)))
 	m.Operation.Add(goipp.MakeAttribute("job-name", goipp.TagName, goipp.String(name)))
-	if n, ok := ippInt(opts.Copies); ok {
-		m.Job.Add(goipp.MakeAttribute("copies", goipp.TagInteger, n))
-	}
-	for _, kw := range []struct{ name, value string }{
-		{"sides", opts.Sides}, {"print-color-mode", opts.ColorMode}, {"media", opts.Media},
-	} {
-		if kw.value != "" {
-			m.Job.Add(goipp.MakeAttribute(kw.name, goipp.TagKeyword, goipp.String(kw.value)))
-		}
-	}
-	if q, ok := qualities[opts.Quality]; ok {
-		m.Job.Add(goipp.MakeAttribute("print-quality", goipp.TagEnum, q))
-	}
+	m.Job = append(m.Job, ippcaps.Job(opts)...)
 	rsp, err := c.do(ctx, m, nil)
 	if err != nil {
 		return 0, fmt.Errorf("create-job: %w", err)

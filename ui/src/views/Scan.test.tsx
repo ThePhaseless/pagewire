@@ -2,13 +2,20 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createEventStore, EventsContext } from "../api/events";
 import { toastQueue } from "../components/ui";
-import type { Config, ConfigResponse, Scan as ScanDTO, ScannerCaps, Status } from "../gen/api";
+import type {
+  Config,
+  ConfigResponse,
+  Scan as ScanDTO,
+  ScannerCaps,
+  Status,
+  StatusScanner,
+} from "../gen/api";
 import { Scan } from "./Scan";
 
 type Call = { method: string; path: string; body?: unknown };
 let calls: Call[] = [];
 let scans: ScanDTO[] = [];
-let caps: ScannerCaps;
+let caps: Record<string, ScannerCaps>;
 let configResponse: ConfigResponse | null = null;
 let postScan: () => Response;
 let scannerFailures = 0;
@@ -28,12 +35,14 @@ const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     path,
     body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
   });
-  if (path === "/api/v1/scanner") {
+  const capsOf = /^\/api\/v1\/scanners\/([^/]+)\/capabilities$/.exec(path);
+  if (capsOf) {
     if (scannerFailures > 0) {
       scannerFailures--;
       return problem(503, "Service Unavailable");
     }
-    return json(caps);
+    const c = caps[capsOf[1] ?? ""];
+    return c ? json(c) : problem(404, "Not found");
   }
   if (path === "/api/v1/scans" && method === "GET") {
     if (listFailures > 0) {
@@ -61,13 +70,9 @@ beforeEach(() => {
   configResponse = null;
   scannerFailures = 0;
   listFailures = 0;
-  caps = {
-    sources: ["platen", "adf", "adf-duplex"],
-    resolutions: [75, 150, 300, 600],
-    colorModes: ["color", "grayscale", "blackandwhite"],
-    adf: true,
-    duplex: true,
-  };
+  caps = { hp: hpCaps, lide: lideCaps, samsung: samsungCaps };
+  localStorage.clear();
+  window.history.replaceState(null, "", "/scan");
   postScan = () => json(scan({ state: "scanning", pages: 0 }), 202);
   globalThis.fetch = fakeFetch;
   consoleError = spyOn(console, "error");
@@ -80,79 +85,120 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+/** The simulated HP OfficeJet: every source and four intents. */
+const hpCaps: ScannerCaps = {
+  sources: ["platen", "adf", "adf-duplex"],
+  resolutions: [75, 150, 300, 600],
+  colorModes: ["color", "grayscale", "blackandwhite"],
+  adf: true,
+  duplex: true,
+  intents: ["document", "text-and-graphic", "photo", "preview"],
+};
+/** The CanoScan LiDE 100: a flatbed only. */
+const lideCaps: ScannerCaps = {
+  sources: ["platen"],
+  resolutions: [75, 150, 300, 600, 1200],
+  colorModes: ["color", "grayscale"],
+  adf: false,
+  duplex: false,
+  intents: ["document", "photo"],
+};
+/** The Samsung SCX-4300 as AirSane reports it: no duplex and no intents. */
+const samsungCaps: ScannerCaps = {
+  sources: ["platen", "adf"],
+  resolutions: [75, 150, 300, 600],
+  colorModes: ["color", "grayscale"],
+  adf: true,
+  duplex: false,
+  intents: [],
+};
+
 const ID = "0123456789abcdef";
 const OLD = "fedcba9876543210";
 
 function scan(patch: Partial<ScanDTO> = {}): ScanDTO {
   return {
     id: ID,
+    scanner: "hp",
     state: "completed",
     createdAt: "2026-11-24T17:00:00+01:00",
     pages: 1,
     format: "pdf",
-    settings: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
+    settings: {
+      scanner: "hp",
+      source: "platen",
+      resolution: 300,
+      colorMode: "color",
+      format: "pdf",
+    },
     error: null,
     ...patch,
   };
 }
 
-const noScanner: Status = {
+function scanner(p: Partial<StatusScanner> = {}): StatusScanner {
+  return {
+    id: "hp",
+    name: "HP OfficeJet",
+    location: "Study",
+    enabled: true,
+    phase: "ready",
+    message: "",
+    warnings: [],
+    decision: null,
+    device: null,
+    available: true,
+    url: "http://127.0.0.1:60000/eSCL",
+    state: "idle",
+    capabilities: hpCaps,
+    connect: { dnssdName: "", esclUrls: [] },
+    ...p,
+  };
+}
+
+const base: Status = {
   config: {
-    state: "missing",
-    etag: "",
-    appliedEtag: "",
+    state: "applied",
+    etag: "e1",
+    appliedEtag: "e1",
     errors: [],
     changedAt: "0001-01-01T00:00:00Z",
   },
-  device: {
-    phase: "none",
-    mode: "none",
-    decision: null,
-    inventory: null,
-    message: "",
-    advertised: [],
-    blobs: [],
-  },
-  printer: {
-    available: false,
-    uri: "",
-    state: "unknown",
-    reasons: [],
-    formats: [],
-    convertedFormats: [],
-    media: [],
-    markers: [],
-  },
-  scanner: { available: false, url: "", state: "unknown" },
+  phase: "ready",
+  message: "",
+  printers: [],
+  scanners: [],
+  workloads: [],
+  devices: [],
   reconcile: [],
-  connect: { dnssdName: "", ippUris: [], esclUrls: [] },
 };
 
-const ready: Status = {
-  ...noScanner,
-  config: { ...noScanner.config, state: "applied", etag: "e1", appliedEtag: "e1" },
-  device: { ...noScanner.device, phase: "ready", mode: "simulated" },
-  scanner: { available: true, url: "http://127.0.0.1:8090/eSCL", state: "idle" },
-};
+const ready: Status = { ...base, scanners: [scanner()] };
+const lide = scanner({
+  id: "lide",
+  name: "CanoScan LiDE 100",
+  location: "",
+  capabilities: lideCaps,
+});
 
 const config: Config = {
-  apiVersion: "pagewire/v1",
-  name: "Living room printer",
-  location: "",
-  device: { mode: "simulated", driver: "auto", scanner: "auto" },
-  print: {
-    defaults: {
-      media: "iso_a4_210x297mm",
-      sides: "one-sided",
-      colorMode: "auto",
-      quality: "normal",
+  apiVersion: "pagewire/v2",
+  name: "Home",
+  printers: [],
+  scanners: [
+    {
+      id: "hp",
+      name: "HP OfficeJet",
+      location: "Study",
+      enabled: true,
+      mode: "simulated",
+      backend: "auto",
+      defaults: { source: "adf-duplex", resolution: 300, colorMode: "color", format: "jpeg" },
     },
-    maxUploadMiB: 50,
-  },
-  scan: {
-    defaults: { source: "adf-duplex", resolution: 300, colorMode: "color", format: "jpeg" },
-    retentionDays: 3,
-  },
+  ],
+  ignoredDevices: [],
+  print: { maxUploadMiB: 50 },
+  scan: { retentionDays: 3 },
   licenses: { acceptedEulas: [] },
 };
 
@@ -200,12 +246,14 @@ async function renderScan(status: Status | null, online = true) {
 
 const scanButton = () => screen.getByRole("button", { name: "Scan" });
 const disabled = (el: HTMLElement) => el.hasAttribute("disabled");
-/** The visible value of the Select labelled `label`. */
+/** The field of the control labelled `label`, or undefined when it is not shown. */
 const fieldOf = (label: string) =>
   screen
-    .getAllByText(label)
+    .queryAllByText(label)
     .find((e) => e.classList.contains("ui-label"))
-    ?.closest(".ui-field") as HTMLElement;
+    ?.closest(".ui-field") as HTMLElement | undefined;
+const shown = (label: string) => fieldOf(label) !== undefined;
+const posted = () => calls.find((c) => c.method === "POST")?.body;
 const selected = (label: string) => fieldOf(label)?.querySelector(".ui-select-value")?.textContent;
 /** The options of a Select, read from React Aria's hidden native select. */
 const optionsOf = (label: string) =>
@@ -224,46 +272,178 @@ describe("Scan view", () => {
     expect(screen.getByText("Checking the scanner…")).toBeTruthy();
   });
 
-  test("without a scanner the Scan button is disabled and capabilities are not asked", async () => {
+  test("without a connected scanner the Scan button is disabled and capabilities are not asked", async () => {
     await renderScan({
-      ...noScanner,
-      device: { ...noScanner.device, phase: "probing", message: "No printer found on USB" },
+      ...base,
+      config: { ...base.config, state: "missing" },
+      phase: "deploying",
+      scanners: [
+        scanner({
+          phase: "probing",
+          available: false,
+          message: "Not plugged in, or not visible to pagewire",
+        }),
+      ],
     });
     expect(screen.getByText("The scanner is not ready")).toBeTruthy();
-    expect(screen.getByText("No printer found on USB")).toBeTruthy();
+    expect(screen.getByText("Not plugged in, or not visible to pagewire")).toBeTruthy();
     expect(disabled(scanButton())).toBe(true);
-    // GET /scanner answers 503 and GET /config 404 in this state, so neither is asked.
-    expect(calls.some((c) => c.path === "/api/v1/scanner")).toBe(false);
+    // The capabilities route answers 503 and GET /config 404 in this state, so neither is asked.
+    expect(calls.some((c) => c.path.endsWith("/capabilities"))).toBe(false);
     expect(calls.some((c) => c.path === "/api/v1/config")).toBe(false);
   });
 
-  test("options are limited to the scanner's capabilities and default from the config", async () => {
+  test("options are limited to the scanner's capabilities and default from its entry", async () => {
     configResponse = { etag: "e1", config, state: "applied", errors: [], lastGood: null };
-    caps = {
-      sources: ["platen", "adf"],
+    caps.hp = {
+      // Listed, but without duplex the feeder cannot scan both sides.
+      sources: ["platen", "adf", "adf-duplex"],
       resolutions: [100, 200, 600],
       colorModes: ["grayscale", "blackandwhite"],
       adf: true,
       duplex: false,
+      intents: [],
     };
     await renderScan(ready);
-    // adf-duplex is not offered, so the first source is used; 300 dpi falls back to the nearest.
-    await waitFor(() => expect(selected("Resolution")).toBe("200 dpi"));
-    expect(selected("Source")).toBe("Glass");
+    await waitFor(() => expect(selected("File type")).toBe("JPEG"));
+    // adf-duplex, 300 dpi and colour are not offered, so the scanner's first values are used.
+    expect(selected("Scan from")).toBe("Flatbed");
+    expect(selected("Resolution")).toBe("100 dpi");
     expect(selected("Colour")).toBe("Greyscale");
-    expect(optionsOf("Source")).toEqual(["Glass", "Document feeder"]);
+    expect(optionsOf("Scan from")).toEqual(["Flatbed", "Document feeder"]);
     expect(optionsOf("Resolution")).toEqual(["100 dpi", "200 dpi", "600 dpi"]);
     expect(optionsOf("Colour")).toEqual(["Greyscale", "Black and white"]);
-    expect((screen.getByRole("radio", { name: /^JPEG/ }) as HTMLInputElement).checked).toBeTruthy();
+    expect(optionsOf("File type")).toEqual(["PDF", "JPEG"]);
     expect(screen.getByText("Scans are deleted after 3 days.")).toBeTruthy();
 
     await press(scanButton());
-    expect(calls.find((c) => c.method === "POST")?.body).toEqual({
+    expect(posted()).toEqual({
+      scanner: "hp",
       source: "platen",
-      resolution: 200,
+      resolution: 100,
       colorMode: "grayscale",
       format: "jpeg",
     });
+  });
+
+  test("the format control is a dropdown with the file type hint", async () => {
+    await renderScan(ready);
+    await waitFor(() => expect(shown("File type")).toBe(true));
+    const format = fieldOf("File type")?.querySelector("button") as HTMLElement;
+    expect(format.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(fieldOf("File type")?.textContent).toContain("PDF keeps all pages in one file");
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+
+  test("the HP offers four intents", async () => {
+    await renderScan(ready);
+    await waitFor(() => expect(shown("Optimise for")).toBe(true));
+    expect(optionsOf("Optimise for")).toEqual([
+      "Document",
+      "Text and graphics",
+      "Photo",
+      "Preview",
+    ]);
+    expect(optionsOf("Scan from")).toEqual([
+      "Flatbed",
+      "Document feeder",
+      "Document feeder, both sides",
+    ]);
+    // The same dropdown as on Settings and the wizard (A24).
+    const source = fieldOf("Scan from")?.querySelector("button") as HTMLElement;
+    expect(source.getAttribute("aria-haspopup")).toBe("listbox");
+  });
+
+  test("the LiDE shows no source control and scans from the flatbed", async () => {
+    await renderScan({ ...base, scanners: [lide] });
+    await waitFor(() => expect(shown("Resolution")).toBe(true));
+    expect(shown("Scan from")).toBe(false);
+    await press(scanButton());
+    expect(posted()).toEqual({
+      scanner: "lide",
+      source: "platen",
+      resolution: 75,
+      colorMode: "color",
+      intent: "document",
+      format: "pdf",
+    });
+  });
+
+  test("the Samsung shows no intent and sends none", async () => {
+    await renderScan({
+      ...base,
+      scanners: [scanner({ id: "samsung", name: "Samsung SCX-4300", capabilities: samsungCaps })],
+    });
+    await waitFor(() => expect(shown("Resolution")).toBe(true));
+    expect(shown("Optimise for")).toBe(false);
+    // Without duplex the feeder scans one side only.
+    expect(optionsOf("Scan from")).toEqual(["Flatbed", "Document feeder"]);
+    await press(scanButton());
+    expect(posted()).not.toHaveProperty("intent");
+  });
+
+  test("a scanner that reports no colour mode cannot scan", async () => {
+    caps.hp = { ...hpCaps, colorModes: [] };
+    await renderScan(ready);
+    await waitFor(() => expect(shown("Resolution")).toBe(true));
+    expect(disabled(scanButton())).toBe(true);
+    expect(screen.getByText(/does not report a source, resolution or colour mode/)).toBeTruthy();
+    await press(scanButton());
+    expect(posted()).toBeUndefined();
+  });
+
+  test("a failed refetch keeps the options the scanner reported", async () => {
+    await renderScan(ready);
+    await waitFor(() => expect(shown("Resolution")).toBe(true));
+    scannerFailures = 1;
+    // A reconnect asks for the capabilities again, and that request fails.
+    const es = FakeEventSource.last;
+    await act(async () => {
+      es?.onerror?.(new Event("error"));
+      await new Promise((r) => setTimeout(r, 5));
+      FakeEventSource.last?.onopen?.(new Event("open"));
+    });
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(shown("Resolution")).toBe(true);
+    expect(disabled(scanButton())).toBe(false);
+  });
+
+  test("rejected settings show the server's reason, at the field it names", async () => {
+    postScan = () =>
+      json(
+        {
+          type: "invalid-settings",
+          title: "Unprocessable Entity",
+          status: 422,
+          detail: "invalid scan settings",
+          errors: [{ path: "/intent", line: 0, column: 0, message: "scanner has no photo intent" }],
+        },
+        422,
+      );
+    await renderScan(ready);
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    expect(screen.getByText("invalid scan settings")).toBeTruthy();
+    expect(fieldOf("Optimise for")?.textContent).toContain("scanner has no photo intent");
+  });
+
+  test("a picker switches scanners, with each one's capabilities", async () => {
+    scans = [scan({ scanner: "lide", settings: { ...scan().settings, scanner: "lide" } })];
+    await renderScan({ ...base, scanners: [scanner(), lide] });
+    await waitFor(() => expect(shown("Scan from")).toBe(true));
+    // The history names the scanner of each scan.
+    const list = await screen.findByRole("list", { name: "Recent scans" });
+    expect(within(list).getByText(/CanoScan LiDE 100/)).toBeTruthy();
+    await press(screen.getByRole("radio", { name: /^CanoScan LiDE 100/ }));
+    await waitFor(() => expect(shown("Scan from")).toBe(false));
+    expect(calls).toContainEqual({
+      method: "GET",
+      path: "/api/v1/scanners/lide/capabilities",
+      body: undefined,
+    });
+    expect(localStorage.getItem("pagewire:scanner")).toBe("lide");
+    await press(scanButton());
+    expect((posted() as { scanner: string }).scanner).toBe("lide");
   });
 
   test("a scan shows live pages as thumbnails and ends with a download", async () => {
@@ -374,15 +554,15 @@ describe("Scan view", () => {
   });
 
   test("a scanner that is processing shows the Scan button pending", async () => {
-    await renderScan({ ...ready, scanner: { ...ready.scanner, state: "processing" } });
+    await renderScan({ ...base, scanners: [scanner({ state: "processing" })] });
     // Options showing means the capabilities arrived, so only the processing state holds Scan.
-    await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
+    await waitFor(() => expect(selected("Resolution")).toBe("75 dpi"));
     expect(scanButton().hasAttribute("data-pending")).toBe(true);
   });
 
   test("scanning is off while the connection to pagewire is down", async () => {
     await renderScan(ready, false);
-    await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
+    await waitFor(() => expect(selected("Resolution")).toBe("75 dpi"));
     expect(disabled(scanButton())).toBe(true);
   });
 
@@ -452,17 +632,8 @@ describe("Scan view", () => {
     expect(screen.getByText(/Delete old scans under Recent scans/)).toBeTruthy();
   });
 
-  test("a device that finds no printer tells you to plug it in", async () => {
-    await renderScan({
-      ...noScanner,
-      config: { ...noScanner.config, state: "applied" },
-      device: {
-        ...noScanner.device,
-        phase: "probing",
-        mode: "probe",
-        inventory: { devices: [], probedAt: "2026-11-24T18:00:00Z", simulated: false },
-      },
-    });
+  test("while pagewire finds no device it tells you to plug it in", async () => {
+    await renderScan({ ...base, phase: "probing" });
     expect(await screen.findByText(/Plug the printer in with USB/)).toBeTruthy();
   });
 
@@ -470,7 +641,7 @@ describe("Scan view", () => {
     scannerFailures = 1;
     await renderScan(ready);
     await press(await screen.findByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
+    await waitFor(() => expect(selected("Resolution")).toBe("75 dpi"));
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(disabled(scanButton())).toBe(false);
   });

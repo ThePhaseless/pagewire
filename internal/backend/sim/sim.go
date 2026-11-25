@@ -1,10 +1,12 @@
 // Package sim is the simulated device backend: in-process virtual devices on
-// 127.0.0.1 instead of a device pod. It serves a virtual IPP printer (go-mfp)
-// for the ipp-usb and sim families, a fake PAPPL system (papplfake) with
-// devices derived from the fixture for PAPPL families, and a virtual eSCL
-// scanner (go-mfp). An in-memory agent (agent.Core) reports the fixture
-// inventory, reconciles the PAPPL queue and installs blobs from a synthetic
-// vendor (blobtest), so nothing reaches the network or spawns a process.
+// 127.0.0.1 instead of a device pod. For one workload spec it serves a
+// virtual IPP printer (go-mfp) per ipp-usb and sim printer, a fake PAPPL
+// system (papplfake) per PAPPL family with devices derived from that family's
+// printers, and a virtual eSCL scanner (go-mfp) per scanner, each with the
+// capabilities of its fixture device. An in-memory agent (agent.Core) reports
+// the fixture inventory, reconciles the PAPPL queues and installs blobs from
+// a synthetic vendor (blobtest), so nothing reaches the network or spawns a
+// process.
 package sim
 
 import (
@@ -45,6 +47,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/catalog"
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 	"github.com/ThePhaseless/pagewire/internal/pappl/papplfake"
 )
 
@@ -63,6 +66,8 @@ type Options struct {
 	ScanDelay time.Duration
 }
 
+var _ device.Backend = (*Backend)(nil)
+
 // Backend is the simulated device.Backend. It implements neither
 // device.PodRestarter nor device.AgentTokenSource.
 type Backend struct {
@@ -76,8 +81,12 @@ type Backend struct {
 	spec      *device.Spec // nil: nothing runs
 	hash      string
 	servers   []*http.Server
-	endpoints device.Endpoints
-	papplURL  string
+	endpoints []device.Endpoint
+	// papplURLs maps each PAPPL family's fixed system URI
+	// (device.PAPPLSystemURI of its catalog port, what the controller sends)
+	// to its papplfake's random-port URL; pappls holds those fakes by family.
+	papplURLs map[string]string
+	pappls    map[string]*papplfake.System
 	core      *agent.Core
 	stop      context.CancelFunc
 }
@@ -115,24 +124,29 @@ func simulatedInventory(fixture string) device.Inventory {
 }
 
 // SetReporter sets the controller's report handler. Call it before the first
-// non-nil Apply; a running agent keeps the handler it started with.
+// non-empty Apply; a running agent keeps the handler it started with.
 func (b *Backend) SetReporter(r device.ReportFunc) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.report = r
 }
 
-// Apply starts the virtual devices for spec, swapping them when the spec hash
-// changes, or stops everything for a nil spec. It never calls the ReportFunc
-// and never waits for the agent goroutine, so a controller holding a lock its
-// report handler also takes cannot deadlock.
-func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
+// Apply starts the virtual devices for the one spec, swapping them when the
+// spec hash changes, or stops everything for empty specs. More than one spec
+// is an error: the sim is a single node-less workload. Apply never calls the
+// ReportFunc and never waits for the agent goroutine, so a controller holding
+// a lock its report handler also takes cannot deadlock.
+func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if spec == nil {
+	if len(specs) == 0 {
 		b.stopLocked()
 		return nil
 	}
+	if len(specs) > 1 || specs[0] == nil {
+		return fmt.Errorf("sim: Apply takes at most one workload spec, got %d", len(specs))
+	}
+	spec := specs[0]
 	if b.report == nil {
 		return errors.New("sim: Apply before SetReporter")
 	}
@@ -146,15 +160,19 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 		return err
 	}
 	s := *spec
-	s.SaneBackends, s.Blobs = slices.Clone(spec.SaneBackends), slices.Clone(spec.Blobs)
-	s.AcceptedEULAs = slices.Clone(spec.AcceptedEULAs)
+	s.Printers, s.Scanners = slices.Clone(spec.Printers), slices.Clone(spec.Scanners)
+	for i := range s.Scanners {
+		s.Scanners[i].SaneBackends = slices.Clone(s.Scanners[i].SaneBackends)
+	}
+	s.Blobs, s.AcceptedEULAs = slices.Clone(spec.Blobs), slices.Clone(spec.AcceptedEULAs)
 	b.spec, b.hash = &s, hash
 	if b.core != nil {
-		b.core.Wake()
+		b.core.Wake() // the next cycle reads the new papplURLs
 		return nil
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	core := agent.NewCore(podUID, b.inv)
+	core.Attached = func() []device.USBDevice { return slices.Clone(b.inv.Devices) } // b.inv never changes
 	core.Blobs = func() []device.BlobStatus { return b.fetchBlobs(runCtx) }
 	stager := &agent.Stager{
 		Dir: b.blobDir(), Client: b.vendor, Wake: core.Wake,
@@ -165,24 +183,27 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 		Keys: func(string) (openpgp.EntityList, error) { return b.keys, nil },
 	}
 	core.Stage = stager.Stage
-	core.PAPPLURL = func() string {
+	// Read every cycle: a re-Apply's fakes listen on new ports, and the agent
+	// keys a new PAPPL client by the new URL. Unknown URIs give "".
+	core.SystemURL = func(u string) string {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		return b.papplURL
+		return b.papplURLs[u]
 	}
 	b.core, b.stop = core, cancel
 	go core.Loop(runCtx, b.report)
 	return nil
 }
 
-// Observe reports running with the endpoints of the current spec, or absent.
-func (b *Backend) Observe(context.Context) (device.Observation, error) {
+// Observe reports the node-less workload running with one endpoint per
+// served entry (PAPPL printers' PrinterURI empty), or absent.
+func (b *Backend) Observe(context.Context) ([]device.Observation, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.spec == nil {
-		return device.Observation{Phase: device.PhaseAbsent}, nil
+		return []device.Observation{{Phase: device.PhaseAbsent, Endpoints: []device.Endpoint{}}}, nil
 	}
-	return device.Observation{Phase: device.PhaseRunning, HostIP: hostIP, Endpoints: b.endpoints}, nil
+	return []device.Observation{{Phase: device.PhaseRunning, HostIP: hostIP, Endpoints: slices.Clone(b.endpoints)}}, nil
 }
 
 // stopLocked cancels the agent without waiting for it (an in-flight report's
@@ -200,7 +221,7 @@ func (b *Backend) closeServersLocked() {
 	for _, s := range b.servers {
 		_ = s.Close() // closes listeners and connections without waiting for handlers
 	}
-	b.servers, b.endpoints, b.papplURL = nil, device.Endpoints{}, ""
+	b.servers, b.endpoints, b.papplURLs, b.pappls = nil, []device.Endpoint{}, map[string]string{}, map[string]*papplfake.System{}
 }
 
 func (b *Backend) startLocked(ctx context.Context, spec *device.Spec) error {
@@ -208,33 +229,57 @@ func (b *Backend) startLocked(ctx context.Context, spec *device.Spec) error {
 		return nil
 	}
 	out := filepath.Join(b.opts.DataDir, "sim-output")
-	if spec.Printer != "" {
-		fam, _ := catalog.Default().Printer(spec.Printer)
-		if fam.App != "" {
-			if err := os.MkdirAll(out, 0o750); err != nil {
-				slog.Warn("sim: printed documents will be lost", "err", err)
-			}
-			addr, err := b.serve(ctx, func(string) http.Handler { return papplfake.New(b.papplOptions(fam, out)) })
-			if err != nil {
-				return err
-			}
-			b.papplURL = "ipp://" + addr + "/ipp/system"
-		} else {
-			addr, err := b.serve(ctx, func(addr string) http.Handler { return b.newPrinter(spec, addr, out) })
-			if err != nil {
-				return err
-			}
-			b.endpoints.PrinterURI = "ipp://" + addr + "/ipp/print"
+	if len(spec.Printers) > 0 {
+		if err := os.MkdirAll(out, 0o750); err != nil {
+			slog.Warn("sim: printed documents will be lost", "err", err)
 		}
 	}
-	if spec.Scanner != "" {
-		addr, err := b.serve(ctx, func(string) http.Handler { return slowPages(newScanner(), b.opts.ScanDelay) })
+	families := map[string][]device.PrinterSpec{} // PAPPL family id -> its printers
+	var order []catalog.Printer
+	for _, p := range spec.Printers {
+		fam, _ := catalog.Default().Printer(p.Family)
+		if fam.App != "" {
+			if _, ok := families[fam.ID]; !ok {
+				order = append(order, fam)
+			}
+			families[fam.ID] = append(families[fam.ID], p)
+			b.endpoints = append(b.endpoints, device.Endpoint{ID: p.ID})
+			continue
+		}
+		addr, err := b.serve(ctx, func(addr string) http.Handler { return b.newPrinter(p, addr, out) })
 		if err != nil {
 			return err
 		}
-		b.endpoints.ScannerURL = "http://" + addr + "/eSCL"
+		b.endpoints = append(b.endpoints, device.Endpoint{ID: p.ID, PrinterURI: "ipp://" + addr + "/ipp/print"})
+	}
+	for _, fam := range order {
+		sys := papplfake.New(b.papplOptions(fam, families[fam.ID], out))
+		addr, err := b.serve(ctx, func(string) http.Handler { return sys })
+		if err != nil {
+			return err
+		}
+		b.pappls[fam.ID] = sys
+		b.papplURLs[device.PAPPLSystemURI(fam.Port)] = "ipp://" + addr + "/ipp/system"
+	}
+	for _, s := range spec.Scanners {
+		d, _ := b.device(s.USB)
+		addr, err := b.serve(ctx, func(string) http.Handler { return slowPages(newScanner(d), b.opts.ScanDelay) })
+		if err != nil {
+			return err
+		}
+		b.endpoints = append(b.endpoints, device.Endpoint{ID: s.ID, ScannerURL: "http://" + addr + "/eSCL"})
 	}
 	return nil
+}
+
+// device is the fixture device with key k; false for a simulated entry (zero
+// key) or a device the fixture lacks.
+func (b *Backend) device(k device.USBKey) (device.USBDevice, bool) {
+	i := slices.IndexFunc(b.inv.Devices, func(d device.USBDevice) bool { return k != (device.USBKey{}) && d.Key() == k })
+	if i < 0 {
+		return device.USBDevice{}, false
+	}
+	return b.inv.Devices[i], true
 }
 
 // serve listens on 127.0.0.1:0 and serves the handler built for that address.
@@ -250,14 +295,28 @@ func (b *Backend) serve(ctx context.Context, handler func(addr string) http.Hand
 	return addr, nil
 }
 
-// papplOptions lists every printer-class fixture device the way the retrofit
-// apps' CUPS backends would, with one driver matching its manufacturer and
-// the index driver the dispatcher picks for it in fam.
-func (b *Backend) papplOptions(fam catalog.Printer, out string) papplfake.Options {
+// papplOptions lists the fixture devices of fam's printers the way the
+// retrofit apps' CUPS backends would, with one driver matching each device's
+// manufacturer and the index driver the dispatcher picks for it in fam.
+//
+// shortcut: papplfake reports one caps set for all its queues, so a family
+// holding a fixture model with its own caps (the Samsung) reports those for
+// every queue; give papplfake per-queue caps when a test puts two models in
+// one family.
+func (b *Backend) papplOptions(fam catalog.Printer, printers []device.PrinterSpec, out string) papplfake.Options {
 	o := papplfake.Options{OutputDir: out}
-	for _, d := range b.inv.Devices {
-		if !isPrinter(d) {
+	addDriver := func(d papplfake.Driver) {
+		if !slices.ContainsFunc(o.Drivers, func(x papplfake.Driver) bool { return x.Name == d.Name }) {
+			o.Drivers = append(o.Drivers, d)
+		}
+	}
+	for _, p := range printers {
+		d, ok := b.device(p.USB)
+		if canPrint, _ := catalog.Default().Roles(d); !ok || !canPrint {
 			continue
+		}
+		if c, ok := papplCaps[modelKey(d)]; ok && o.Caps.Formats == nil {
+			o.Caps = c // the first model with its own caps; zero: papplfake's default
 		}
 		id := device.ParseDeviceID(d.DeviceID)
 		mfg, mdl := id["MFG"], id["MDL"]
@@ -270,19 +329,14 @@ func (b *Backend) papplOptions(fam catalog.Printer, out string) papplfake.Option
 				URI: "cups:hp:/usb/" + strings.ReplaceAll(mdl, " ", "_") + serial, Info: mdl + " (HPLIP)", DeviceID: d.DeviceID,
 			})
 		}
-		o.Drivers = append(o.Drivers, papplfake.Driver{
+		addDriver(papplfake.Driver{
 			Name: fam.ID + "_" + strings.ToLower(strings.ReplaceAll(mfg, " ", "_")), Description: mfg + " (" + fam.App + ", simulated)", MatchMFG: mfg,
 		})
-		inv := device.Inventory{Devices: []device.USBDevice{d}}
-		if dec, err := catalog.Default().Decide(inv, config.Device{Mode: config.ModeUSB, Driver: fam.ID}); err == nil && dec.Driver != "" {
-			o.Drivers = append(o.Drivers, papplfake.Driver{Name: dec.Driver, Description: dec.DriverDescription, MatchMFG: mfg})
+		if dec := catalog.Default().DecidePrinter(&d, config.Printer{Mode: config.ModeUSB, Driver: fam.ID}); dec.Driver != "" {
+			addDriver(papplfake.Driver{Name: dec.Driver, Description: dec.DriverDescription, MatchMFG: mfg})
 		}
 	}
 	return o
-}
-
-func isPrinter(d device.USBDevice) bool {
-	return slices.ContainsFunc(d.Interfaces, func(i device.USBInterface) bool { return i.Class == 7 })
 }
 
 // fetchBlobs installs the spec's blobs from the synthetic vendor. It runs in
@@ -317,20 +371,133 @@ func (b *Backend) simBlob(cb catalog.Blob) catalog.Blob {
 
 func (b *Backend) blobDir() string { return filepath.Join(b.opts.DataDir, "sim-blobs") }
 
-// newPrinter builds go-mfp's virtual IPP printer for the ipp-usb and sim
-// families, writing documents to out/<job-id>.bin.
-func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
-	name := spec.Name
+// Fixture models (vendor:product) with capabilities of their own.
+const (
+	samsungSCX4300 = "04e8:342e"
+	hpOfficeJet    = "03f0:2754"
+	canonLiDE100   = "04a9:1904"
+)
+
+func modelKey(d device.USBDevice) string { return d.VendorID + ":" + d.ProductID }
+
+// papplCaps are the caps a PAPPL family's fake reports for a fixture model.
+// Other models get papplfake's default.
+var papplCaps = map[string]device.PrinterCaps{
+	// The Samsung SCX-4300's live legacy queue: monochrome and one-sided, no
+	// tray, type, bin, finishings, layout or content kind; PAPPL always
+	// reports copies 1-999.
+	samsungSCX4300: {
+		Media: []string{"iso_a4_210x297mm", "na_letter_8.5x11in"}, MediaDefault: "na_letter_8.5x11in",
+		Sides: []string{"one-sided"}, SidesDefault: "one-sided",
+		ColorModes: []string{"monochrome"}, ColorModeDefault: "monochrome",
+		Qualities: []string{"draft", "normal", "high"}, QualityDefault: "normal",
+		Resolutions: []int{300, 600}, ResolutionDefault: 600,
+		CopiesMax: 999,
+		Formats:   []string{"application/pdf", "image/jpeg", "image/png", "image/pwg-raster", "image/urf"},
+	},
+}
+
+// virtualCaps are the caps of an ipp-usb or sim printer on device d (zero for
+// a simulated printer). The HP OfficeJet reports every option kind, with a
+// single output bin and finishing; any other printer A4 and Letter plus
+// copies 1-99.
+func virtualCaps(d device.USBDevice) device.PrinterCaps {
+	if modelKey(d) == hpOfficeJet {
+		return device.PrinterCaps{
+			Media: []string{
+				"iso_a4_210x297mm", "na_letter_8.5x11in", "na_legal_8.5x14in", "na_number-10_4.125x9.5in", "na_index-4x6_4x6in",
+			},
+			MediaDefault: "iso_a4_210x297mm",
+			MediaSources: []string{"auto", "tray-1", "manual"}, MediaSourceDefault: "auto",
+			MediaTypes: []string{"stationery", "photographic-glossy"}, MediaTypeDefault: "stationery",
+			Sides: []string{"one-sided", "two-sided-long-edge", "two-sided-short-edge"}, SidesDefault: "one-sided",
+			ColorModes: []string{"auto", "color", "monochrome"}, ColorModeDefault: "auto",
+			Qualities: []string{"draft", "normal", "high"}, QualityDefault: "normal",
+			Resolutions: []int{300, 600}, ResolutionDefault: 600,
+			ContentOptimize: []string{"auto", "photo", "text"}, ContentOptimizeDefault: "auto",
+			Orientations: []string{"portrait", "landscape"}, OrientationDefault: "portrait",
+			NumberUp: []int{1, 2, 4}, NumberUpDefault: 1,
+			PrintScalings: []string{"auto", "fit", "fill", "none"}, PrintScalingDefault: "auto",
+			OutputBins: []string{"face-down"}, OutputBinDefault: "face-down",
+			Finishings: []string{"none"}, FinishingsDefault: "none",
+			CopiesMax: 99,
+		}
+	}
+	return device.PrinterCaps{Media: []string{"iso_a4_210x297mm", "na_letter_8.5x11in"}, CopiesMax: 99}
+}
+
+// setCaps writes c into go-mfp's job-template and media attributes; empty
+// lists and defaults stay unreported.
+func setCaps(a *ipp.PrinterAttributes, c device.PrinterCaps) {
+	enums := func(table map[string]goipp.Integer, vs ...string) []int {
+		var out []int
+		for _, v := range vs {
+			if n, ok := table[v]; ok {
+				out = append(out, int(n))
+			}
+		}
+		return out
+	}
+	enum := func(table map[string]goipp.Integer, v string) optional.Val[int] {
+		if n, ok := table[v]; ok {
+			return optional.New(int(n))
+		}
+		return nil
+	}
+	for _, m := range c.Media {
+		a.MediaSupported = append(a.MediaSupported, ipp.KwMedia(m))
+	}
+	a.MediaDefault = optional.NotZero(ipp.KwMedia(c.MediaDefault))
+	a.MediaSourceSupported, a.MediaTypeSupported = c.MediaSources, c.MediaTypes
+	if c.MediaSourceDefault != "" || c.MediaTypeDefault != "" {
+		a.MediaColDefault = optional.New(ipp.MediaCol{
+			MediaSizeName: optional.NotZero(c.MediaDefault),
+			MediaSource:   optional.NotZero(c.MediaSourceDefault),
+			MediaType:     optional.NotZero(c.MediaTypeDefault),
+		})
+	}
+	for _, v := range c.Sides {
+		a.SidesSupported = append(a.SidesSupported, ipp.KwSides(v))
+	}
+	a.SidesDefault = optional.NotZero(ipp.KwSides(c.SidesDefault))
+	a.PrintColorModeSupported, a.PrintColorModeDefault = c.ColorModes, optional.NotZero(c.ColorModeDefault)
+	a.PrintQualitySupported, a.PrintQualityDefault = enums(ippcaps.Qualities, c.Qualities...), enum(ippcaps.Qualities, c.QualityDefault)
+	for _, r := range c.Resolutions {
+		a.PrinterResolutionSupported = append(a.PrinterResolutionSupported, goipp.Resolution{Xres: r, Yres: r, Units: goipp.UnitsDpi})
+	}
+	if c.ResolutionDefault > 0 {
+		a.PrinterResolutionDefault = optional.New(goipp.Resolution{Xres: c.ResolutionDefault, Yres: c.ResolutionDefault, Units: goipp.UnitsDpi})
+	}
+	a.PrintContentOptimizeSupported, a.PrintContentOptimizeDefault = c.ContentOptimize, optional.NotZero(c.ContentOptimizeDefault)
+	a.OrientationRequestedSupported = enums(ippcaps.Orientations, c.Orientations...)
+	a.OrientationRequestedDefault = enum(ippcaps.Orientations, c.OrientationDefault)
+	for _, n := range c.NumberUp {
+		a.NumberUpSupported = append(a.NumberUpSupported, goipp.Integer(int32(n))) //nolint:gosec // small fixture values
+	}
+	a.NumberUpDefault = optional.NotZero(c.NumberUpDefault)
+	a.PrintScalingSupported, a.PrintScalingDefault = c.PrintScalings, optional.NotZero(c.PrintScalingDefault)
+	a.OutputBinSupported, a.OutputBinDefault = c.OutputBins, optional.NotZero(c.OutputBinDefault)
+	a.FinishingsSupported, a.FinishingsDefault = enums(ippcaps.Finishings, c.Finishings...), enums(ippcaps.Finishings, c.FinishingsDefault)
+	if c.CopiesMax > 0 {
+		a.CopiesSupported, a.CopiesDefault = optional.New(goipp.Range{Lower: 1, Upper: c.CopiesMax}), optional.New(1)
+	}
+}
+
+// newPrinter builds go-mfp's virtual IPP printer for ipp-usb or sim printer
+// p, writing documents to out/<id>-<job-id>.bin.
+func (b *Backend) newPrinter(p device.PrinterSpec, addr, out string) http.Handler {
+	d, _ := b.device(p.USB)
+	name := p.Name
+	if name == "" {
+		name = d.Product
+	}
 	if name == "" {
 		name = "Simulated printer"
-		if i := slices.IndexFunc(b.inv.Devices, isPrinter); i >= 0 && b.inv.Devices[i].Product != "" {
-			name = b.inv.Devices[i].Product
-		}
 	}
 	idle := 3
 	attrs := &ipp.PrinterAttributes{
 		PrinterName:             optional.New(name),
-		PrinterLocation:         optional.New(spec.Location),
+		PrinterLocation:         optional.New(p.Location),
 		PrinterInfo:             optional.New(name),
 		PrinterMakeAndModel:     optional.New("pagewire virtual printer"),
 		PrinterState:            &idle,
@@ -339,18 +506,18 @@ func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
 		PrinterURISupported:     []string{"ipp://" + addr + "/ipp/print"},
 		DocumentFormatDefault:   optional.New("application/pdf"),
 		DocumentFormatSupported: []string{"application/pdf", "image/jpeg", "image/pwg-raster", "image/urf"},
-		MediaSupported:          []ipp.KwMedia{"iso_a4_210x297mm", "na_letter_8.5x11in"},
 		MarkerNames:             []string{"Black Toner"},
 		MarkerColors:            []string{"#000000"},
 		MarkerTypes:             []string{"toner"},
 		MarkerLevels:            []int{80},
 	}
-	vp := &virtualPrinter{dir: out, done: map[int]bool{}, created: map[int]time.Time{}}
-	p := ipp.NewPrinter(attrs, ipp.PrinterOptions{ServerOptions: ipp.ServerOptions{
+	setCaps(attrs, virtualCaps(d))
+	vp := &virtualPrinter{dir: out, id: p.ID, done: map[int]bool{}, created: map[int]time.Time{}}
+	pr := ipp.NewPrinter(attrs, ipp.PrinterOptions{ServerOptions: ipp.ServerOptions{
 		Hooks: ipp.ServerHooks{OnIPPRequest: vp.onRequest, OnIPPResponse: vp.onResponse},
 	}})
-	p.SetPrintBackend(vp)
-	return p
+	pr.SetPrintBackend(vp)
+	return pr
 }
 
 // virtualPrinter is the go-mfp printer's backend plus the hooks that make
@@ -364,6 +531,7 @@ func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
 // rewrite those responses too if a client depends on them.
 type virtualPrinter struct {
 	dir     string
+	id      string // the printer's entry id, prefixed to its document names
 	mu      sync.Mutex
 	done    map[int]bool      // job ids whose document was written
 	created map[int]time.Time // when each job id was first answered (Create-Job)
@@ -426,7 +594,7 @@ func (v *virtualPrinter) complete(attrs goipp.Attributes) {
 	}
 }
 
-// PrintDocument writes the document to dir/<job-id>.bin and marks the job done.
+// PrintDocument writes the document to dir/<id>-<job-id>.bin and marks the job done.
 func (v *virtualPrinter) PrintDocument(p abstract.PrinterRequest, body io.Reader) error {
 	id, err := strconv.Atoi(p.JobName)
 	name := p.JobName
@@ -436,7 +604,7 @@ func (v *virtualPrinter) PrintDocument(p abstract.PrinterRequest, body io.Reader
 		id, name = 0, fmt.Sprintf("doc-%d", v.seq)
 		v.mu.Unlock()
 	}
-	if err := writeFile(filepath.Join(v.dir, name+".bin"), body); err != nil {
+	if err := writeFile(filepath.Join(v.dir, v.id+"-"+name+".bin"), body); err != nil {
 		return err
 	}
 	if id > 0 {
@@ -473,32 +641,52 @@ func jobID(attrs goipp.Attributes) int {
 	return 0
 }
 
-// newScanner builds go-mfp's virtual eSCL scanner: a platen and a two-page
-// ADF (simplex and duplex), all holding the A4 300 dpi test page.
-func newScanner() http.Handler {
-	input := &abstract.InputCapabilities{
-		MaxWidth:  abstract.A4Width,
-		MaxHeight: abstract.A4Height,
-		Profiles: []abstract.SettingsProfile{{
-			ColorModes:  generic.MakeBitset(abstract.ColorModeColor, abstract.ColorModeMono),
-			Depths:      generic.MakeBitset(abstract.ColorDepth8),
-			Resolutions: []abstract.Resolution{{XResolution: 75, YResolution: 75}, {XResolution: 150, YResolution: 150}, {XResolution: 300, YResolution: 300}},
-		}},
-	}
-	caps := &abstract.ScannerCapabilities{
-		MakeAndModel:    "pagewire virtual scanner",
-		DocumentFormats: []string{"image/jpeg"},
-		Platen:          input,
-		ADFSimplex:      input,
-		ADFDuplex:       input,
-		ADFCapacity:     50,
+// newScanner builds go-mfp's virtual eSCL scanner for device d (zero for the
+// simulated scanner), every input holding the A4 300 dpi test page and the
+// ADF two pages:
+//   - the Samsung SCX-4300 as AirSane reports it: platen and simplex ADF,
+//     75-600 dpi, colour and greyscale, no intents;
+//   - the CanoScan LiDE 100: platen only, 75-1200 dpi, colour and greyscale,
+//     intents document and photo;
+//   - any other: platen and ADF (simplex and duplex), 75-300 dpi, colour and
+//     greyscale, intents document, text-and-graphic, photo and preview.
+func newScanner(d device.USBDevice) http.Handler {
+	input := func(intents []abstract.Intent, dpi ...int) *abstract.InputCapabilities {
+		res := make([]abstract.Resolution, len(dpi))
+		for i, r := range dpi {
+			res[i] = abstract.Resolution{XResolution: r, YResolution: r}
+		}
+		return &abstract.InputCapabilities{
+			MaxWidth:  abstract.A4Width,
+			MaxHeight: abstract.A4Height,
+			Intents:   generic.MakeBitset(intents...),
+			Profiles: []abstract.SettingsProfile{{
+				ColorModes:  generic.MakeBitset(abstract.ColorModeColor, abstract.ColorModeMono),
+				Depths:      generic.MakeBitset(abstract.ColorDepth8),
+				Resolutions: res,
+			}},
+		}
 	}
 	page := testPage()
+	caps := &abstract.ScannerCapabilities{MakeAndModel: "pagewire virtual scanner", DocumentFormats: []string{"image/jpeg"}}
 	vs := &abstract.VirtualScanner{
 		ScanCaps:    caps,
 		Resolution:  abstract.Resolution{XResolution: 300, YResolution: 300},
 		PlatenImage: page,
 		ADFImages:   [][]byte{page, page},
+	}
+	switch modelKey(d) {
+	case samsungSCX4300:
+		caps.Platen = input(nil, 75, 150, 300, 600)
+		caps.ADFSimplex, caps.ADFCapacity = caps.Platen, 50
+	case canonLiDE100:
+		caps.Platen = input([]abstract.Intent{abstract.IntentDocument, abstract.IntentPhoto}, 75, 150, 300, 600, 1200)
+		vs.ADFImages = nil
+	default:
+		caps.Platen = input([]abstract.Intent{
+			abstract.IntentDocument, abstract.IntentTextAndGraphic, abstract.IntentPhoto, abstract.IntentPreview,
+		}, 75, 150, 300)
+		caps.ADFSimplex, caps.ADFDuplex, caps.ADFCapacity = caps.Platen, caps.Platen, 50
 	}
 	return escl.NewAbstractServer(escl.AbstractServerOptions{Scanner: vs, BasePath: "/eSCL"})
 }

@@ -27,6 +27,7 @@ type apiRoot struct {
 	EULA           apitypes.EULA
 	Status         apitypes.Status
 	PrintOptions   apitypes.PrintOptions
+	PrintResult    apitypes.PrintResult
 	Job            apitypes.Job
 	ScannerCaps    apitypes.ScannerCaps
 	ScanSettings   apitypes.ScanSettings

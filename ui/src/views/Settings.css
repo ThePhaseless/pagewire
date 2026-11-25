@@ -29,17 +29,87 @@
     padding-inline-start: var(--space-3);
   }
 
-  .settings-view .settings-usb {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
+  .settings-view .settings-muted {
+    font-size: var(--text-sm);
+    color: var(--ink-muted);
   }
 
-  .settings-view .settings-usb-fields {
-    display: grid;
+  /* One printer or scanner inside its section card; entries are separated by a rule, never nested cards. */
+  .settings-view .settings-entry + .settings-entry {
+    border-block-start: 1px solid var(--rule);
+    padding-block-start: var(--space-4);
+  }
+
+  .settings-view .settings-entry-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-4);
+  }
+
+  .settings-view .settings-entry-title {
+    flex: 1 1 12rem;
+    min-inline-size: 0;
+  }
+
+  .settings-view .settings-entry-title h3 {
+    font-size: var(--text-md);
+    font-weight: var(--weight-medium);
+    overflow-wrap: anywhere;
+  }
+
+  .settings-view .settings-entry-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+  }
+
+  .settings-view .settings-entry-body {
+    display: flex;
+    flex-direction: column;
     gap: var(--space-4);
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
-    margin-block-start: var(--space-2);
+    margin-block-start: var(--space-4);
+    padding-inline-start: var(--space-4);
+    border-inline-start: 2px solid var(--rule);
+  }
+
+  .settings-view .settings-option-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding-block-start: var(--space-3);
+    border-block-start: 1px solid var(--rule);
+  }
+
+  .settings-view .settings-option-group h4 {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    color: var(--ink-muted);
+  }
+
+  .settings-view .settings-ignored {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .settings-view .settings-ignored-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-3);
+    padding-block: var(--space-2);
+  }
+
+  .settings-view .settings-ignored-item + .settings-ignored-item {
+    border-block-start: 1px solid var(--rule);
+  }
+
+  .settings-view .settings-ignored-name {
+    flex: 1 1 12rem;
+    overflow-wrap: anywhere;
   }
 
   .settings-view .settings-eula + .settings-eula {

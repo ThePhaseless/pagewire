@@ -585,6 +585,33 @@ export function StatusBadge({
   );
 }
 
+export type DevicePhase = keyof typeof strings.devicePhase;
+
+/** The badge tone of one printer's or scanner's phase. */
+export function phaseTone(phase: DevicePhase): Tone {
+  switch (phase) {
+    case "ready":
+      return "ok";
+    case "probing":
+    case "deploying":
+      return "busy";
+    case "degraded":
+    case "error":
+      return "problem";
+    default:
+      return "idle";
+  }
+}
+
+/** A printer's or scanner's phase as a badge; the dot breathes while it starts. */
+export function DeviceStatusBadge({ phase }: { phase: DevicePhase }) {
+  return (
+    <StatusBadge tone={phaseTone(phase)} pulse={phase === "deploying"}>
+      {strings.devicePhase[phase]}
+    </StatusBadge>
+  );
+}
+
 export function PageHeader({
   title,
   description,

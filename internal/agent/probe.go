@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -53,7 +54,8 @@ func Probe(sysRoot, devRoot string, sel *config.USB) device.Inventory {
 	return inv
 }
 
-// matches applies the device.usb selector the way catalog.Decide does.
+// matches applies a USB selector (vendor, product and, when set, serial) the
+// way catalog.Bind does.
 func matches(d device.USBDevice, sel *config.USB) bool {
 	return strings.EqualFold(d.VendorID, sel.VendorID) && strings.EqualFold(d.ProductID, sel.ProductID) &&
 		(sel.Serial == "" || d.Serial == sel.Serial)
@@ -69,15 +71,36 @@ func WriteJSON(path string, v any) error {
 	return renameio.WriteFile(path, append(b, '\n'), 0o644, renameio.WithStaticPermissions(0o644))
 }
 
-// printerDevice is the first printer-class device, the one Decide and the PAPPL
-// reconcile pick without a selector; nil when there is none.
-func printerDevice(inv device.Inventory) *device.USBDevice {
-	for i, d := range inv.Devices {
-		for _, it := range d.Interfaces {
-			if it.Class == classPrinter {
-				return &inv.Devices[i]
-			}
+// ProbeFile is what `agent probe` writes: the inventory, plus the usbfs nodes
+// the probe container sees. The embedded inventory's keys stay at the top
+// level, so an older file without nodes still reads (Nodes nil).
+type ProbeFile struct {
+	device.Inventory
+	Nodes []string `json:"nodes"`
+}
+
+// ProbeNodes lists the usbfs nodes under <devRoot>/bus/usb as "BBB/DDD"
+// (USBDevice.Node), sorted. On k8s they are the nodes the device plugin
+// allocated to the pod. A missing directory or a read error gives nil
+// (unknown); an existing empty one gives [].
+func ProbeNodes(devRoot string) []string {
+	base := filepath.Join(devRoot, "bus", "usb")
+	buses, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	out := []string{}
+	for _, b := range buses {
+		if !b.IsDir() {
+			continue
+		}
+		devs, err := os.ReadDir(filepath.Join(base, b.Name()))
+		if err != nil {
+			return nil
+		}
+		for _, d := range devs { // ReadDir sorts by name, and the names are fixed-width
+			out = append(out, b.Name()+"/"+d.Name())
 		}
 	}
-	return nil
+	return out
 }

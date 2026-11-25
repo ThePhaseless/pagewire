@@ -6,9 +6,10 @@ import {
   ConfigResponseSchema,
   EULASchema,
   type FieldError,
-  type Job,
   JobSchema,
   type PrintOptions,
+  type PrintResult,
+  PrintResultSchema,
   type Problem,
   ProblemSchema,
   type Scan,
@@ -137,6 +138,8 @@ async function configWrite(opts: Options): Promise<ConfigResponse> {
   return parse(ConfigResponseSchema, await res.json());
 }
 
+const printerPath = (id: string) => `/printers/${encodeURIComponent(id)}`;
+
 export const api = {
   getConfig: () => json(ConfigResponseSchema, "/config"),
   rawConfigUrl: `${API}/config/raw`,
@@ -156,11 +159,17 @@ export const api = {
   getSetup: () => json(SetupSchema, "/setup"),
   /** A vendor licence and its text, read by the device agent from the verified archive. */
   getEula: (id: string) => json(EULASchema, `/eulas/${encodeURIComponent(id)}`),
+  /** Re-runs USB detection (restarts the device workloads); the new devices arrive in Status. */
+  detect: () => empty("/setup/detect", { method: "POST" }),
   getStatus: () => json(StatusSchema, "/status"),
-  getJobs: () => json(z.array(JobSchema), "/jobs"),
-  getJob: (id: number) => json(JobSchema, `/jobs/${id}`),
-  cancelJob: (id: number) => empty(`/jobs/${id}`, { method: "DELETE" }),
-  getScanner: () => json(ScannerCapsSchema, "/scanner"),
+  getJobs: (printerId: string) => json(z.array(JobSchema), `${printerPath(printerId)}/jobs`),
+  getJob: (printerId: string, id: number) =>
+    json(JobSchema, `${printerPath(printerId)}/jobs/${id}`),
+  cancelJob: (printerId: string, id: number) =>
+    empty(`${printerPath(printerId)}/jobs/${id}`, { method: "DELETE" }),
+  getScannerCaps: (scannerId: string) =>
+    json(ScannerCapsSchema, `/scanners/${encodeURIComponent(scannerId)}/capabilities`),
+  /** `settings.scanner` names the scanner. */
   startScan: (settings: ScanSettings) =>
     json(ScanSchema, "/scans", { method: "POST", body: settings }),
   getScans: () => json(z.array(ScanSchema), "/scans"),
@@ -186,16 +195,20 @@ export function printFormData(file: Blob & { name?: string }, options: PrintOpti
   return fd;
 }
 
-/** Uploads one document with progress (fetch cannot report upload progress, XHR can). */
+/**
+ * Uploads one document to one printer with progress (fetch cannot report upload progress, XHR
+ * can). The result carries the job and the options the printer does not offer, left out.
+ */
 export function uploadPrint(
+  printerId: string,
   file: Blob & { name?: string },
   options: PrintOptions,
   onProgress?: (fraction: number) => void,
   newXhr: () => XMLHttpRequest = () => new XMLHttpRequest(),
-): Promise<Job> {
+): Promise<PrintResult> {
   return new Promise((resolve, reject) => {
     const xhr = newXhr();
-    xhr.open("POST", `${API}/print`);
+    xhr.open("POST", `${API}${printerPath(printerId)}/print`);
     xhr.setRequestHeader("Accept", "application/json");
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && e.total > 0) onProgress?.(e.loaded / e.total);
@@ -210,7 +223,7 @@ export function uploadPrint(
       }
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
-          resolve(parse(JobSchema, body));
+          resolve(parse(PrintResultSchema, body));
         } catch (err) {
           reject(err);
         }

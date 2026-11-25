@@ -24,7 +24,9 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 type obj = map[string]any
@@ -174,33 +176,54 @@ func TestExamplesValid(t *testing.T) {
 }
 
 func TestDefaultConfigValid(t *testing.T) {
-	b, err := json.Marshal(config.Default("Printer"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := compile(t, ConfigID, Config(), "").Validate(instance(t, b)); err != nil {
-		t.Errorf("file schema: %v", err)
-	}
-	if err := compile(t, APIID, API(), "#/$defs/Config").Validate(instance(t, b)); err != nil {
-		t.Errorf("api schema: %v", err)
+	usb := &config.USB{VendorID: "03f0", ProductID: "2b17"}
+	devices := config.Default("Home")
+	devices.Printers = []config.Printer{{ID: "p", Name: "P", Enabled: true, Mode: config.ModeUSB, USB: usb, Driver: config.Auto}}
+	devices.Scanners = []config.Scanner{{ID: "s", Name: "S", Enabled: false, Mode: config.ModeUSB, USB: usb, Backend: config.BackendAuto}}
+	fileSchema := compile(t, ConfigID, Config(), "")
+	apiSchema := compile(t, APIID, API(), "#/$defs/Config")
+	for name, c := range map[string]config.Config{"default": config.Default("Printer"), "empty defaults": devices} {
+		b, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fileSchema.Validate(instance(t, b)); err != nil {
+			t.Errorf("%s: file schema: %v", name, err)
+		}
+		if err := apiSchema.Validate(instance(t, b)); err != nil {
+			t.Errorf("%s: api schema: %v", name, err)
+		}
 	}
 }
 
 func TestRejectsInvalid(t *testing.T) {
 	sch := compile(t, ConfigID, Config(), "")
+	p := func(fields string) string {
+		return `{"apiVersion": "pagewire/v2", "name": "x", "printers": [{"id": "p", "name": "P"` + fields + `}]}`
+	}
 	for _, doc := range []string{
-		`{"apiVersion": "pagewire/v1", "name": "x", "colour": "red"}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"mode": "wifi"}}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03F0", "productId": "2b17"}}}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "print": {"defaults": {"media": "A4"}}}`,
-		`{"apiVersion": "pagewire/v2", "name": "x"}`,
-		`{"apiVersion": "pagewire/v1", "name": ""}`,
-		`{"apiVersion": "pagewire/v1", "name": "tab\there"}`,
-		`{"apiVersion": "pagewire/v1", "name": "-h"}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "a\u0007b"}}}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "` + strings.Repeat("9", 127) + `"}}}`,
-		`{"apiVersion": "pagewire/v1"}`,
-		`{"apiVersion": "pagewire/v1", "name": "x", "licenses": {"acceptedEulas": [{"id": "a", "version": "1"}, {"id": "a", "version": "1"}]}}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "colour": "red"}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "device": {"mode": "usb"}}`,
+		p(`, "mode": "wifi"`),
+		p(`, "usb": {"vendorId": "03F0", "productId": "2b17"}`),
+		p(`, "defaults": {"media": "A4"}`),
+		p(`, "defaults": {"mediaSource": "Tray 1"}`),
+		p(`, "defaults": {"numberUp": 32}`),
+		p(`, "defaults": {"sides": ""}`),
+		`{"apiVersion": "pagewire/v2", "name": "x", "printers": [{"id": "-bad", "name": "P"}]}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "printers": [{"name": "P"}]}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "scanners": [{"id": "s"}]}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "scanners": [{"id": "s", "name": "S", "defaults": {"intent": "receipt"}}]}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "ignoredDevices": [{"vendorId": "046d", "productId": "c31c", "roles": []}]}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "ignoredDevices": [{"vendorId": "046d", "productId": "c31c", "roles": ["fax"]}]}`,
+		`{"apiVersion": "pagewire/v1", "name": "x"}`,
+		`{"apiVersion": "pagewire/v2", "name": ""}`,
+		`{"apiVersion": "pagewire/v2", "name": "tab\there"}`,
+		`{"apiVersion": "pagewire/v2", "name": "-h"}`,
+		p(`, "usb": {"vendorId": "03f0", "productId": "2b17", "serial": "a\u0007b"}`),
+		p(`, "usb": {"vendorId": "03f0", "productId": "2b17", "serial": "` + strings.Repeat("9", 127) + `"}`),
+		`{"apiVersion": "pagewire/v2"}`,
+		`{"apiVersion": "pagewire/v2", "name": "x", "licenses": {"acceptedEulas": [{"id": "a", "version": "1"}, {"id": "a", "version": "1"}]}}`,
 	} {
 		if err := sch.Validate(instance(t, []byte(doc))); err == nil {
 			t.Errorf("schema accepted %s", doc)
@@ -239,24 +262,37 @@ func TestRequired(t *testing.T) {
 	if got := strs(root["required"]); !reflect.DeepEqual(got, []string{"apiVersion", "name"}) {
 		t.Errorf("file schema root required = %v", got)
 	}
+	wantRequired := map[string][]string{"Config": {"apiVersion", "name"}, "Printer": {"id", "name"}, "Scanner": {"id", "name"}}
 	for name, d := range cs["$defs"].(obj) {
-		if name != "Config" && d.(obj)["required"] != nil {
-			t.Errorf("file schema def %s has required %v", name, d.(obj)["required"])
+		var got []string
+		if r := d.(obj)["required"]; r != nil {
+			got = strs(r)
+		}
+		if !reflect.DeepEqual(got, wantRequired[name]) {
+			t.Errorf("file schema def %s has required %v, want %v", name, got, wantRequired[name])
 		}
 	}
 	if p := prop(t, root, "apiVersion"); p["const"] != config.APIVersion {
 		t.Errorf("apiVersion const = %v", p["const"])
 	}
-	if d := prop(t, root, "name")["description"]; !strings.Contains(fmt.Sprint(d), "ipp-usb and AirSane advertise the device's own names") {
-		t.Errorf("name description = %v", d)
+	if d := prop(t, def(t, cs, "Printer"), "name")["description"]; !strings.Contains(fmt.Sprint(d), "ipp-usb and AirSane advertise the device's own names") {
+		t.Errorf("Printer.name description = %v", d)
 	}
 
 	as := decode(t, API())
-	if got := strs(def(t, as, "Status")["required"]); !reflect.DeepEqual(got, []string{"config", "device", "printer", "scanner", "reconcile", "connect"}) {
+	wantStatus := []string{"config", "phase", "message", "printers", "scanners", "workloads", "devices", "reconcile"}
+	if got := strs(def(t, as, "Status")["required"]); !reflect.DeepEqual(got, wantStatus) {
 		t.Errorf("Status required = %v", got)
 	}
-	if slices.Contains(strs(def(t, as, "Device")["required"]), "usb") {
-		t.Error("Device def requires usb")
+	for _, name := range []string{"Printer", "Scanner"} {
+		if r := def(t, as, name)["required"]; r != nil && slices.Contains(strs(r), "usb") {
+			t.Errorf("%s def requires usb", name)
+		}
+	}
+	for _, name := range []string{"PrintDefaults", "ScanDefaults"} {
+		if r := def(t, as, name)["required"]; r != nil {
+			t.Errorf("api schema %s requires %v; every defaults key is optional", name, r)
+		}
 	}
 	cr := def(t, as, "ConfigResponse")
 	if got := strs(cr["required"]); !reflect.DeepEqual(got, []string{"etag", "config", "state", "errors", "lastGood"}) {
@@ -267,9 +303,34 @@ func TestRequired(t *testing.T) {
 			t.Errorf("ConfigResponse.%s not nullable: %v", p, prop(t, cr, p))
 		}
 	}
-	dec := def(t, as, "Decision")
-	if !slices.Contains(strs(dec["required"]), "device") || !nullable(prop(t, dec, "device")) {
-		t.Errorf("Decision.device must be required and nullable: %v", dec)
+	for _, name := range []string{"PrinterDecision", "ScannerDecision"} {
+		dec := def(t, as, name)
+		if !slices.Contains(strs(dec["required"]), "device") || !nullable(prop(t, dec, "device")) {
+			t.Errorf("%s.device must be required and nullable: %v", name, dec)
+		}
+	}
+	po := def(t, as, "PrintOptions")
+	if r := po["required"]; r != nil {
+		t.Errorf("PrintOptions requires %v; every print option is optional", r)
+	}
+	for _, p := range []string{"copies", "sides", "finishings"} {
+		prop(t, po, p) // the PrintSettings embed is inlined
+	}
+	defs := as["$defs"].(obj)
+	for _, gone := range []string{"PrintSettings", "Connect", "Decision", "StatusDevice"} {
+		if _, ok := defs[gone]; ok {
+			t.Errorf("api schema still has $defs/%s", gone)
+		}
+	}
+	for name, want := range map[string][]string{"PrinterConnect": {"dnssdName", "ippUris"}, "ScannerConnect": {"dnssdName", "esclUrls"}} {
+		if got := strs(def(t, as, name)["required"]); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s required = %v, want %v", name, got, want)
+		}
+	}
+	for owner, want := range map[string]string{"StatusPrinter": "PrinterConnect", "StatusScanner": "ScannerConnect"} {
+		if got := prop(t, def(t, as, owner), "connect")["$ref"]; got != "#/$defs/"+want {
+			t.Errorf("%s.connect refers to %v, want %s", owner, got, want)
+		}
 	}
 	if got := prop(t, def(t, as, "Job"), "createdAt"); !reflect.DeepEqual(got, obj{"type": "string", "format": "date-time"}) {
 		t.Errorf("time.Time reflected as %v, want a date-time string", got)
@@ -318,12 +379,15 @@ func TestNullableSet(t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"ConfigResponse.config", "ConfigResponse.lastGood",
-		"Decision.device",
+		"DetectedDevice.printerDecision", "DetectedDevice.scannerDecision",
+		"DetectedDevice.suggestedPrinter", "DetectedDevice.suggestedScanner",
 		"EULA.text", "EULA.textSha256",
+		"PrinterDecision.device",
 		"Scan.error",
-		"Setup.decision", "Setup.inventory",
+		"ScannerDecision.device",
 		"SetupEULA.textSha256",
-		"StatusDevice.decision", "StatusDevice.inventory",
+		"StatusPrinter.decision", "StatusPrinter.device",
+		"StatusScanner.decision", "StatusScanner.device",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("nullable properties\n got  %v\n want %v", got, want)
@@ -332,65 +396,155 @@ func TestNullableSet(t *testing.T) {
 
 func TestStatusEnums(t *testing.T) {
 	as := decode(t, API())
-	status := def(t, as, "Status")
-	sub := func(name string) obj { return deref(t, as, prop(t, status, name)) }
+	enum := func(d, field string) []string { return strs(prop(t, def(t, as, d), field)["enum"]) }
 
-	mode := strs(prop(t, sub("device"), "mode")["enum"])
-	if !reflect.DeepEqual(mode, []string{"none", "usb", "simulated", "probe"}) {
-		t.Errorf("device.mode enum = %v", mode)
+	if mode := enum("StatusWorkload", "mode"); !reflect.DeepEqual(mode, []string{"none", "usb", "simulated", "probe"}) {
+		t.Errorf("StatusWorkload.mode enum = %v", mode)
 	}
 	for _, c := range []struct {
-		section, field, value string
+		def, field, value string
 	}{
-		{"device", "phase", "none"},
-		{"printer", "state", "unknown"},
-		{"scanner", "state", "unknown"},
-		{"config", "state", "missing"},
+		{"StatusWorkload", "phase", "absent"},
+		{"Status", "phase", "none"},
+		{"StatusPrinter", "phase", "none"},
+		{"StatusScanner", "phase", "none"},
+		{"StatusPrinter", "state", "unknown"},
+		{"StatusScanner", "state", "unknown"},
 	} {
-		enum := strs(prop(t, sub(c.section), c.field)["enum"])
-		if !slices.Contains(enum, c.value) || slices.Contains(enum, "") {
-			t.Errorf("%s.%s enum = %v, want it to contain %q and not \"\"", c.section, c.field, enum, c.value)
+		if e := enum(c.def, c.field); !slices.Contains(e, c.value) || slices.Contains(e, "") {
+			t.Errorf("%s.%s enum = %v, want it to contain %q and not \"\"", c.def, c.field, e, c.value)
+		}
+	}
+	cfg := deref(t, as, prop(t, def(t, as, "Status"), "config"))
+	if e := strs(prop(t, cfg, "state")["enum"]); !slices.Contains(e, "missing") || slices.Contains(e, "") {
+		t.Errorf("Status.config.state enum = %v", e)
+	}
+}
+
+// TestSetupValid checks that Setup suggestions as the controller builds them
+// (usb selector set, empty defaults) and a scan request without intent
+// validate against the API schema.
+func TestSetupValid(t *testing.T) {
+	usb := &config.USB{VendorID: "04e8", ProductID: "342e", Serial: "S1"}
+	dev := device.USBDevice{
+		VendorID: "04e8", ProductID: "342e", Serial: "S1", Bus: 1, Address: 9,
+		Interfaces: []device.USBInterface{{Class: 7, SubClass: 1, Protocol: 2}},
+	}
+	setup := apitypes.Setup{
+		Backend: "sim",
+		Devices: []apitypes.DetectedDevice{{
+			Device: dev, CanPrint: true, CanScan: true, Ignored: []string{},
+			SuggestedPrinter: &config.Printer{ID: "scx-4300", Name: "SCX-4300", Enabled: true, Mode: config.ModeUSB, USB: usb, Driver: config.Auto},
+			SuggestedScanner: &config.Scanner{ID: "scx-4300-scanner", Name: "SCX-4300 scanner", Enabled: true, Mode: config.ModeUSB, USB: usb, Backend: config.BackendAuto},
+			PrinterDecision:  &device.PrinterDecision{Family: "legacy", RequiredEULAs: []string{}, OptionalEULAs: []string{}, Rule: device.RuleModel, Device: &dev},
+			ScannerDecision:  &device.ScannerDecision{Family: "airsane", SaneBackends: []string{"xerox_mfp"}, Rule: device.RuleSANEIndex, Device: &dev},
+		}},
+		EULAs:     []apitypes.SetupEULA{},
+		Suggested: config.Default("Home"),
+	}
+	for ptr, v := range map[string]any{
+		"#/$defs/Setup":        setup,
+		"#/$defs/ScanSettings": apitypes.ScanSettings{Scanner: "s", Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"},
+	} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := compile(t, APIID, API(), ptr).Validate(instance(t, b)); err != nil {
+			t.Errorf("%s: %v\n%s", ptr, err, b)
 		}
 	}
 }
 
 // TestConfigEnumsParse pushes every enum value of the file schema through
-// config.Parse, so the validate and jsonschema tags cannot drift apart.
+// config.Parse, so the validate and jsonschema tags cannot drift apart. It
+// walks object properties and array items; an array step wraps its value in
+// a one-element list whose entry gets its required siblings.
 func TestConfigEnumsParse(t *testing.T) {
 	cs := decode(t, Config())
-	var walk func(d obj, path []string)
+	siblings := map[string]obj{
+		"printers":       {"id": "p", "name": "P"},
+		"scanners":       {"id": "s", "name": "S"},
+		"ignoredDevices": {"vendorId": "04e8", "productId": "342e", "roles": []any{"printer"}},
+	}
+	const item = "[]"
+	// wrap builds the document that sets path to v.
+	wrap := func(path []string, v any) obj {
+		doc := v
+		for i := len(path) - 1; i >= 0; i-- {
+			if path[i] == item {
+				if m, ok := doc.(obj); ok && i > 0 {
+					for k, sv := range siblings[path[i-1]] {
+						if _, set := m[k]; !set {
+							m[k] = sv
+						}
+					}
+				}
+				doc = []any{doc}
+				continue
+			}
+			doc = obj{path[i]: doc}
+		}
+		return doc.(obj)
+	}
 	n := 0
-	walk = func(d obj, path []string) {
-		props, _ := d["properties"].(obj)
-		for name, p := range props {
-			p := deref(t, cs, p.(obj))
-			here := append(slices.Clone(path), name)
-			if p["type"] == "object" {
-				walk(p, here)
-				continue
+	seen := map[string]bool{}
+	var walk func(p obj, path []string)
+	walk = func(p obj, path []string) {
+		p = deref(t, cs, p)
+		switch p["type"] {
+		case "object":
+			for name, c := range p["properties"].(obj) {
+				walk(c.(obj), append(slices.Clone(path), name))
 			}
-			enum, ok := p["enum"].([]any)
-			if !ok {
-				continue
+			return
+		case "array":
+			walk(p["items"].(obj), append(slices.Clone(path), item))
+			return
+		}
+		enum, ok := p["enum"].([]any)
+		if !ok {
+			return
+		}
+		seen[path[0]] = true
+		for _, v := range enum {
+			m := wrap(path, v)
+			m["apiVersion"], m["name"] = config.APIVersion, "x"
+			b, _ := json.Marshal(m)
+			if _, err := config.Parse(b); err != nil {
+				t.Errorf("%s = %v: %v (%s)", strings.Join(path, "."), v, err, b)
 			}
-			for _, v := range enum {
-				doc := v
-				for i := len(here) - 1; i >= 0; i-- {
-					doc = obj{here[i]: doc}
-				}
-				m := doc.(obj)
-				m["apiVersion"], m["name"] = config.APIVersion, "x"
-				b, _ := json.Marshal(m)
-				if _, err := config.Parse(b); err != nil {
-					t.Errorf("%s = %v: %v", strings.Join(here, "."), v, err)
-				}
-				n++
-			}
+			n++
 		}
 	}
-	walk(deref(t, cs, cs), nil)
-	if n < 25 {
+	walk(cs, nil)
+	if n < 40 {
 		t.Errorf("only %d enum values found", n)
+	}
+	for _, list := range []string{"printers", "scanners", "ignoredDevices"} {
+		if !seen[list] {
+			t.Errorf("no enum found under %s", list)
+		}
+	}
+}
+
+// TestPatterns checks that patterns with {m,n} survive invopop's split of the
+// jsonschema tag on commas.
+func TestPatterns(t *testing.T) {
+	cs := decode(t, Config())
+	printer := def(t, cs, "Printer")
+	if got := prop(t, printer, "id")["pattern"]; got != "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$" {
+		t.Errorf("printers.items.id pattern = %v", got)
+	}
+	defaults := deref(t, cs, prop(t, printer, "defaults"))
+	if got := prop(t, defaults, "mediaSource")["pattern"]; got != "^[a-z0-9][a-z0-9._-]{0,254}$" {
+		t.Errorf("printers.items.defaults.mediaSource pattern = %v", got)
+	}
+}
+
+func TestSchemaHeader(t *testing.T) {
+	if want := "# yaml-language-server: $schema=" + ConfigID + "\n"; config.SchemaHeader != want {
+		t.Errorf("config.SchemaHeader = %q, want %q", config.SchemaHeader, want)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -20,10 +21,12 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/ThePhaseless/pagewire/internal/api"
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/controller"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
@@ -210,11 +213,40 @@ func (in *instance) pollSetup(what string, ok func(apitypes.Setup) bool) apitype
 	}
 }
 
-func ready(s apitypes.Status) bool {
-	return s.Device.Phase == apitypes.PhaseReady && s.Printer.Available
+// printer and scanner return the Status entry with id, or a zero entry.
+func printer(s apitypes.Status, id string) apitypes.StatusPrinter {
+	for _, p := range s.Printers {
+		if p.ID == id {
+			return p
+		}
+	}
+	return apitypes.StatusPrinter{}
 }
 
-func (in *instance) print(ch <-chan sseEvent, media string) apitypes.Job {
+func scanner(s apitypes.Status, id string) apitypes.StatusScanner {
+	for _, sc := range s.Scanners {
+		if sc.ID == id {
+			return sc
+		}
+	}
+	return apitypes.StatusScanner{}
+}
+
+// ready reports every printer and scanner in ids ready, and the printers available.
+func ready(ids ...string) func(apitypes.Status) bool {
+	return func(s apitypes.Status) bool {
+		for _, id := range ids {
+			p, sc := printer(s, id), scanner(s, id)
+			printerReady := p.Phase == apitypes.PhaseReady && p.Available
+			if !printerReady && sc.Phase != apitypes.PhaseReady {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func (in *instance) print(ch <-chan sseEvent, printerID, media string) apitypes.Job {
 	in.t.Helper()
 	pdf, err := os.ReadFile("../../internal/printing/testdata/sample.pdf")
 	if err != nil {
@@ -222,19 +254,23 @@ func (in *instance) print(ch <-chan sseEvent, media string) apitypes.Job {
 	}
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	opts, _ := json.Marshal(apitypes.PrintOptions{Copies: 1, Sides: "one-sided", ColorMode: "auto", Media: media, Quality: "normal"})
+	opts, _ := json.Marshal(apitypes.PrintOptions{Copies: 1, PrintSettings: device.PrintSettings{Media: media}})
 	ow, _ := mw.CreateFormField("options")
 	_, _ = ow.Write(opts)
 	fw, _ := mw.CreateFormFile("file", "sample.pdf")
 	_, _ = fw.Write(pdf)
 	_ = mw.Close()
-	var job apitypes.Job
-	in.expect(http.MethodPost, "/api/v1/print", body.Bytes(), http.StatusAccepted, &job, "Content-Type", mw.FormDataContentType())
+	var res apitypes.PrintResult
+	in.expect(http.MethodPost, "/api/v1/printers/"+printerID+"/print", body.Bytes(), http.StatusAccepted, &res, "Content-Type", mw.FormDataContentType())
+	job := res.Job
+	if job.Printer != printerID {
+		in.t.Fatalf("job printer %q, want %q", job.Printer, printerID)
+	}
 	waitEventWithin(in, ch, apitypes.EventJob, fmt.Sprintf("job %d completed", job.ID), 30*time.Second, func(j apitypes.Job) bool {
 		if j.ID == job.ID && (j.State == "aborted" || j.State == "canceled") {
 			in.t.Fatalf("job %d ended %s", j.ID, j.State)
 		}
-		return j.ID == job.ID && j.State == "completed"
+		return j.ID == job.ID && j.Printer == printerID && j.State == "completed"
 	})
 	out, _ := filepath.Glob(filepath.Join(in.dataDir, "sim-output", "*"))
 	if len(out) == 0 {
@@ -274,6 +310,42 @@ func validateStatus(t *testing.T, b []byte) {
 	}
 }
 
+// ownerV1 is an owner-shaped pagewire/v1 file: the Samsung, monochrome, with comments.
+const ownerV1 = `# yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json
+# The office printer.
+apiVersion: pagewire/v1
+name: Samsung
+location: Office # by the window
+device:
+  mode: usb
+  usb:
+    vendorId: "04e8"
+    productId: "342e"
+  driver: auto
+print:
+  maxUploadMiB: 50 # big scans
+  defaults:
+    colorMode: monochrome
+`
+
+// officeV2 serves the office fixture: the HP and the Samsung as printer and
+// scanner, a simulated printer and the LiDE scanner.
+const officeV2 = `apiVersion: pagewire/v2
+name: Office
+printers:
+  - {id: hp, name: HP OfficeJet, usb: {vendorId: "03f0", productId: "2754", serial: FAKE0005}}
+  - {id: scx, name: Samsung SCX-4300, usb: {vendorId: "04e8", productId: "342e", serial: FAKE0008}}
+  - {id: sim, name: Simulated, mode: simulated}
+scanners:
+  - {id: hp-scan, name: HP scanner, usb: {vendorId: "03f0", productId: "2754", serial: FAKE0005}}
+  - {id: scx-scan, name: Samsung scanner, usb: {vendorId: "04e8", productId: "342e", serial: FAKE0008}}
+  - {id: lide, name: CanoScan LiDE, usb: {vendorId: "04a9", productId: "1904", serial: FAKE0011}}
+`
+
+func hasItem(s apitypes.Status, item string) bool {
+	return slices.ContainsFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == item })
+}
+
 // TestEndToEnd runs the whole control plane in-process in sim mode. Every
 // request and wait shares one 2 min deadline, so a hang fails the test.
 func TestEndToEnd(t *testing.T) {
@@ -289,27 +361,31 @@ func TestEndToEnd(t *testing.T) {
 		validateStatus(t, raw)
 		var first apitypes.Status
 		_ = json.Unmarshal(raw, &first)
-		if first.Config.State != apitypes.ConfigMissing || !slices.Contains([]string{"none", "usb", "simulated", "probe"}, first.Device.Mode) {
-			t.Fatalf("first Status: config.state %q, device.mode %q", first.Config.State, first.Device.Mode)
+		if first.Config.State != apitypes.ConfigMissing || !slices.Contains([]string{"none", "probing"}, first.Phase) || len(first.Printers) != 0 {
+			t.Fatalf("first Status: config.state %q, phase %q, printers %+v", first.Config.State, first.Phase, first.Printers)
 		}
 		in.expect(http.MethodGet, "/api/v1/config", nil, http.StatusNotFound, nil)
-		setup := in.pollSetup("the ippusb-mfp inventory and decision", func(s apitypes.Setup) bool {
-			return s.Inventory != nil && len(s.Inventory.Devices) > 0 && s.Decision != nil
+		setup := in.pollSetup("the ippusb-mfp device and suggestions", func(s apitypes.Setup) bool {
+			return len(s.Devices) == 1 && s.Devices[0].SuggestedPrinter != nil && s.Devices[0].SuggestedScanner != nil
 		})
 		if !setup.Required || !setup.USBResourceConfigured || setup.Backend != "sim" {
 			t.Fatalf("setup: required %v, usbResourceConfigured %v, backend %q", setup.Required, setup.USBResourceConfigured, setup.Backend)
 		}
-		if d := setup.Inventory.Devices[0]; d.VendorID != "03f0" || d.ProductID != "2754" {
-			t.Fatalf("setup inventory is not the ippusb-mfp fixture: %+v", d)
+		d := setup.Devices[0]
+		if d.Device.VendorID != "03f0" || d.Device.ProductID != "2754" || !d.CanPrint || !d.CanScan {
+			t.Fatalf("setup device is not the ippusb-mfp fixture: %+v", d)
 		}
-		if setup.Decision.Rule != "ipp-over-usb" || setup.Decision.Printer != "ipp-usb" {
-			t.Fatalf("setup decision: %+v", setup.Decision)
+		if d.PrinterDecision == nil || d.PrinterDecision.Rule != "ipp-over-usb" || d.PrinterDecision.Family != "ipp-usb" {
+			t.Fatalf("setup printer decision: %+v", d.PrinterDecision)
 		}
 
 		ch := in.events()
 
-		// 2. PUT the suggested config.
-		body, _ := json.Marshal(setup.Suggested)
+		// 2. PUT the suggested config with the suggested entries.
+		cfg := setup.Suggested
+		cfg.Printers, cfg.Scanners = []config.Printer{*d.SuggestedPrinter}, []config.Scanner{*d.SuggestedScanner}
+		pid, sid := d.SuggestedPrinter.ID, d.SuggestedScanner.ID
+		body, _ := json.Marshal(cfg)
 		var created apitypes.ConfigResponse
 		in.expect(http.MethodPut, "/api/v1/config", body, http.StatusCreated, &created, "If-None-Match", "*", "Content-Type", "application/json")
 		if created.State != apitypes.ConfigApplied || created.Config == nil {
@@ -317,20 +393,20 @@ func TestEndToEnd(t *testing.T) {
 		}
 
 		// 3. Ready.
-		st := waitStatus(in, ch, "phase ready", ready)
+		st := waitStatus(in, ch, "printer and scanner ready", ready(pid, sid))
 		if err := healthcheck(ctx, []string{"--listen", in.addr}); err != nil {
 			t.Fatalf("healthcheck: %v", err)
 		}
 
 		// 4. Print, confirmed by a job event.
 		media := "iso_a4_210x297mm"
-		if len(st.Printer.Media) > 0 {
-			media = st.Printer.Media[0]
+		if m := printer(st, pid).Media; len(m) > 0 {
+			media = m[0]
 		}
-		in.print(ch, media)
+		in.print(ch, pid, media)
 
 		// 5. Scan two ADF pages into a PDF.
-		set, _ := json.Marshal(apitypes.ScanSettings{Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"})
+		set, _ := json.Marshal(apitypes.ScanSettings{Scanner: sid, Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"})
 		var scan apitypes.Scan
 		in.expect(http.MethodPost, "/api/v1/scans", set, http.StatusAccepted, &scan, "Content-Type", "application/json")
 		done := waitEvent(in, ch, apitypes.EventScan, "scan completed", func(s apitypes.Scan) bool {
@@ -339,8 +415,8 @@ func TestEndToEnd(t *testing.T) {
 			}
 			return s.ID == scan.ID && s.State == "completed"
 		})
-		if done.Pages != 2 {
-			t.Fatalf("scan pages %d, want 2", done.Pages)
+		if done.Pages != 2 || done.Scanner != sid {
+			t.Fatalf("scan pages %d on %q, want 2 on %q", done.Pages, done.Scanner, sid)
 		}
 		code, pdf := in.do(http.MethodGet, "/api/v1/scans/"+scan.ID+"/download", nil)
 		if code != http.StatusOK || !bytes.HasPrefix(pdf, []byte("%PDF-")) {
@@ -355,7 +431,7 @@ func TestEndToEnd(t *testing.T) {
 		in.writeConfig("# hand-written comment\n" + string(file))
 		var cur apitypes.ConfigResponse
 		in.expect(http.MethodGet, "/api/v1/config", nil, http.StatusOK, &cur)
-		patch := []byte(`{"name":"Renamed printer"}`)
+		patch := []byte(`{"name":"Renamed home"}`)
 		var conflict apitypes.ConfigResponse
 		in.expect(http.MethodPatch, "/api/v1/config", patch, http.StatusPreconditionFailed, &conflict,
 			"If-Match", `"`+created.Etag+`"`, "Content-Type", "application/merge-patch+json")
@@ -365,7 +441,7 @@ func TestEndToEnd(t *testing.T) {
 		var patched apitypes.ConfigResponse
 		in.expect(http.MethodPatch, "/api/v1/config", patch, http.StatusOK, &patched,
 			"If-Match", `"`+cur.Etag+`"`, "Content-Type", "application/merge-patch+json")
-		if patched.Config == nil || patched.Config.Name != "Renamed printer" {
+		if patched.Config == nil || patched.Config.Name != "Renamed home" {
 			t.Fatalf("PATCH 200 body: %+v", patched)
 		}
 		good, err := os.ReadFile(in.cfgPath)
@@ -377,9 +453,9 @@ func TestEndToEnd(t *testing.T) {
 		}
 
 		// 7. A broken hand edit: invalid with a line, printer still ready.
-		in.writeConfig("apiVersion: pagewire/v1\nname: [unclosed\n")
+		in.writeConfig("apiVersion: pagewire/v2\nname: [unclosed\n")
 		waitStatus(in, ch, "config invalid with a line", func(s apitypes.Status) bool {
-			return s.Config.State == apitypes.ConfigInvalid && len(s.Config.Errors) > 0 && s.Config.Errors[0].Line > 0 && ready(s)
+			return s.Config.State == apitypes.ConfigInvalid && len(s.Config.Errors) > 0 && s.Config.Errors[0].Line > 0 && ready(pid)(s)
 		})
 		var invalid412 apitypes.ConfigResponse
 		in.expect(http.MethodPatch, "/api/v1/config", patch, http.StatusPreconditionFailed, &invalid412,
@@ -391,16 +467,19 @@ func TestEndToEnd(t *testing.T) {
 		// 8. Fixed again.
 		in.writeConfig(string(good))
 		waitStatus(in, ch, "config applied again", func(s apitypes.Status) bool {
-			return s.Config.State == apitypes.ConfigApplied && ready(s)
+			return s.Config.State == apitypes.ConfigApplied && ready(pid, sid)(s)
 		})
 
 		// 9. An unknown EULA: valid YAML, invalid config, printer still ready.
-		in.writeConfig("apiVersion: pagewire/v1\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n      textSha256: " + strings.Repeat("a", 64) + "\n")
+		in.writeConfig("apiVersion: pagewire/v2\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n      textSha256: " + strings.Repeat("a", 64) + "\n")
 		waitStatus(in, ch, "unknown EULA rejected", func(s apitypes.Status) bool {
-			return s.Config.State == apitypes.ConfigInvalid && ready(s) && slices.ContainsFunc(s.Config.Errors, func(e config.FieldError) bool {
+			return s.Config.State == apitypes.ConfigInvalid && ready(pid)(s) && slices.ContainsFunc(s.Config.Errors, func(e config.FieldError) bool {
 				return e.Path == "/licenses/acceptedEulas/0"
 			})
 		})
+		if hasItem(st, migrationItem) {
+			t.Fatalf("a v2 install has a %s item: %+v", migrationItem, st.Reconcile)
+		}
 	})
 
 	t.Run("pappl", func(t *testing.T) {
@@ -417,43 +496,139 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("eula %+v", eula)
 		}
 		ch := in.events()
-		in.writeConfig("apiVersion: pagewire/v1\nname: HP test\ndevice:\n  mode: usb\nlicenses:\n  acceptedEulas:\n" +
+		in.writeConfig("apiVersion: pagewire/v2\nname: HP test\nprinters:\n  - id: hp\n    name: HP test\nlicenses:\n  acceptedEulas:\n" +
 			"    - id: hplip-plugin\n      version: \"3.24.4\"\n      textSha256: " + *eula.TextSHA256 + "\n")
 		st := waitStatus(in, ch, "PAPPL printer ready with the blob installed", func(s apitypes.Status) bool {
-			return ready(s) && strings.HasPrefix(s.Printer.URI, "ipp://127.0.0.1:") &&
-				slices.ContainsFunc(s.Device.Blobs, func(b device.BlobStatus) bool { return b.ID == "hplip-plugin" && b.State == "installed" })
+			return ready("hp")(s) && strings.HasPrefix(printer(s, "hp").URI, "ipp://127.0.0.1:") &&
+				slices.ContainsFunc(s.Workloads, func(w apitypes.StatusWorkload) bool {
+					return slices.ContainsFunc(w.Blobs, func(b device.BlobStatus) bool { return b.ID == "hplip-plugin" && b.State == "installed" })
+				})
 		})
-		if st.Device.Decision == nil || st.Device.Decision.Printer != "hplip" {
-			t.Fatalf("decision: %+v", st.Device.Decision)
+		if dec := printer(st, "hp").Decision; dec == nil || dec.Family != "hplip" {
+			t.Fatalf("decision: %+v", dec)
 		}
-		in.print(ch, "iso_a4_210x297mm")
+		in.print(ch, "hp", "iso_a4_210x297mm")
 	})
 
 	t.Run("no-usb", func(t *testing.T) {
 		t.Parallel()
 		in := startServe(t, ctx, t.TempDir(), "--sim-device=none")
 		setup := in.pollSetup("the no-USB setup", func(apitypes.Setup) bool { return true })
-		if setup.USBResourceConfigured || setup.Inventory != nil || setup.Suggested.Device.Mode != "simulated" {
-			t.Fatalf("setup: usbResourceConfigured %v, inventory %v, suggested mode %q",
-				setup.USBResourceConfigured, setup.Inventory, setup.Suggested.Device.Mode)
+		if setup.USBResourceConfigured || len(setup.Devices) != 0 {
+			t.Fatalf("setup: usbResourceConfigured %v, devices %+v", setup.USBResourceConfigured, setup.Devices)
 		}
 		ch := in.events()
-		body, _ := json.Marshal(setup.Suggested)
+		cfg := setup.Suggested
+		cfg.Printers = []config.Printer{{ID: "sim", Name: "Simulated", Enabled: true, Mode: config.ModeSimulated, Driver: config.Auto}}
+		cfg.Scanners = []config.Scanner{{ID: "sim-scan", Name: "Simulated scanner", Enabled: true, Mode: config.ModeSimulated, Backend: config.BackendAuto}}
+		body, _ := json.Marshal(cfg)
 		in.expect(http.MethodPut, "/api/v1/config", body, http.StatusCreated, nil, "If-None-Match", "*", "Content-Type", "application/json")
-		waitStatus(in, ch, "simulated device ready", ready)
+		waitStatus(in, ch, "simulated devices ready", ready("sim", "sim-scan"))
 		_, raw := in.do(http.MethodGet, "/api/v1/status", nil)
 		validateStatus(t, raw)
 		var doc struct {
-			Device struct {
-				Mode     string                     `json:"mode"`
+			Printers []struct {
 				Decision map[string]json.RawMessage `json:"decision"`
-			} `json:"device"`
+				Device   json.RawMessage            `json:"device"`
+			} `json:"printers"`
 		}
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			t.Fatal(err)
 		}
-		if dev, ok := doc.Device.Decision["device"]; doc.Device.Mode != "simulated" || !ok || string(dev) != "null" {
-			t.Fatalf("want mode simulated and \"device\":null in decision, got %s", raw)
+		if len(doc.Printers) != 1 || string(doc.Printers[0].Decision["device"]) != "null" || string(doc.Printers[0].Device) != "null" {
+			t.Fatalf("want \"device\":null in the simulated printer and its decision, got %s", raw)
+		}
+	})
+
+	t.Run("office", func(t *testing.T) {
+		t.Parallel()
+		in := startServe(t, ctx, t.TempDir(), "--sim-device=office")
+		ch := in.events()
+		in.writeConfig(officeV2)
+		// The Samsung's legacy PAPPL queue goes through the sim's system URL mapping.
+		st := waitStatus(in, ch, "three printers and three scanners ready", ready("hp", "scx", "sim", "hp-scan", "scx-scan", "lide"))
+		if len(st.Printers) != 3 || len(st.Scanners) != 3 {
+			t.Fatalf("printers %d, scanners %d", len(st.Printers), len(st.Scanners))
+		}
+		if uris := []string{printer(st, "hp").URI, printer(st, "scx").URI, printer(st, "sim").URI}; uris[0] == uris[1] || uris[1] == uris[2] || uris[0] == uris[2] {
+			t.Fatalf("printers share an endpoint: %v", uris)
+		}
+		// A photo scan on the Samsung, which reports no intents, is refused before it starts.
+		set, _ := json.Marshal(apitypes.ScanSettings{Scanner: "scx-scan", Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf", Intent: "photo"})
+		in.expect(http.MethodPost, "/api/v1/scans", set, http.StatusUnprocessableEntity, nil, "Content-Type", "application/json")
+	})
+
+	t.Run("v1-migrated", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "pagewire.yaml"), []byte(ownerV1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		in := startServe(t, ctx, dir, "--sim-device=samsung-scx4300-mfp")
+		deadline := time.Now().Add(waitFor)
+		var file []byte
+		for {
+			file, _ = os.ReadFile(in.cfgPath)
+			if !config.IsV1(file) || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		for _, want := range []string{"apiVersion: pagewire/v2", "# The office printer.", "# big scans", "maxUploadMiB: 50"} {
+			if !bytes.Contains(file, []byte(want)) {
+				t.Fatalf("rewritten file lacks %q:\n%s", want, file)
+			}
+		}
+		ch := in.events()
+		st := waitStatus(in, ch, "the migrated printer and scanner ready", ready("printer", "scanner"))
+		if p := printer(st, "printer"); p.Location != "Office" {
+			t.Fatalf("printer %+v", p)
+		}
+		if hasItem(st, migrationItem) {
+			t.Fatalf("a successful rewrite left a %s item: %+v", migrationItem, st.Reconcile)
+		}
+	})
+
+	t.Run("v1-read-only", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root can write anywhere")
+		}
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "pagewire.yaml")
+		if err := os.WriteFile(cfgPath, []byte(ownerV1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(cfgDir, 0o555); err != nil { //nolint:gosec // read-only on purpose
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(cfgDir, 0o700) }) //nolint:gosec // let TempDir clean up
+		in := startServe(t, ctx, t.TempDir(), "--sim-device=samsung-scx4300-mfp", "--config="+cfgPath)
+		in.cfgPath = cfgPath
+		ch := in.events()
+		st := waitStatus(in, ch, "the migrated entries and a failed rewrite", func(s apitypes.Status) bool {
+			return len(s.Printers) == 1 && s.Printers[0].ID == "printer" && len(s.Scanners) == 1 && s.Scanners[0].ID == "scanner" &&
+				slices.ContainsFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == migrationItem && !r.OK })
+		})
+		if file, _ := os.ReadFile(cfgPath); string(file) != ownerV1 { //nolint:gosec // the test's own temp dir
+			t.Fatalf("the read-only file changed:\n%s", file)
+		}
+		if s := st.Config.State; s != apitypes.ConfigApplied {
+			t.Fatalf("config state %q, want applied (the migrated config runs)", s)
+		}
+
+		// Writable again: the next content change is rewritten and the item turns ok.
+		if err := os.Chmod(cfgDir, 0o700); err != nil { //nolint:gosec // the test's own temp dir
+			t.Fatal(err)
+		}
+		in.writeConfig(strings.Replace(ownerV1, "# The office printer.", "# The hall printer.", 1))
+		waitStatus(in, ch, "the config-migration item ok", func(s apitypes.Status) bool {
+			return slices.ContainsFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool {
+				return r.Item == migrationItem && r.OK && r.Message == "config file rewritten as pagewire/v2"
+			})
+		})
+		if file, err := os.ReadFile(cfgPath); err != nil || config.IsV1(file) || !bytes.Contains(file, []byte("# The hall printer.")) { //nolint:gosec // the test's own temp dir
+			t.Fatalf("not rewritten as v2 with its comments (%v):\n%s", err, file)
 		}
 	})
 
@@ -514,10 +689,12 @@ func TestValidate(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yaml")
 	bad := filepath.Join(dir, "bad.yaml")
-	_ = os.WriteFile(good, []byte("apiVersion: pagewire/v1\nname: Printer\n"), 0o600)
+	_ = os.WriteFile(good, []byte("apiVersion: pagewire/v1\nname: Printer\n"), 0o600) // v1 is migrated in memory
+	good2 := filepath.Join(dir, "good2.yaml")
+	_ = os.WriteFile(good2, []byte("apiVersion: pagewire/v2\nname: Home\nprinters:\n  - id: p1\n    name: Printer\n"), 0o600)
 	_ = os.WriteFile(bad, []byte("apiVersion: pagewire/v1\nname: Printer\ndevice:\n  mode: bogus\n"), 0o600)
 	var out, errOut bytes.Buffer
-	if code := validate([]string{good}, &out, &errOut); code != 0 {
+	if code := validate([]string{good, good2}, &out, &errOut); code != 0 {
 		t.Fatalf("good file: exit %d, %s", code, errOut.String())
 	}
 	out.Reset()
@@ -875,5 +1052,37 @@ func TestSetMemoryLimit(t *testing.T) {
 	setMemoryLimit(path)
 	if got := debug.SetMemoryLimit(-1); got != before {
 		t.Errorf("limit = %d with GOMEMLIMIT set, want it untouched (%d)", got, before)
+	}
+}
+
+func TestStatusLookups(t *testing.T) {
+	caps := device.PrinterCaps{Formats: []string{"application/pdf"}, ColorModes: []string{"monochrome"}}
+	st := apitypes.Status{
+		Printers: []apitypes.StatusPrinter{
+			{ID: "on", Enabled: true, Available: true, URI: "ipp://a/ipp/print", Capabilities: caps},
+			{ID: "off", Enabled: false, Available: true, URI: "ipp://b/ipp/print", Capabilities: caps},
+			{ID: "down", Enabled: true, Available: false, Capabilities: caps},
+			{ID: "nocaps", Enabled: true, Available: true, URI: "ipp://c/ipp/print"},
+		},
+		Scanners: []apitypes.StatusScanner{
+			{ID: "on", Enabled: true, URL: "http://a/eSCL"},
+			{ID: "off", Enabled: false, URL: "http://b/eSCL"},
+			{ID: "down", Enabled: true},
+		},
+	}
+	for id, want := range map[string]error{"on": nil, "off": api.ErrUnknownPrinter, "nope": api.ErrUnknownPrinter, "down": api.ErrNoPrinter} {
+		if uri, err := printerURI(st, id); !errors.Is(err, want) || (err == nil) != (uri != "") {
+			t.Errorf("printerURI(%s) = %q, %v; want %v", id, uri, err, want)
+		}
+	}
+	for id, want := range map[string]error{"on": nil, "off": api.ErrUnknownScanner, "nope": api.ErrUnknownScanner, "down": scanning.ErrNoScanner} {
+		if url, err := scannerURL(st, id); !errors.Is(err, want) || (err == nil) != (url != "") {
+			t.Errorf("scannerURL(%s) = %q, %v; want %v", id, url, err, want)
+		}
+	}
+	for id, want := range map[string]bool{"on": true, "off": false, "down": false, "nocaps": false, "nope": false} {
+		if got, ok := printerCaps(st, id); ok != want || (ok && !slices.Equal(got.ColorModes, caps.ColorModes)) {
+			t.Errorf("printerCaps(%s) = %+v, %v; want %v", id, got, ok, want)
+		}
 	}
 }

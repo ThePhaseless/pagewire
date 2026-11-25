@@ -3,12 +3,15 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
@@ -31,6 +34,8 @@ func scanError(w http.ResponseWriter, err error) {
 	case errors.As(err, &se):
 		slog.Error("scan storage", "err", err)
 		writeProblem(w, http.StatusInternalServerError, "storage-error", "the scan could not be stored; the server log has the details")
+	case errors.Is(err, ErrUnknownScanner):
+		writeProblem(w, http.StatusNotFound, "scanner-not-found", "no enabled scanner has this id")
 	case errors.Is(err, scanning.ErrNoScanner):
 		writeProblem(w, http.StatusServiceUnavailable, "scanner-unavailable", err.Error())
 	default:
@@ -39,8 +44,8 @@ func scanError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *server) getScanner(w http.ResponseWriter, r *http.Request) {
-	caps, err := s.d.Scans.Caps(r.Context())
+func (s *server) getScannerCaps(w http.ResponseWriter, r *http.Request) {
+	caps, err := s.d.Scans.Caps(r.Context(), r.PathValue("id"))
 	if err != nil {
 		scanError(w, err)
 		return
@@ -57,12 +62,50 @@ func (s *server) postScan(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "bad-request", err.Error())
 		return
 	}
+	if err := scanning.Validate(set); err != nil {
+		scanError(w, err)
+		return
+	}
+	caps, err := s.d.Scans.Caps(r.Context(), set.Scanner)
+	switch {
+	case errors.Is(err, ErrUnknownScanner):
+		scanError(w, err)
+		return
+	case err == nil:
+		if errs := unsupportedSettings(set, caps); len(errs) > 0 {
+			writeProblem(w, http.StatusUnprocessableEntity, "invalid-settings", "the scanner does not offer these settings", errs...)
+			return
+		}
+	default:
+		// Caps unreadable: the scan itself checks its input against the scanner.
+		slog.Debug("scan caps unavailable; starting without the caps check", "scanner", set.Scanner, "err", err)
+	}
 	sc, err := s.d.Scans.Start(set)
 	if err != nil {
 		scanError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, sc)
+}
+
+// unsupportedSettings are the settings caps does not offer. A resolution or
+// colour mode is checked only when the scanner lists any, as the scan itself
+// does not check them.
+func unsupportedSettings(set apitypes.ScanSettings, caps apitypes.ScannerCaps) []config.FieldError {
+	var errs []config.FieldError
+	if !slices.Contains(caps.Sources, set.Source) {
+		errs = append(errs, config.FieldError{Path: "/source", Message: "the scanner has no " + set.Source + " input"})
+	}
+	if len(caps.Resolutions) > 0 && !slices.Contains(caps.Resolutions, set.Resolution) {
+		errs = append(errs, config.FieldError{Path: "/resolution", Message: fmt.Sprintf("the scanner does not offer %d dpi", set.Resolution)})
+	}
+	if len(caps.ColorModes) > 0 && !slices.Contains(caps.ColorModes, set.ColorMode) {
+		errs = append(errs, config.FieldError{Path: "/colorMode", Message: "the scanner does not offer " + set.ColorMode})
+	}
+	if set.Intent != "" && !slices.Contains(caps.Intents, set.Intent) {
+		errs = append(errs, config.FieldError{Path: "/intent", Message: "the scanner does not offer the " + set.Intent + " intent"})
+	}
+	return errs
 }
 
 func (s *server) getScans(w http.ResponseWriter, _ *http.Request) {

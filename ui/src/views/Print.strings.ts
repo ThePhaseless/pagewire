@@ -48,28 +48,10 @@ export const printStrings = {
   options: {
     title: "Options",
     copies: "Copies",
-    copiesError: "Enter 1 to 99 copies.",
-    sides: {
-      label: "Sides",
-      "one-sided": "One-sided",
-      "two-sided-long-edge": "Two-sided, flip on long edge",
-      "two-sided-short-edge": "Two-sided, flip on short edge",
-    },
-    colorMode: {
-      label: "Colour",
-      auto: "Automatic",
-      color: "Colour",
-      monochrome: "Black and white",
-    },
-    media: "Paper size",
-    mediaSize: (name: string, width: string, height: string, unit: string) =>
-      `${name} (${width} × ${height} ${unit})`,
-    quality: {
-      label: "Quality",
-      draft: "Draft",
-      normal: "Normal",
-      high: "High",
-    },
+    copiesError: (max: number) => `Enter 1 to ${max} copies.`,
+    more: "More options",
+    unknown: "The options this printer offers show once it is connected.",
+    none: "This printer offers no options to choose.",
   },
   /** The Print button: `printable` of the `total` files listed go out, `copies` of each. */
   submit: (printable: number, total: number, copies: number) => {
@@ -77,8 +59,9 @@ export const printStrings = {
     const files = printable < total ? `${printable} of ${total} files` : `${total} files`;
     return copies > 1 ? `Print ${files}, ${copies} copies each` : `Print ${files}`;
   },
-  summary: (copies: number, media: string, sides: string) =>
-    `${copies} ${copies === 1 ? "copy" : "copies"} · ${media} · ${sides}`,
+  /** Copies, then the labels of the paper size and sides when they are sent. */
+  summary: (copies: number, parts: string[]) =>
+    [`${copies} ${copies === 1 ? "copy" : "copies"}`, ...parts].join(" · "),
   sent: (name: string) => `Sent ${name} to the printer`,
   failed: (name: string) => `Could not print ${name}`,
   jobs: {

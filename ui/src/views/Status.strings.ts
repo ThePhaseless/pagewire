@@ -1,54 +1,33 @@
-// Copy for the Status view. Shared words (Copy, Copied, the page title) come from ../strings.
-import { setupStrings } from "./Setup.strings";
+// Copy for the Status view. Shared words (Copy, Copied, the page title, device phases, driver
+// families and rules) come from ../strings.
 
 export const statusStrings = {
-  description: "What the printer and scanner are doing, and how to reach them from other devices.",
-  deviceError: "The device has a problem",
+  description:
+    "What your printers and scanners are doing, and how to reach them from other devices.",
+  workloadError: "A device workload has a problem",
+  workloadOn: (node: string) => `Devices on ${node}`,
+  empty: {
+    title: "No printer or scanner in use",
+    body: "Switch one on in Settings, or detect a newly plugged-in device and add it.",
+    detect: "Detect and add devices",
+  },
   device: {
-    title: "Device",
-    phase: {
-      none: "Not started",
-      probing: "Looking for the printer",
-      deploying: "Starting",
-      ready: "Ready",
-      degraded: "Needs attention",
-      error: "Error",
-    },
-    mode: {
-      none: "Not running",
-      usb: "USB printer",
-      simulated: "Simulated printer",
-      probe: "Looking for a USB printer",
-    },
-    modeLabel: "Mode",
-    deviceLabel: "Device",
     simulatedDevice: "Simulated device",
-    noDecision: "No printer found yet",
-    notFound: "Printer not found",
-    simulatedName: (name: string) => `${name} (simulated)`,
+    unnamedDevice: "Unnamed USB device",
+    deviceLabel: "Device",
     usbLabel: "USB",
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
-    unnamedDevice: "Unnamed USB device",
+    nodeLabel: "Node",
     ruleLabel: "Chosen by",
-    rules: setupStrings.rules,
     printerFamilyLabel: "Printer driver",
+    scannerFamilyLabel: "Scanner driver",
+    saneBackendsLabel: "SANE backends",
     driverLabel: "Driver",
     appDriver: "Picked by the printer application",
-    noDriver: setupStrings.noDriver,
     chooseDriver: "Choose a driver in Settings",
-    scannerFamilyLabel: "Scanner driver",
     noFamily: "None",
-    families: {
-      "ipp-usb": "Driverless (IPP over USB)",
-      ps: "PostScript",
-      hplip: "HP (HPLIP)",
-      gutenprint: "Gutenprint",
-      ghostscript: "Ghostscript",
-      legacy: "Classic CUPS drivers",
-      airsane: "SANE",
-      sim: "Simulated",
-    } as Record<string, string>,
+    warningsLabel: "Settings this device does not offer",
     blobsTitle: "Vendor files",
     blobState: {
       installed: "Installed",
@@ -61,7 +40,7 @@ export const statusStrings = {
     title: "On your network",
     discoverable: "Discoverable on your network",
     notDiscoverable:
-      "Not discoverable on your network yet. Devices find the printer once it is running.",
+      "Not discoverable on your network yet. Other devices find it once it is running.",
     types: {
       "_ipp._tcp": "Printer",
       "_uscan._tcp": "Scanner",
@@ -69,7 +48,6 @@ export const statusStrings = {
     port: (port: number) => `port ${port}`,
   },
   printer: {
-    title: "Printer",
     state: {
       idle: "Ready",
       processing: "Printing",
@@ -97,21 +75,20 @@ export const statusStrings = {
       "moving-to-paused": "Pausing",
       "spool-area-full": "The print queue is full",
     } as Record<string, string>,
-    unavailable: "The printer appears here once the device is running.",
+    unavailable: "You can print here once the printer is running.",
     open: "Print a document",
     suppliesLabel: "Supplies",
     unnamedSupply: "Supply",
     levelUnknown: "level unknown",
   },
   scanner: {
-    title: "Scanner",
     state: {
       idle: "Ready",
       processing: "Scanning",
       stopped: "Stopped",
       unknown: "Waiting for the scanner",
     },
-    unavailable: "The scanner appears here once the device is running.",
+    unavailable: "You can scan here once the scanner is running.",
     open: "Scan a document",
   },
   jobs: {
@@ -120,6 +97,7 @@ export const statusStrings = {
     emptyBody: "Jobs sent from this page or from other devices show up here.",
     unavailable: "Jobs appear here once the printer is ready.",
     seeAll: "All jobs",
+    seeAllOf: (name: string) => `All jobs on ${name}`,
     state: {
       pending: "Waiting",
       processing: "Printing",
@@ -130,8 +108,24 @@ export const statusStrings = {
       stopped: "Stopped",
     },
   },
+  scans: {
+    title: "Recent scans",
+    empty: "No scans yet",
+    emptyBody: "Scans you make on the Scan page are kept here for a while.",
+    seeAll: "All scans",
+    pages: (n: number) => (n === 1 ? "1 page" : `${n} pages`),
+    state: {
+      scanning: "Scanning",
+      completed: "Done",
+      failed: "Failed",
+      canceled: "Canceled",
+    },
+  },
+  system: {
+    title: "System",
+    configLabel: "Settings file",
+  },
   config: {
-    title: "Settings file",
     state: {
       missing: "No settings file",
       applied: "Applied",
@@ -145,15 +139,20 @@ export const statusStrings = {
   reconcile: {
     title: "Problems",
     items: {
-      device: "Printer and scanner",
       config: "Settings file",
+      "config-migration": "Settings file update",
       "data-dir": "Data directory",
+      nodes: "Nodes with devices",
     } as Record<string, string>,
+    /** `workload/<node>` items; `default` is the one workload of a single-node install. */
+    workload: (node: string) => (node === "default" ? "Devices" : `Devices on ${node}`),
   },
   connect: {
     title: "Connect a device",
-    intro:
-      "Phones, tablets and computers on the same network find the printer by itself. Pick your system for the steps.",
+    printerIntro:
+      "Phones, tablets and computers on the same network find this printer by themselves. Pick your system for the steps.",
+    scannerIntro:
+      "Phones, tablets and computers on the same network find this scanner by themselves. Pick your system for the steps.",
     nameLabel: "Advertised name",
     noName: "Not advertised yet",
     osLabel: "Your system",
@@ -163,29 +162,43 @@ export const statusStrings = {
       android: "Android",
       linux: "Linux",
     },
-    steps: {
+    printerSteps: {
       windows: (name: string) => [
         "Open Settings, then Bluetooth & devices, then Printers & scanners, and choose Add device.",
-        `Pick ${name} when it appears. Windows 11 adds the scanner the same way.`,
+        `Pick ${name} when it appears.`,
         "If it does not appear, choose Add manually, then Add a printer using an IP address or hostname, set the device type to IPP Device and paste the printer address below.",
       ],
       apple: (name: string) => [
         `On iPhone and iPad, choose Print from the share menu and pick ${name}. There is nothing to install.`,
         `On a Mac, open System Settings, then Printers & Scanners, click Add Printer, Scanner or Fax, and pick ${name}.`,
-        "Scan from the same settings pane or from Image Capture.",
       ],
       android: (name: string) => [
         "Open a document or photo, choose Print, then Select a printer, then All printers.",
         `Pick ${name}. The built-in print service handles it without an app.`,
-        "To scan, use this web page or a scanning app such as Mopria Scan.",
       ],
       linux: (name: string) => [
         `Most desktops list ${name} in their printer settings automatically.`,
         "Otherwise add it with: lpadmin -p pagewire -E -m everywhere -v followed by the printer address below.",
-        "Scanning works through sane-airscan, for example in Document Scanner or Skanlite.",
+      ],
+    },
+    scannerSteps: {
+      windows: (name: string) => [
+        "Open Settings, then Bluetooth & devices, then Printers & scanners, and choose Add device.",
+        `Pick ${name} when it appears. Windows 11 adds network scanners without a driver.`,
+      ],
+      apple: (name: string) => [
+        `On a Mac, open System Settings, then Printers & Scanners, click Add Printer, Scanner or Fax, and pick ${name}.`,
+        "Scan from the same settings pane or from Image Capture.",
+      ],
+      android: (_name: string) => [
+        "Scan from this web page, or with a scanning app such as Mopria Scan.",
+      ],
+      linux: (name: string) => [
+        `Scanning works through sane-airscan, which finds ${name} by itself, for example in Document Scanner or Skanlite.`,
       ],
     },
     thisPrinter: "the printer",
+    thisScanner: "the scanner",
     manualTitle: "Manual addresses",
     printerAddress: "Printer address",
     scannerAddress: "Scanner address",
@@ -193,6 +206,6 @@ export const statusStrings = {
     copyLabel: (value: string) => `Copy ${value}`,
     copyFailed: "Could not copy. Select the address and copy it by hand.",
     tailscale:
-      "Over Tailscale or another VPN, automatic discovery does not reach other devices. Add the printer with a manual address instead, using the host's VPN address.",
+      "Over Tailscale or another VPN, automatic discovery does not reach other devices. Add it with a manual address instead, using the host's VPN address.",
   },
 } as const;

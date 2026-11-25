@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -39,14 +40,29 @@ type SetupSource interface {
 	Setup() apitypes.Setup
 	// EULA returns the licence text of a catalog EULA, false for an unknown id.
 	EULA(id string) (apitypes.EULA, bool)
+	// Detect re-runs device detection (POST /setup/detect).
+	Detect(ctx context.Context) error
 }
 
-// ErrNoPrinter is returned by a Printer while no printer endpoint is
-// available (API: 503).
-var ErrNoPrinter = errors.New("no printer available")
+var (
+	// ErrNoPrinter is returned while a printer has no endpoint (API: 503).
+	ErrNoPrinter = errors.New("no printer available")
+	// ErrUnknownPrinter is a printer id that is not configured or is
+	// disabled (API: 404).
+	ErrUnknownPrinter = errors.New("unknown printer")
+	// ErrUnknownScanner is a scanner id that is not configured or is
+	// disabled (API: 404).
+	ErrUnknownScanner = errors.New("unknown scanner")
+)
 
-// Printer is the current printer. Its methods mirror *printing.Client; they
-// return ErrNoPrinter while there is no printer.
+// Printers looks printers up by entry id: ErrUnknownPrinter for an unknown or
+// disabled id, ErrNoPrinter while it has no endpoint.
+type Printers interface {
+	Printer(id string) (Printer, error)
+}
+
+// Printer is one printer. Its methods mirror *printing.Client; they return
+// ErrNoPrinter while the printer has no endpoint.
 type Printer interface {
 	Submit(ctx context.Context, name, user, format string, r io.Reader, opts apitypes.PrintOptions) (int, error)
 	Jobs(ctx context.Context, limit int) ([]apitypes.Job, error)
@@ -56,8 +72,9 @@ type Printer interface {
 	Formats(ctx context.Context) ([]string, error)
 }
 
-// Scans is the scan service (*scanning.Service) plus the current scanner's
-// capabilities (scanning.ErrNoScanner while there is none).
+// Scans is the scan service (*scanning.Service) plus each scanner's
+// capabilities: ErrUnknownScanner for an unknown or disabled id,
+// scanning.ErrNoScanner while it has no endpoint.
 type Scans interface {
 	Start(set apitypes.ScanSettings) (apitypes.Scan, error)
 	List() []apitypes.Scan
@@ -67,7 +84,7 @@ type Scans interface {
 	Delete(id string) error
 	// Cancel stops a running scan (scanning.ErrNotRunning once it has ended).
 	Cancel(id string) (apitypes.Scan, error)
-	Caps(ctx context.Context) (apitypes.ScannerCaps, error)
+	Caps(ctx context.Context, id string) (apitypes.ScannerCaps, error)
 }
 
 // Agent is the internal agent endpoint's backend. With a nil Tokens every
@@ -78,7 +95,7 @@ type Agent struct {
 }
 
 // Deps is everything the API needs. Store, Check, Config, Status, Setup,
-// Printer and Scans are required.
+// Printers and Scans are required.
 type Deps struct {
 	Store ConfigStore
 	// Check is the shared Parse plus Validate check.
@@ -86,11 +103,14 @@ type Deps struct {
 	// LastGood is the watcher's last-known-good config (nil: none).
 	LastGood func() *config.Config
 	// Config is the effective config (controller.Config); read on every request.
-	Config  func() config.Config
-	Status  StatusSource
-	Setup   SetupSource
-	Printer Printer
-	Scans   Scans
+	Config   func() config.Config
+	Status   StatusSource
+	Setup    SetupSource
+	Printers Printers
+	// PrinterCaps is a printer's capabilities, false while they are not known
+	// (print options are then sent unfitted). nil: never known.
+	PrinterCaps func(id string) (device.PrinterCaps, bool)
+	Scans       Scans
 	// ScanEvents is the scan service's event channel; the server drains it
 	// into the scan SSE event until BaseContext is done.
 	ScanEvents <-chan apitypes.Scan
@@ -148,14 +168,15 @@ var publicRoutes = []route{
 	{"PUT /api/v1/config", (*server).putConfig},
 	{"PATCH /api/v1/config", (*server).patchConfig},
 	{"GET /api/v1/setup", (*server).getSetup},
+	{"POST /api/v1/setup/detect", (*server).postDetect},
 	{"GET /api/v1/eulas/{id}", (*server).getEULA},
 	{"GET /api/v1/status", (*server).getStatus},
 	{"GET /api/v1/events", (*server).events},
-	{"POST /api/v1/print", (*server).print},
-	{"GET /api/v1/jobs", (*server).getJobs},
-	{"GET /api/v1/jobs/{id}", (*server).getJob},
-	{"DELETE /api/v1/jobs/{id}", (*server).deleteJob},
-	{"GET /api/v1/scanner", (*server).getScanner},
+	{"POST /api/v1/printers/{id}/print", (*server).print},
+	{"GET /api/v1/printers/{id}/jobs", (*server).getJobs},
+	{"GET /api/v1/printers/{id}/jobs/{job}", (*server).getJob},
+	{"DELETE /api/v1/printers/{id}/jobs/{job}", (*server).deleteJob},
+	{"GET /api/v1/scanners/{id}/capabilities", (*server).getScannerCaps},
 	{"POST /api/v1/scans", (*server).postScan},
 	{"GET /api/v1/scans", (*server).getScans},
 	{"GET /api/v1/scans/{id}", (*server).getScan},
@@ -189,6 +210,9 @@ func New(d Deps) (public, internal http.Handler) {
 	}
 	if d.Hub == nil {
 		d.Hub = NewHub()
+	}
+	if d.PrinterCaps == nil {
+		d.PrinterCaps = func(string) (device.PrinterCaps, bool) { return device.PrinterCaps{}, false }
 	}
 	if d.LastGood == nil {
 		d.LastGood = func() *config.Config { return nil }
@@ -320,6 +344,16 @@ func noWriteDeadline(w http.ResponseWriter) {
 
 func (s *server) getSetup(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.d.Setup.Setup())
+}
+
+// postDetect re-runs device detection; the result arrives in Status.
+func (s *server) postDetect(w http.ResponseWriter, r *http.Request) {
+	if err := s.d.Setup.Detect(r.Context()); err != nil {
+		slog.Warn("detect devices", "err", err)
+		writeProblem(w, http.StatusServiceUnavailable, "detect-failed", "device detection could not be restarted; the server log has the details")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *server) getStatus(w http.ResponseWriter, _ *http.Request) {

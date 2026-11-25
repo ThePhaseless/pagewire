@@ -3,7 +3,15 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { Button as AriaButton } from "react-aria-components";
 import { api, ProblemError, problemMessage } from "../api/client";
-import { EventsContext, useConnected, usePrinterNotFound, useStatus } from "../api/events";
+import {
+  EventsContext,
+  useConnected,
+  useEnabledScanners,
+  useNothingFound,
+  useStatus,
+} from "../api/events";
+import { DevicePicker } from "../components/DevicePicker";
+import { OptionField } from "../components/OptionField";
 import {
   Button,
   Card,
@@ -14,62 +22,27 @@ import {
   LinkButton,
   PageHeader,
   ProgressBar,
-  RadioGroup,
-  Select,
   StatusBadge,
   type Tone,
   toast,
 } from "../components/ui";
 import type { Config, Scan as ScanDTO, ScannerCaps, ScanSettings } from "../gen/api";
+import { useDeviceChoice } from "../lib/devices";
+import { optionLabel } from "../lib/labels";
+import { optionState, scanKinds, toRequest } from "../lib/options";
 import { strings } from "../strings";
 import { scanStrings as t } from "./Scan.strings";
 import "./Scan.css";
 
-// Mirrors config.Default: what the server applies when the file leaves scan defaults out.
-const fallback: ScanSettings = {
-  source: "platen",
-  resolution: 300,
-  colorMode: "color",
-  format: "pdf",
-};
+// Without these the scanner cannot scan at all, so the Scan button stays disabled.
+const required = ["source", "resolution", "colorMode"] as const;
 
-const sources = ["platen", "adf", "adf-duplex"] as const;
-const colorModes = ["color", "grayscale", "blackandwhite"] as const;
-const isOneOf = <T extends string>(list: readonly T[], v: string): v is T =>
-  (list as readonly string[]).includes(v);
-
-/** What the scanner offers, limited to the values the API accepts. */
-function offered(caps: ScannerCaps) {
-  return {
-    sources: caps.sources.filter((s) => isOneOf(sources, s)),
-    resolutions: caps.resolutions.filter((r) => r >= 75 && r <= 1200),
-    colorModes: caps.colorModes.filter((c) => isOneOf(colorModes, c)),
-  };
+/** `caps` without adf-duplex unless the feeder scans both sides. */
+function withDuplex(caps: ScannerCaps): ScannerCaps {
+  return caps.duplex ? caps : { ...caps, sources: caps.sources.filter((x) => x !== "adf-duplex") };
 }
 
-/**
- * `want` limited to `caps`: each wanted value the scanner offers is kept; otherwise the nearest
- * resolution, or the first offered source and colour mode. A field the scanner offers nothing
- * for keeps the wanted value (the Scan button is disabled then).
- */
-function fitSettings(want: ScanSettings, caps: ScannerCaps): ScanSettings {
-  const o = offered(caps);
-  const nearest = o.resolutions.reduce<number | undefined>(
-    (best, r) =>
-      best === undefined || Math.abs(r - want.resolution) < Math.abs(best - want.resolution)
-        ? r
-        : best,
-    undefined,
-  );
-  return {
-    source: o.sources.includes(want.source) ? want.source : (o.sources[0] ?? want.source),
-    resolution: nearest ?? want.resolution,
-    colorMode: o.colorModes.includes(want.colorMode)
-      ? want.colorMode
-      : (o.colorModes[0] ?? want.colorMode),
-    format: want.format,
-  };
-}
+const formatLabel = (format: ScanDTO["format"]) => optionLabel("format", format, "scanner");
 
 /** Newest first, one entry per id. */
 function mergeScans(current: ScanDTO[], incoming: ScanDTO[]): ScanDTO[] {
@@ -117,37 +90,39 @@ function useConfig(etag: string | undefined, state: string | undefined) {
   return config;
 }
 
-/** The scanner's capabilities, asked only while it is available (GET /scanner answers 503 otherwise). */
-function useCaps(available: boolean) {
+/**
+ * One scanner's capabilities, asked only while it is available (the route answers 503 otherwise).
+ * A reply for another scanner than the one shown is never used.
+ */
+function useCaps(id: string | undefined, available: boolean) {
   const store = useContext(EventsContext);
-  const [caps, setCaps] = useState<ScannerCaps | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const [got, setGot] = useState<{ id: string; caps?: ScannerCaps; error?: unknown } | null>(null);
   // Bumped to ask again: by the retry button, and after the event stream reconnects.
   const [attempt, setAttempt] = useState(0);
   const retry = () => {
-    setError(null);
+    setGot((g) => g && { ...g, error: undefined });
     setAttempt((n) => n + 1);
   };
   useEffect(() => store.onReconnect(() => setAttempt((n) => n + 1)), [store]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is intentionally a refetch trigger
   useEffect(() => {
-    if (!available) return;
+    if (!available || id === undefined) return;
     let live = true;
-    api.getScanner().then(
-      (c) => {
-        if (!live) return;
-        setCaps(c);
-        setError(null);
+    api.getScannerCaps(id).then(
+      (caps) => {
+        if (live) setGot({ id, caps });
       },
-      (err) => {
-        if (live) setError(err);
+      (error) => {
+        // A failed refetch keeps the capabilities this scanner already reported.
+        if (live) setGot((g) => ({ id, caps: g?.id === id ? g.caps : undefined, error }));
       },
     );
     return () => {
       live = false;
     };
-  }, [available, attempt]);
-  return { caps: available ? caps : null, error: available ? error : null, retry };
+  }, [id, available, attempt]);
+  const mine = available && got?.id === id ? got : undefined;
+  return { caps: mine?.caps, error: mine?.error ?? null, retry };
 }
 
 /**
@@ -293,7 +268,7 @@ function Result({ scan, onCancel }: { scan: ScanDTO | undefined; onCancel: (id: 
           ? formatTime(scan.createdAt)
           : t.result.meta(
               formatTime(scan.createdAt),
-              t.history.summary(scan.pages, t.options.format[scan.format]),
+              t.history.summary(scan.pages, formatLabel(scan.format)),
             )}
       </p>
       {scan.state === "scanning" && <ProgressBar label={t.scanning(scan.pages)} />}
@@ -311,46 +286,68 @@ function Result({ scan, onCancel }: { scan: ScanDTO | undefined; onCancel: (id: 
 export function Scan() {
   const status = useStatus();
   const connected = useConnected();
-  const notFound = usePrinterNotFound();
-  const available = status?.scanner.available ?? false;
+  const notFound = useNothingFound();
+  const scanners = useEnabledScanners();
+  const [scanner, choose] = useDeviceChoice("scanner", scanners);
+  const id = scanner?.id;
+  const available = scanner?.available ?? false;
   const config = useConfig(status?.config.etag, status?.config.state);
-  const { caps, error: capsError, retry: retryCaps } = useCaps(available);
+  const { caps: reported, error: capsError, retry: retryCaps } = useCaps(id, available);
+  const caps = reported && withDuplex(reported);
   const { scans, setScans, add, error: listError, retry: retryList } = useScans();
+  const configured = config?.scanners.find((x) => x.id === id)?.defaults;
 
-  const [overrides, setOverrides] = useState<Partial<ScanSettings>>({});
-  const want: ScanSettings = { ...fallback, ...config?.scan.defaults, ...overrides };
-  const settings = caps ? fitSettings(want, caps) : want;
-  const o = caps ? offered(caps) : null;
-  const set = (patch: Partial<ScanSettings>) => setOverrides((v) => ({ ...v, ...patch }));
+  // Choices are kept per scanner, so switching scanners recomputes every control from its own.
+  const [overrides, setOverrides] = useState<Record<string, Partial<ScanSettings>>>({});
+  const chosen: Partial<ScanSettings> = { ...configured, ...(id ? overrides[id] : undefined) };
+  const set = (patch: Partial<ScanSettings>) => {
+    if (id) setOverrides((o) => ({ ...o, [id]: { ...o[id], ...patch } }));
+  };
+  const request = toRequest("scanner", caps, chosen);
 
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // Field messages of a rejected request, by option kind.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
 
   const busy =
-    starting || status?.scanner.state === "processing" || scans.some((s) => s.state === "scanning");
+    starting ||
+    scanner?.state === "processing" ||
+    scans.some((s) => s.state === "scanning" && s.scanner === id);
   // Not `busy`: the button shows pending instead, so keyboard focus stays on it.
-  const canScan =
-    available &&
-    connected &&
-    o !== null &&
-    o.sources.length > 0 &&
-    o.resolutions.length > 0 &&
-    o.colorModes.length > 0;
+  const reportsRequired =
+    caps !== undefined && required.every((k) => optionState(k, caps, "scanner").values.length > 0);
+  const canScan = available && connected && reportsRequired;
   const shown = scans.find((s) => s.id === selectedId) ?? scans[0];
+  const names = new Map(status?.scanners.map((s) => [s.id, s.name]));
+
+  function pick(scannerId: string) {
+    choose(scannerId);
+    setStartError(null);
+    setFieldErrors({});
+  }
 
   async function start() {
+    if (!id) return;
     setStarting(true);
     setStartError(null);
+    setFieldErrors({});
     try {
-      const s = await api.startScan(settings);
+      // canScan holds every required field, and toRequest always fills format once caps are known.
+      const s = await api.startScan({ ...request, scanner: id } as ScanSettings);
       add([s]);
       setSelectedId(s.id);
     } catch (err) {
       setStartError(
         err instanceof ProblemError && err.status === 409 ? t.busy : problemMessage(err),
       );
+      if (err instanceof ProblemError) {
+        setFieldErrors(
+          Object.fromEntries(err.errors.map((e) => [e.path.replace(/^\//, ""), e.message])),
+        );
+      }
     } finally {
       setStarting(false);
     }
@@ -382,6 +379,7 @@ export function Scan() {
   return (
     <div className="scan-view">
       <PageHeader title={strings.nav.scan} description={t.description} />
+      <DevicePicker kind="scanner" devices={scanners} selected={id} onSelect={pick} />
 
       {!available && (
         <Card className="scan-unavailable">
@@ -397,7 +395,7 @@ export function Scan() {
                 </LinkButton>
               }
             >
-              <p>{status.device.message || t.unavailable.waiting}</p>
+              <p>{scanner?.message || t.unavailable.waiting}</p>
               {notFound && <p>{strings.plugInHint}</p>}
             </EmptyState>
           )}
@@ -412,38 +410,20 @@ export function Scan() {
             </InlineError>
           ) : null}
           {available && !caps && !capsError && <p className="scan-subtle">{t.options.loading}</p>}
-          {o && (
-            <>
-              <Select
-                label={t.options.source.label}
-                selectedKey={settings.source}
-                onSelectionChange={(k) => set({ source: k as ScanSettings["source"] })}
-                options={o.sources.map((id) => ({ id, label: t.options.source[id] }))}
+          {caps &&
+            scanKinds.map((kind) => (
+              <OptionField
+                key={kind}
+                kind={kind}
+                device="scanner"
+                mode="job"
+                state={optionState(kind, caps, "scanner")}
+                value={chosen[kind]}
+                onChange={(v) => set({ [kind]: v })}
+                errorMessage={fieldErrors[kind]}
               />
-              <Select
-                label={t.options.resolution}
-                selectedKey={String(settings.resolution)}
-                onSelectionChange={(k) => set({ resolution: Number(k) })}
-                options={o.resolutions.map((r) => ({ id: String(r), label: t.options.dpi(r) }))}
-              />
-              <Select
-                label={t.options.colorMode.label}
-                selectedKey={settings.colorMode}
-                onSelectionChange={(k) => set({ colorMode: k as ScanSettings["colorMode"] })}
-                options={o.colorModes.map((id) => ({ id, label: t.options.colorMode[id] }))}
-              />
-            </>
-          )}
-          <RadioGroup
-            label={t.options.format.label}
-            value={settings.format}
-            onChange={(v) => set({ format: v as ScanSettings["format"] })}
-            isDisabled={!available}
-            options={[
-              { id: "pdf", label: t.options.format.pdf, description: t.options.format.pdfHint },
-              { id: "jpeg", label: t.options.format.jpeg, description: t.options.format.jpegHint },
-            ]}
-          />
+            ))}
+          {caps && !reportsRequired && <p className="scan-subtle">{t.options.cannotScan}</p>}
           {startError && <InlineError>{startError}</InlineError>}
           <div className="scan-submit">
             <Button
@@ -483,9 +463,12 @@ export function Scan() {
                   <span className="scan-row-main">
                     <span className="tabular">{when}</span>
                     <span className="scan-subtle">
-                      {s.state === "scanning"
-                        ? t.scanning(s.pages)
-                        : t.history.summary(s.pages, t.options.format[s.format])}
+                      {t.history.from(
+                        names.get(s.scanner),
+                        s.state === "scanning"
+                          ? t.scanning(s.pages)
+                          : t.history.summary(s.pages, formatLabel(s.format)),
+                      )}
                     </span>
                   </span>
                   <StatusBadge tone={stateTone[s.state]} pulse={s.state === "scanning"}>

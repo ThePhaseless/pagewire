@@ -1,13 +1,16 @@
 // The settings editor: one form over the config file, saved as an RFC 7396 merge patch with
 // If-Match. A 412 opens ConflictDialog; an invalid file shows its errors and a way back.
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+// Printers and scanners are arrays, so any edit inside one sends the whole list (A1, section 0).
+import { type ReactNode, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
 import { api, ConflictError, ProblemError, problemMessage } from "../api/client";
 import { EventsContext, useStatus } from "../api/events";
 import { type ConflictChange, ConflictDialog } from "../components/ConflictDialog";
 import { acceptedSha, EulaAccept, withAccepted } from "../components/EulaAccept";
+import { OptionField } from "../components/OptionField";
 import {
   Button,
   Card,
+  DeviceStatusBadge,
   Dialog,
   EmptyState,
   InlineError,
@@ -23,54 +26,104 @@ import {
 import {
   type Config,
   type ConfigResponse,
-  ConfigSchema,
   type FieldError,
+  PrinterSchema,
+  ScannerSchema,
   type Setup as SetupDTO,
   type Status,
+  type USB,
+  type USBDevice,
 } from "../gen/api";
+import { optionTitle } from "../lib/labels";
 import { changedPaths, diff, valueAt } from "../lib/mergepatch";
+import {
+  type FieldKind,
+  type OptionValue,
+  optionState,
+  printerGroups,
+  printKinds,
+  pruneUnsupported,
+  scanKinds,
+  scannerGroups,
+  setDefault,
+} from "../lib/options";
 import { type Blocker, useNavigationBlocker } from "../router";
 import { strings } from "../strings";
 import { settingsStrings as s } from "./Settings.strings";
 import "./Settings.css";
 
 const f = s.fields;
-const S = ConfigSchema.shape;
-const RESOLUTIONS = [75, 150, 300, 600, 1200];
 
-const options = (labels: Record<string, string>, ids: readonly string[] = Object.keys(labels)) =>
-  ids.map((id) => ({ id, label: labels[id] ?? id }));
+type Obj = Record<string, unknown>;
+type Role = "printer" | "scanner";
+type Printer = Config["printers"][number];
+type Scanner = Config["scanners"][number];
+type Entry = Printer | Scanner;
+/** A change to one entry; the keys only one role has are left out for the other. */
+type EntryPatch = Partial<Omit<Printer & Scanner, "defaults">> & { defaults?: Entry["defaults"] };
+const LIST = { printer: "printers", scanner: "scanners" } as const;
+
 const familyOptions = (ids: readonly string[]) =>
   ids.map((id) => ({ id, label: id === "auto" ? f.automatic : (f.families[id] ?? id) }));
 
-/** Option labels per pointer, for showing values in the conflict dialog and review note. */
-const valueLabels: Record<string, Record<string, string>> = {
-  "/device/mode": f.modeOptions,
-  "/device/driver": { auto: f.automatic, ...f.families },
-  "/device/scanner": { auto: f.automatic, ...f.families },
-  "/print/defaults/media": f.mediaOptions,
-  "/print/defaults/sides": f.sidesOptions,
-  "/print/defaults/colorMode": f.printColorOptions,
-  "/print/defaults/quality": f.qualityOptions,
-  "/scan/defaults/source": f.sourceOptions,
-  "/scan/defaults/colorMode": f.scanColorOptions,
-  "/scan/defaults/format": f.formatOptions,
-};
-
-function display(path: string, v: unknown): string {
-  if (v === undefined || v === null || v === "") return s.notSet;
-  if (Array.isArray(v))
-    return v.length
-      ? v.map((r) => (typeof r === "object" ? `${r.id} ${r.version}` : String(r))).join(", ")
-      : s.none;
-  if (typeof v === "object") return Object.values(v).filter(Boolean).join(" · ");
-  return valueLabels[path]?.[String(v)] ?? String(v);
+/** How one list item reads in the conflict dialog: an entry by name, a device by its USB IDs. */
+function itemLabel(r: unknown): string {
+  if (typeof r !== "object" || r === null) return String(r);
+  const o = r as Obj;
+  if (typeof o.name === "string") return o.enabled === false ? s.off(o.name) : o.name;
+  if (typeof o.vendorId === "string") return `${o.vendorId}:${o.productId}`;
+  return `${o.id} ${o.version}`;
 }
 
-/** Pointers that have a place in the form; any other error goes to the summary. */
-const placed = (path: string) => path in s.paths || path.startsWith("/licenses/");
+function display(v: unknown): string {
+  if (v === undefined || v === null || v === "") return s.notSet;
+  if (Array.isArray(v)) return v.length ? v.map(itemLabel).join(", ") : s.none;
+  if (typeof v === "object") return Object.values(v).filter(Boolean).join(" · ");
+  return String(v);
+}
 
-type Obj = Record<string, unknown>;
+const ENTRY_PATH = /^\/(printers|scanners)\/(\d+)\/(.+)$/;
+
+/** The field label of a pointer inside one printer or scanner, or undefined when it has none. */
+function entryLabel(path: string, doc: Config | null): string | undefined {
+  const m = ENTRY_PATH.exec(path);
+  if (!m) return undefined;
+  const [, list = "", i = "", rest = ""] = m;
+  const role: Role = list === "printers" ? "printer" : "scanner";
+  const kind = rest.startsWith("defaults/") ? rest.slice("defaults/".length) : undefined;
+  const kinds: readonly string[] = role === "printer" ? printKinds : scanKinds;
+  const field = kind
+    ? kinds.includes(kind)
+      ? optionTitle(kind as FieldKind, role)
+      : undefined
+    : s.entryPaths[rest];
+  if (!field) return undefined;
+  const entries: Entry[] | undefined = doc?.[list as "printers" | "scanners"];
+  return s.entryPath(entries?.[Number(i)]?.name || s.unnamed, field);
+}
+
+const pathLabel = (path: string, doc: Config | null) =>
+  s.paths[path] ?? entryLabel(path, doc) ?? path;
+
+const GENERAL = new Set(["/name", "/print/maxUploadMiB", "/scan/retentionDays"]);
+/** Pointers that have a place in the form; any other error goes to the summary. */
+const placed = (path: string) =>
+  GENERAL.has(path) || path.startsWith("/licenses/") || entryLabel(path, null) !== undefined;
+
+/** `c` with entry `i` of `role` changed by `patch` (undefined values drop the key on save). */
+function withEntry(c: Config, role: Role, i: number, patch: EntryPatch): Config {
+  return role === "printer"
+    ? { ...c, printers: c.printers.map((e, j) => (j === i ? ({ ...e, ...patch } as Printer) : e)) }
+    : { ...c, scanners: c.scanners.map((e, j) => (j === i ? ({ ...e, ...patch } as Scanner) : e)) };
+}
+
+function withoutEntry(c: Config, role: Role, i: number): Config {
+  return role === "printer"
+    ? { ...c, printers: c.printers.filter((_, j) => j !== i) }
+    : { ...c, scanners: c.scanners.filter((_, j) => j !== i) };
+}
+
+const entryKey = (role: Role, id: string) => `${role}:${id}`;
 
 export function Settings() {
   const store = useContext(EventsContext);
@@ -86,6 +139,8 @@ export function Settings() {
   const [highlight, setHighlight] = useState<ConflictChange[]>([]);
   const [changedEtag, setChangedEtag] = useState<string | null>(null);
   const [confirmRestore, setConfirmRestore] = useState(false);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const [removing, setRemoving] = useState<{ role: Role; index: number } | null>(null);
 
   // Read by load() and the SSE handler without resubscribing on every render.
   const live = useRef<{ dirty: boolean; etag?: string }>({ dirty: false });
@@ -144,6 +199,32 @@ export function Settings() {
     [store, load],
   );
 
+  /** The device's capabilities, or undefined while it is not connected (A23 "not connected"). */
+  const capsOf = (role: Role, id: string) => {
+    const x = (role === "printer" ? status?.printers : status?.scanners)?.find((d) => d.id === id);
+    return x?.available ? x.capabilities : undefined;
+  };
+
+  /**
+   * What Save writes: each entry the user changed loses the defaults its connected device does
+   * not offer (U18), which clears their Status warnings. Untouched entries go out as they are.
+   */
+  const forSave = (c: Config): Config => {
+    const prune = <E extends Entry>(role: Role, list: E[], before: E[]) =>
+      list.map((e) => {
+        const b = before.find((x) => x.id === e.id);
+        if (b && JSON.stringify(b) === JSON.stringify(e)) return e;
+        return { ...e, defaults: pruneUnsupported(e.defaults, capsOf(role, e.id), role) };
+      });
+    return base
+      ? {
+          ...c,
+          printers: prune("printer", c.printers, base.printers),
+          scanners: prune("scanner", c.scanners, base.scanners),
+        }
+      : c;
+  };
+
   /** Replaces the form with the file `r` describes. */
   const show = (r: ConfigResponse) => {
     setResp(r);
@@ -171,8 +252,20 @@ export function Settings() {
         return;
       }
       setConflict(null);
-      if (err instanceof ProblemError && err.status === 422) setErrors(err.errors);
-      else setSaveError(err);
+      if (err instanceof ProblemError && err.status === 422) {
+        setErrors(err.errors);
+        // Open every entry that holds an error, so the error is on screen.
+        setOpen((prev) => {
+          const next = new Set(prev);
+          for (const e of err.errors) {
+            const m = ENTRY_PATH.exec(e.path);
+            const list = m?.[1] as "printers" | "scanners" | undefined;
+            const entry: Entry | undefined = list && draft?.[list][Number(m?.[2])];
+            if (entry) next.add(entryKey(list === "printers" ? "printer" : "scanner", entry.id));
+          }
+          return next;
+        });
+      } else setSaveError(err);
     } finally {
       setSaving(false);
     }
@@ -210,9 +303,9 @@ export function Settings() {
   const changes: ConflictChange[] = conflict
     ? changedPaths(conflict.patch).map((path) => ({
         path,
-        label: s.paths[path] ?? path,
-        mine: display(path, valueAt(draft, path)),
-        file: display(path, valueAt(conflict.current.config, path)),
+        label: pathLabel(path, draft),
+        mine: display(valueAt(draft, path)),
+        file: display(valueAt(conflict.current.config, path)),
       }))
     : [];
   // What the other edit changed that you did not touch: saving keeps those values.
@@ -223,9 +316,9 @@ export function Settings() {
           .filter((path) => !mine.has(path))
           .map((path) => ({
             path,
-            label: s.paths[path] ?? path,
-            mine: display(path, valueAt(draft, path)),
-            file: display(path, valueAt(conflict.current.config, path)),
+            label: pathLabel(path, conflict.current.config),
+            mine: display(valueAt(draft, path)),
+            file: display(valueAt(conflict.current.config, path)),
           }))
       : [];
 
@@ -246,7 +339,7 @@ export function Settings() {
       }}
       onReplace={() => {
         const { current, patch: p } = conflict;
-        void write(() => api.replaceConfig(draft, current.etag), p);
+        void write(() => api.replaceConfig(forSave(draft), current.etag), p);
       }}
       onCancel={() =>
         conflict.current.state === "invalid" ? show(conflict.current) : setConflict(null)
@@ -293,9 +386,9 @@ export function Settings() {
 
   const update = (fn: (c: Config) => Config) => setEdited(fn(draft));
   const marked = new Set(highlight.map((h) => h.path));
-  const errorAt = (path: string) =>
+  const errorAt = (path: string, prefix = false) =>
     errors
-      .filter((e) => e.path === path)
+      .filter((e) => e.path === path || (prefix && e.path.startsWith(`${path}/`)))
       .map((e) => e.message)
       .join(" ") || undefined;
   /** Highlight class and server error for the field at `path`. */
@@ -305,6 +398,12 @@ export function Settings() {
   });
   const unplaced = errors.filter((e) => !placed(e.path));
   const fileChanged = dirty && changedEtag !== null && changedEtag !== resp.etag;
+  const toggle = (key: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
 
   const reset = () => {
     setEdited(null);
@@ -314,9 +413,40 @@ export function Settings() {
     if (changedEtag !== null && changedEtag !== resp.etag) void load();
   };
 
+  const entries = (role: Role) => {
+    const list: Entry[] = draft[LIST[role]];
+    return list.length === 0 ? (
+      <p className="settings-muted">{role === "printer" ? s.noPrinters : s.noScanners}</p>
+    ) : (
+      list.map((e, i) => (
+        <EntryEditor
+          key={e.id}
+          role={role}
+          entry={e}
+          index={i}
+          status={status}
+          caps={capsOf(role, e.id)}
+          isOpen={open.has(entryKey(role, e.id))}
+          onToggle={() => toggle(entryKey(role, e.id))}
+          onRemove={() => setRemoving({ role, index: i })}
+          set={(p) => update((c) => withEntry(c, role, i, p))}
+          at={at}
+          errorAt={errorAt}
+        />
+      ))
+    );
+  };
+  const removingEntry: Entry | undefined = removing
+    ? draft[LIST[removing.role]][removing.index]
+    : undefined;
+
   return (
     <div className="settings-view">
-      <PageHeader title={strings.nav.settings} description={s.description} />
+      <PageHeader
+        title={strings.nav.settings}
+        description={s.description}
+        actions={<LinkButton href="/setup?add=1">{s.detect}</LinkButton>}
+      />
 
       {highlight.length > 0 && (
         <div className="settings-banner settings-review" role="status">
@@ -331,30 +461,59 @@ export function Settings() {
 
       <Card title={s.sections.general}>
         <TextField
-          label={f.name}
-          description={f.nameHint}
+          label={f.title}
+          description={f.titleHint}
           value={draft.name}
           onChange={(name) => update((c) => ({ ...c, name }))}
           isRequired
           {...at("/name")}
         />
-        <TextField
-          label={f.location}
-          description={f.locationHint}
-          value={draft.location}
-          onChange={(location) => update((c) => ({ ...c, location }))}
-          {...at("/location")}
+        <NumberField
+          label={f.maxUpload}
+          description={f.maxUploadHint}
+          minValue={1}
+          maxValue={500}
+          formatOptions={{ maximumFractionDigits: 0 }}
+          value={draft.print.maxUploadMiB}
+          // A cleared field gives NaN, which would serialise as null and delete the key.
+          onChange={(n) =>
+            Number.isFinite(n) && update((c) => ({ ...c, print: { ...c.print, maxUploadMiB: n } }))
+          }
+          {...at("/print/maxUploadMiB")}
+        />
+        <NumberField
+          label={f.retention}
+          description={f.retentionHint}
+          minValue={0}
+          maxValue={3650}
+          formatOptions={{ maximumFractionDigits: 0 }}
+          value={draft.scan.retentionDays}
+          onChange={(n) =>
+            Number.isFinite(n) && update((c) => ({ ...c, scan: { ...c.scan, retentionDays: n } }))
+          }
+          {...at("/scan/retentionDays")}
         />
       </Card>
 
-      <Device draft={draft} status={status} update={update} at={at} errorAt={errorAt} />
-
-      <Card title={s.sections.printing}>
-        <PrintFields draft={draft} status={status} update={update} at={at} />
+      <Card
+        title={s.sections.printers}
+        className={marked.has("/printers") ? "settings-highlight" : undefined}
+      >
+        {entries("printer")}
       </Card>
 
-      <Card title={s.sections.scanning}>
-        <ScanFields draft={draft} update={update} at={at} />
+      <Card
+        title={s.sections.scanners}
+        className={marked.has("/scanners") ? "settings-highlight" : undefined}
+      >
+        {entries("scanner")}
+      </Card>
+
+      <Card
+        title={s.sections.ignored}
+        className={marked.has("/ignoredDevices") ? "settings-highlight" : undefined}
+      >
+        <Ignored draft={draft} status={status} update={update} />
       </Card>
 
       <Card
@@ -398,7 +557,10 @@ export function Settings() {
           variant="primary"
           isDisabled={!dirty}
           isPending={saving}
-          onPress={() => void write(() => api.patchConfig(patch, resp.etag), patch)}
+          onPress={() => {
+            const sent = diff(base, forSave(draft));
+            void write(() => api.patchConfig(sent, resp.etag), sent);
+          }}
         >
           {strings.buttons.save}
         </Button>
@@ -406,8 +568,33 @@ export function Settings() {
       {dialog}
       <Dialog
         role="alertdialog"
+        isOpen={removing !== null}
+        onOpenChange={(isOpen) => !isOpen && setRemoving(null)}
+        title={s.remove.title(removingEntry?.name || s.unnamed)}
+      >
+        {(close) => (
+          <>
+            <p>{s.remove.body}</p>
+            <div className="settings-dialog-actions">
+              <Button onPress={close}>{strings.buttons.cancel}</Button>
+              <Button
+                variant="danger"
+                onPress={() => {
+                  const r = removing;
+                  close();
+                  if (r) update((c) => withoutEntry(c, r.role, r.index));
+                }}
+              >
+                {s.remove.confirm}
+              </Button>
+            </div>
+          </>
+        )}
+      </Dialog>
+      <Dialog
+        role="alertdialog"
         isOpen={leave !== null}
-        onOpenChange={(open) => !open && setLeave(null)}
+        onOpenChange={(isOpen) => !isOpen && setLeave(null)}
         title={s.leave.title}
       >
         {(close) => (
@@ -436,237 +623,258 @@ export function Settings() {
 type Update = (fn: (c: Config) => Config) => void;
 type At = (path: string) => { className?: string; errorMessage?: string };
 
-function Device({
-  draft,
+const ANY = "any";
+const usbId = (u: USB | undefined) => (u ? `${u.vendorId}:${u.productId}:${u.serial}` : ANY);
+
+/** "Brother HL-L2350DW (E7)"; the USB IDs when the device reports no names. */
+function deviceName(d: Pick<USBDevice, "vendorId" | "productId" | "serial"> & Partial<USBDevice>) {
+  const mfg = d.manufacturer ?? "";
+  const product = d.product ?? "";
+  const name =
+    (product.toLowerCase().startsWith(mfg.toLowerCase()) ? product : `${mfg} ${product}`).trim() ||
+    `${d.vendorId}:${d.productId}`;
+  return d.serial ? `${name} (${d.serial})` : name;
+}
+
+function EntryEditor({
+  role,
+  entry,
+  index,
   status,
-  update,
+  caps,
+  isOpen,
+  onToggle,
+  onRemove,
+  set,
   at,
   errorAt,
 }: {
-  draft: Config;
+  role: Role;
+  entry: Entry;
+  index: number;
   status: Status | null;
-  update: Update;
+  caps: Parameters<typeof optionState>[1];
+  isOpen: boolean;
+  onToggle: () => void;
+  onRemove: () => void;
+  set: (patch: EntryPatch) => void;
   at: At;
-  errorAt: (path: string) => string | undefined;
+  errorAt: (path: string, prefix?: boolean) => string | undefined;
 }) {
-  const dev = draft.device;
-  const setDevice = (patch: Partial<Config["device"]>) =>
-    update((c) => ({ ...c, device: { ...c.device, ...patch } }));
-  const usb = dev.usb;
-  const setUsb = (patch: Partial<NonNullable<Config["device"]["usb"]>>) =>
-    usb && setDevice({ usb: { ...usb, ...patch } });
-  const usbError = errorAt("/device/usb");
+  const headingId = useId();
+  const panelId = useId();
+  const path = `/${LIST[role]}/${index}`;
+  const phase = (role === "printer" ? status?.printers : status?.scanners)?.find(
+    (d) => d.id === entry.id,
+  )?.phase;
+  const printer = role === "printer" ? (entry as Printer) : undefined;
+  const defaults = entry.defaults as Record<string, OptionValue | undefined>;
+
+  // The detected devices that can take this role, plus the saved one when it is not plugged in.
+  const detected = (status?.devices ?? []).filter((d) =>
+    role === "printer" ? d.canPrint : d.canScan,
+  );
+  const usbOptions = new Map([[ANY, f.anyDevice]]);
+  for (const d of detected) {
+    const id = usbId(d.device);
+    if (!usbOptions.has(id)) usbOptions.set(id, deviceName(d.device));
+  }
+  // The device the selector binds to (A2: an empty serial matches any), the bound one first.
+  const u = entry.usb;
+  const matches = (d: USBDevice) =>
+    u !== undefined &&
+    d.vendorId === u.vendorId &&
+    d.productId === u.productId &&
+    (u.serial === "" || d.serial === u.serial);
+  const bound =
+    detected.find(
+      (d) => (role === "printer" ? d.printerId : d.scannerId) === entry.id && matches(d.device),
+    ) ?? detected.find((d) => matches(d.device));
+  const current = bound ? usbId(bound.device) : usbId(u);
+  if (u && !usbOptions.has(current)) usbOptions.set(current, f.notDetected(deviceName(u)));
 
   return (
-    <Card title={s.sections.device}>
-      <RadioGroup
-        label={f.mode}
-        options={options(f.modeOptions, S.device.shape.mode.options)}
-        value={dev.mode}
-        onChange={(v) => {
-          const mode = S.device.shape.mode.parse(v);
-          // A USB selector and a driver name are only allowed with mode usb.
-          setDevice(
-            mode === "simulated" ? { mode, usb: undefined, driverName: undefined } : { mode },
-          );
-        }}
-        {...at("/device/mode")}
-      />
-      <Select
-        label={f.driver}
-        options={familyOptions(S.device.shape.driver.options)}
-        value={dev.driver}
-        onChange={(k) => {
-          if (k == null) return;
-          const driver = S.device.shape.driver.parse(k);
-          // ipp-usb needs no driver, so a driver name is not allowed with it.
-          setDevice(driver === "ipp-usb" ? { driver, driverName: undefined } : { driver });
-        }}
-        {...at("/device/driver")}
-      />
-      {dev.mode === "usb" && dev.driver !== "ipp-usb" && (
-        <TextField
-          label={f.driverName}
-          description={f.driverNameHint}
-          value={dev.driverName ?? ""}
-          // Empty removes the key, so the file goes back to automatic choice.
-          onChange={(v) => setDevice({ driverName: v || undefined })}
-          {...at("/device/driverName")}
-        />
-      )}
-      <Select
-        label={f.scanner}
-        options={familyOptions(S.device.shape.scanner.options)}
-        value={dev.scanner}
-        onChange={(k) => k != null && setDevice({ scanner: S.device.shape.scanner.parse(k) })}
-        {...at("/device/scanner")}
-      />
-      {dev.mode === "usb" && (
-        <div className="settings-usb">
-          <Switch
-            isSelected={usb !== undefined}
-            onChange={(on) => {
-              const m = status?.device.decision?.device;
-              setDevice({
-                usb: on
-                  ? {
-                      vendorId: m?.vendorId ?? "",
-                      productId: m?.productId ?? "",
-                      serial: m?.serial ?? "",
-                    }
-                  : undefined,
-              });
-            }}
-            className={at("/device/usb").className}
-          >
-            {f.usbSelector}
+    <section className="settings-entry" aria-labelledby={headingId}>
+      <header className="settings-entry-head">
+        <div className="settings-entry-title">
+          <h3 id={headingId}>{entry.name || s.unnamed}</h3>
+          {entry.location && <p className="settings-muted">{entry.location}</p>}
+        </div>
+        {phase && <DeviceStatusBadge phase={phase} />}
+        <div className="settings-entry-actions">
+          <Switch isSelected={entry.enabled} onChange={(enabled) => set({ enabled })}>
+            {f.enabled}
           </Switch>
-          <p className="ui-field-description">{f.usbSelectorHint}</p>
-          {usbError && <InlineError>{usbError}</InlineError>}
-          {usb && (
-            <div className="settings-usb-fields">
-              <TextField
-                label={f.vendorId}
-                description={f.usbIdHint}
-                value={usb.vendorId}
-                onChange={(vendorId) => setUsb({ vendorId })}
-                {...at("/device/usb/vendorId")}
-              />
-              <TextField
-                label={f.productId}
-                description={f.usbIdHint}
-                value={usb.productId}
-                onChange={(productId) => setUsb({ productId })}
-                {...at("/device/usb/productId")}
-              />
-              <TextField
-                label={f.serial}
-                description={f.serialHint}
-                value={usb.serial}
-                onChange={(serial) => setUsb({ serial })}
-                {...at("/device/usb/serial")}
-              />
-            </div>
+          <Button
+            variant="quiet"
+            aria-expanded={isOpen}
+            aria-controls={isOpen ? panelId : undefined}
+            onPress={onToggle}
+          >
+            {isOpen ? s.done : s.edit}
+          </Button>
+          <Button variant="quiet" onPress={onRemove}>
+            {s.remove.action}
+          </Button>
+        </div>
+      </header>
+      {isOpen && (
+        <div id={panelId} className="settings-entry-body">
+          <TextField
+            label={f.name}
+            description={f.nameHint(role)}
+            value={entry.name}
+            onChange={(name) => set({ name })}
+            isRequired
+            {...at(`${path}/name`)}
+          />
+          <TextField
+            label={f.location}
+            description={f.locationHint}
+            value={entry.location}
+            onChange={(location) => set({ location })}
+            {...at(`${path}/location`)}
+          />
+          <RadioGroup
+            label={f.mode}
+            options={PrinterSchema.shape.mode.options.map((id) => ({
+              id,
+              label: f.modeOptions(role)[id] ?? id,
+            }))}
+            value={entry.mode}
+            onChange={(v) => {
+              const mode = PrinterSchema.shape.mode.parse(v);
+              // A USB selector and a driver name are only allowed with mode usb.
+              set(
+                mode === "simulated" ? { mode, usb: undefined, driverName: undefined } : { mode },
+              );
+            }}
+            {...at(`${path}/mode`)}
+          />
+          {entry.mode === "usb" && (
+            <Select
+              label={f.usb}
+              description={f.usbHint}
+              options={[...usbOptions].map(([id, label]) => ({ id, label }))}
+              selectedKey={current}
+              onSelectionChange={(k) => {
+                // The bound device is already what the selector means; keep the file as it is.
+                if (k === current) return;
+                if (k === ANY) return set({ usb: undefined });
+                const d = detected.find((x) => usbId(x.device) === k)?.device;
+                if (d)
+                  set({ usb: { vendorId: d.vendorId, productId: d.productId, serial: d.serial } });
+              }}
+              errorMessage={errorAt(`${path}/usb`, true)}
+            />
           )}
+          {printer ? (
+            <>
+              <Select
+                label={f.driver}
+                options={familyOptions(PrinterSchema.shape.driver.options)}
+                selectedKey={printer.driver}
+                onSelectionChange={(k) => {
+                  if (k == null) return;
+                  const driver = PrinterSchema.shape.driver.parse(k);
+                  // ipp-usb needs no driver, so a driver name is not allowed with it.
+                  set(driver === "ipp-usb" ? { driver, driverName: undefined } : { driver });
+                }}
+                {...at(`${path}/driver`)}
+              />
+              {printer.mode === "usb" && printer.driver !== "ipp-usb" && (
+                <TextField
+                  label={f.driverName}
+                  description={f.driverNameHint}
+                  value={printer.driverName ?? ""}
+                  // Empty removes the key, so the printer goes back to automatic choice.
+                  onChange={(v) => set({ driverName: v || undefined })}
+                  {...at(`${path}/driverName`)}
+                />
+              )}
+            </>
+          ) : (
+            <Select
+              label={f.backend}
+              options={familyOptions(ScannerSchema.shape.backend.options)}
+              selectedKey={(entry as Scanner).backend}
+              onSelectionChange={(k) =>
+                k != null && set({ backend: ScannerSchema.shape.backend.parse(k) })
+              }
+              {...at(`${path}/backend`)}
+            />
+          )}
+          {(role === "printer" ? printerGroups : scannerGroups).map((g) => (
+            <OptionGroup key={g.id} title={g.title}>
+              {g.kinds.map((kind: FieldKind) => (
+                <OptionField
+                  key={kind}
+                  kind={kind}
+                  device={role}
+                  mode="defaults"
+                  state={optionState(kind, caps, role)}
+                  value={defaults[kind]}
+                  onChange={(v) => set({ defaults: setDefault(entry.defaults, kind, v) })}
+                  errorMessage={errorAt(`${path}/defaults/${kind}`)}
+                />
+              ))}
+            </OptionGroup>
+          ))}
         </div>
       )}
-    </Card>
+    </section>
   );
 }
 
-function PrintFields({
+function OptionGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="settings-option-group">
+      <h4>{title}</h4>
+      {children}
+    </div>
+  );
+}
+
+function Ignored({
   draft,
   status,
   update,
-  at,
 }: {
   draft: Config;
   status: Status | null;
   update: Update;
-  at: At;
 }) {
-  const p = draft.print.defaults;
-  const D = S.print.shape.defaults.shape;
-  const setDefaults = (patch: Partial<Config["print"]["defaults"]>) =>
-    update((c) => ({ ...c, print: { ...c.print, defaults: { ...c.print.defaults, ...patch } } }));
-  const media = [
-    ...new Set([...Object.keys(f.mediaOptions), ...(status?.printer.media ?? []), p.media]),
-  ];
+  if (draft.ignoredDevices.length === 0) return <p className="settings-muted">{s.noIgnored}</p>;
   return (
     <>
-      <Select
-        label={f.media}
-        options={options(f.mediaOptions, media)}
-        value={p.media}
-        onChange={(k) => k != null && setDefaults({ media: String(k) })}
-        {...at("/print/defaults/media")}
-      />
-      <RadioGroup
-        label={f.sides}
-        options={options(f.sidesOptions, D.sides.options)}
-        value={p.sides}
-        onChange={(v) => setDefaults({ sides: D.sides.parse(v) })}
-        {...at("/print/defaults/sides")}
-      />
-      <RadioGroup
-        label={f.printColor}
-        options={options(f.printColorOptions, D.colorMode.options)}
-        value={p.colorMode}
-        onChange={(v) => setDefaults({ colorMode: D.colorMode.parse(v) })}
-        {...at("/print/defaults/colorMode")}
-      />
-      <RadioGroup
-        label={f.quality}
-        options={options(f.qualityOptions, D.quality.options)}
-        value={p.quality}
-        onChange={(v) => setDefaults({ quality: D.quality.parse(v) })}
-        {...at("/print/defaults/quality")}
-      />
-      <NumberField
-        label={f.maxUpload}
-        description={f.maxUploadHint}
-        minValue={1}
-        maxValue={500}
-        formatOptions={{ maximumFractionDigits: 0 }}
-        value={draft.print.maxUploadMiB}
-        // A cleared field gives NaN, which would serialise as null and delete the key.
-        onChange={(n) =>
-          Number.isFinite(n) && update((c) => ({ ...c, print: { ...c.print, maxUploadMiB: n } }))
-        }
-        {...at("/print/maxUploadMiB")}
-      />
-    </>
-  );
-}
-
-function ScanFields({ draft, update, at }: { draft: Config; update: Update; at: At }) {
-  const sc = draft.scan.defaults;
-  const D = S.scan.shape.defaults.shape;
-  const setDefaults = (patch: Partial<Config["scan"]["defaults"]>) =>
-    update((c) => ({ ...c, scan: { ...c.scan, defaults: { ...c.scan.defaults, ...patch } } }));
-  const resolutions = [...new Set([...RESOLUTIONS, sc.resolution])].sort((a, b) => a - b);
-  return (
-    <>
-      <RadioGroup
-        label={f.source}
-        options={options(f.sourceOptions, D.source.options)}
-        value={sc.source}
-        onChange={(v) => setDefaults({ source: D.source.parse(v) })}
-        {...at("/scan/defaults/source")}
-      />
-      <Select
-        label={f.resolution}
-        options={resolutions.map((n) => ({ id: String(n), label: f.dpi(n) }))}
-        value={String(sc.resolution)}
-        onChange={(k) => k != null && setDefaults({ resolution: Number(k) })}
-        {...at("/scan/defaults/resolution")}
-      />
-      <RadioGroup
-        label={f.scanColor}
-        options={options(f.scanColorOptions, D.colorMode.options)}
-        value={sc.colorMode}
-        onChange={(v) => setDefaults({ colorMode: D.colorMode.parse(v) })}
-        {...at("/scan/defaults/colorMode")}
-      />
-      <RadioGroup
-        label={f.format}
-        options={options(f.formatOptions, D.format.options)}
-        value={sc.format}
-        onChange={(v) => setDefaults({ format: D.format.parse(v) })}
-        {...at("/scan/defaults/format")}
-      />
-      <NumberField
-        label={f.retention}
-        description={f.retentionHint}
-        minValue={0}
-        maxValue={3650}
-        formatOptions={{ maximumFractionDigits: 0 }}
-        value={draft.scan.retentionDays}
-        onChange={(n) =>
-          Number.isFinite(n) && update((c) => ({ ...c, scan: { ...c.scan, retentionDays: n } }))
-        }
-        {...at("/scan/retentionDays")}
-      />
+      <p className="settings-muted">{s.ignoredHint}</p>
+      <ul className="settings-ignored">
+        {draft.ignoredDevices.map((d, i) => {
+          const seen = status?.devices.find(
+            (x) =>
+              x.device.vendorId === d.vendorId &&
+              x.device.productId === d.productId &&
+              x.device.serial === d.serial,
+          )?.device;
+          return (
+            <li key={`${d.vendorId}:${d.productId}:${d.serial}`} className="settings-ignored-item">
+              <span className="settings-ignored-name">{deviceName(seen ?? d)}</span>
+              <span className="settings-muted">{s.ignoredRoles(d.roles)}</span>
+              <Button
+                variant="quiet"
+                onPress={() =>
+                  update((c) => ({
+                    ...c,
+                    ignoredDevices: c.ignoredDevices.filter((_, j) => j !== i),
+                  }))
+                }
+              >
+                {s.offerAgain}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
     </>
   );
 }
@@ -685,6 +893,7 @@ function Licences({
   errors: FieldError[];
 }) {
   const eulas = setup?.eulas ?? [];
+  const blobs = status?.workloads.flatMap((w) => w.blobs) ?? [];
   const setAccepted = (id: string, version: string, sha: string | null) =>
     update((c) => ({
       ...c,
@@ -696,7 +905,7 @@ function Licences({
       {eulas.map((e) => {
         // shortcut: Status blobs carry no EULA id; the catalog names each blob after its EULA,
         // so match on id and version. Upgrade when a blob and its EULA can differ.
-        const blob = status?.device.blobs.find((b) => b.id === e.id && b.version === e.version);
+        const blob = blobs.find((b) => b.id === e.id && b.version === e.version);
         return (
           <div key={`${e.id}@${e.version}`} className="settings-eula">
             <EulaAccept

@@ -24,49 +24,57 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
-// fakeBackend records every Apply (nil included) and returns a settable Observation.
+// fakeBackend records every Apply and returns settable Observations.
 type fakeBackend struct {
 	mu        sync.Mutex
-	obs       device.Observation
+	obs       []device.Observation
 	obsErr    error
 	applyErr  error
-	applied   []*device.Spec
+	applied   [][]*device.Spec
+	calls     []string // "nodes", "observe", "apply" in order
 	onApply   func()
 	onObserve func()
 }
 
-func (f *fakeBackend) Apply(_ context.Context, s *device.Spec) error {
+func (f *fakeBackend) Apply(_ context.Context, specs []*device.Spec) error {
 	if f.onApply != nil {
 		f.onApply()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.applied = append(f.applied, s)
+	f.calls = append(f.calls, "apply")
+	f.applied = append(f.applied, specs)
 	return f.applyErr
 }
 
-func (f *fakeBackend) Observe(context.Context) (device.Observation, error) {
+func (f *fakeBackend) Observe(context.Context) ([]device.Observation, error) {
 	if f.onObserve != nil {
 		f.onObserve()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.obs, f.obsErr
+	f.calls = append(f.calls, "observe")
+	if len(f.obs) == 0 {
+		return []device.Observation{{Phase: device.PhaseAbsent}}, f.obsErr
+	}
+	return slices.Clone(f.obs), f.obsErr
 }
 
-func (f *fakeBackend) set(o device.Observation) {
+// set makes Observe return obs.
+func (f *fakeBackend) set(obs ...device.Observation) {
 	f.mu.Lock()
-	f.obs = o
+	f.obs = obs
 	f.mu.Unlock()
 }
 
-func (f *fakeBackend) applies() []*device.Spec {
+func (f *fakeBackend) applies() [][]*device.Spec {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]*device.Spec{}, f.applied...)
+	return slices.Clone(f.applied)
 }
 
-func (f *fakeBackend) last(t *testing.T) *device.Spec {
+// last is the last Apply's specs.
+func (f *fakeBackend) last(t *testing.T) []*device.Spec {
 	t.Helper()
 	a := f.applies()
 	if len(a) == 0 {
@@ -75,75 +83,173 @@ func (f *fakeBackend) last(t *testing.T) *device.Spec {
 	return a[len(a)-1]
 }
 
-type restartBackend struct {
-	*fakeBackend
-	restarts int
+// one is the last Apply's only spec.
+func (f *fakeBackend) one(t *testing.T) *device.Spec {
+	t.Helper()
+	specs := f.last(t)
+	if len(specs) != 1 {
+		t.Fatalf("last Apply has %d specs, want 1: %+v", len(specs), specs)
+	}
+	return specs[0]
 }
 
-func (r *restartBackend) RestartPod(context.Context) error {
-	r.restarts++
+type restartBackend struct {
+	*fakeBackend
+	restarts []string // workloads
+}
+
+func (r *restartBackend) RestartPod(_ context.Context, w string) error {
+	r.mu.Lock()
+	r.restarts = append(r.restarts, w)
+	r.mu.Unlock()
 	return nil
 }
 
-// deviceBackend records SetUSBDevice calls, and whether each came before an Apply.
+func (r *restartBackend) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.restarts)
+}
+
+// nodeBackend is a k8s-like backend: it lists nodes and restarts pods.
+type nodeBackend struct {
+	*restartBackend
+	nodes    []string
+	nodesErr error
+	onNodes  func()
+}
+
+func (n *nodeBackend) USBNodes(context.Context) ([]string, error) {
+	if n.onNodes != nil {
+		n.onNodes()
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, "nodes")
+	return slices.Clone(n.nodes), n.nodesErr
+}
+
+func newNodeBackend(nodes ...string) *nodeBackend {
+	return &nodeBackend{restartBackend: &restartBackend{fakeBackend: &fakeBackend{}}, nodes: nodes}
+}
+
+// deviceBackend records SetUSBDevices calls, and whether each came before an Apply.
 type deviceBackend struct {
 	*fakeBackend
-	devs    []*device.USBDevice
+	devs    [][]device.USBDevice
 	staged  []bool
 	applies []int // len(devs) at each Apply
 }
 
-func (d *deviceBackend) SetUSBDevice(dev *device.USBDevice, beforeApply bool) {
-	d.devs = append(d.devs, dev)
+func (d *deviceBackend) SetUSBDevices(devs []device.USBDevice, beforeApply bool) {
+	d.devs = append(d.devs, devs)
 	d.staged = append(d.staged, beforeApply)
 }
 
-func (d *deviceBackend) Apply(ctx context.Context, s *device.Spec) error {
+func (d *deviceBackend) Apply(ctx context.Context, s []*device.Spec) error {
 	d.applies = append(d.applies, len(d.devs))
 	return d.fakeBackend.Apply(ctx, s)
 }
 
-type fakePrinter struct{ err error }
-
-func (p fakePrinter) Attributes(context.Context) (printing.Attributes, error) {
-	return printing.Attributes{State: "idle", Formats: []string{"application/pdf"}, Media: []string{"iso_a4_210x297mm"}}, p.err
+type fakePrinter struct {
+	attrs printing.Attributes
+	err   error
 }
 
-type fakeScanner struct{}
+func (p fakePrinter) Attributes(context.Context) (printing.Attributes, error) { return p.attrs, p.err }
 
-func (fakeScanner) Status(context.Context) (scanning.State, error) { return scanning.StateIdle, nil }
+type fakeScanner struct {
+	h   *harness
+	url string
+}
 
-type fakeClock struct{ t time.Time }
+func (s fakeScanner) Status(context.Context) (scanning.State, error) { return scanning.StateIdle, nil }
 
-func (c *fakeClock) now() time.Time                       { return c.t }
-func (c *fakeClock) add(d time.Duration)                  { c.t = c.t.Add(d) }
-func (c *fakeClock) set(start time.Time, d time.Duration) { c.t = start.Add(d) }
+func (s fakeScanner) Capabilities(context.Context) (scanning.Caps, error) {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	s.h.capsCalls[s.url]++
+	if err := s.h.capsErr[s.url]; err != nil {
+		return scanning.Caps{}, err
+	}
+	if c, ok := s.h.scanCaps[s.url]; ok {
+		return c, nil
+	}
+	return scanning.Caps{Sources: []string{"platen"}, Resolutions: []int{300}, ColorModes: []string{"color"}}, nil
+}
+
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+func (c *fakeClock) set(start time.Time, d time.Duration) {
+	c.mu.Lock()
+	c.t = start.Add(d)
+	c.mu.Unlock()
+}
 
 var t0 = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 
 type harness struct {
-	c       *Controller
-	b       *fakeBackend
-	clock   *fakeClock
-	printed []string // printer URIs queried
-	pubs    []apitypes.Status
+	c     *Controller
+	b     *fakeBackend
+	clock *fakeClock
+	pubs  []apitypes.Status
+
+	mu        sync.Mutex
+	printed   []string                       // printer URIs queried
+	attrs     map[string]printing.Attributes // by URI; default idleAttrs
+	scanCaps  map[string]scanning.Caps
+	capsErr   map[string]error
+	capsCalls map[string]int
 }
+
+var idleAttrs = printing.Attributes{State: "idle", Formats: []string{"application/pdf"}, Media: []string{"iso_a4_210x297mm"}}
 
 func newHarness(t *testing.T, o Options) *harness {
 	t.Helper()
-	h := &harness{b: &fakeBackend{obs: device.Observation{Phase: device.PhaseAbsent}}, clock: &fakeClock{t: t0}}
-	if o.Backend == nil {
+	h := &harness{
+		b: &fakeBackend{}, clock: &fakeClock{t: t0},
+		attrs: map[string]printing.Attributes{}, scanCaps: map[string]scanning.Caps{}, capsErr: map[string]error{}, capsCalls: map[string]int{},
+	}
+	switch b := o.Backend.(type) {
+	case nil:
 		o.Backend = h.b
+	case *restartBackend:
+		h.b = b.fakeBackend
+	case *nodeBackend:
+		h.b = b.fakeBackend
+	case *deviceBackend:
+		h.b = b.fakeBackend
 	}
 	if o.BackendName == "" {
 		o.BackendName = BackendSim
 	}
 	o.Now = h.clock.now
 	o.Printer = func(uri string) PrinterObserver {
+		h.mu.Lock()
+		defer h.mu.Unlock()
 		h.printed = append(h.printed, uri)
-		return fakePrinter{}
+		a, ok := h.attrs[uri]
+		if !ok {
+			a = idleAttrs
+		}
+		return fakePrinter{attrs: a}
 	}
-	o.Scanner = func(string) ScannerObserver { return fakeScanner{} }
+	o.Scanner = func(url string) ScannerObserver { return fakeScanner{h: h, url: url} }
 	o.Publish = func(s apitypes.Status) { h.pubs = append(h.pubs, s) }
 	h.c = New(o)
 	return h
@@ -154,9 +260,15 @@ func (h *harness) step() apitypes.Status {
 	return h.c.Current()
 }
 
+// report sends an agent report of workload "" with the fixture's inventory.
 func (h *harness) report(t *testing.T, fixture string, mod ...func(*device.AgentReport)) device.DesiredState {
 	t.Helper()
-	r := device.AgentReport{PodUID: "pod", Inventory: catalog.Fixture(fixture), DevicePresent: true}
+	return h.reportOn(t, "", fixture, mod...)
+}
+
+func (h *harness) reportOn(t *testing.T, workload, fixture string, mod ...func(*device.AgentReport)) device.DesiredState {
+	t.Helper()
+	r := device.AgentReport{PodUID: "pod", Workload: workload, Inventory: catalog.Fixture(fixture)}
 	for _, m := range mod {
 		m(&r)
 	}
@@ -164,27 +276,94 @@ func (h *harness) report(t *testing.T, fixture string, mod ...func(*device.Agent
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(ds.Browse, device.BrowseTypes) {
-		t.Fatalf("Browse = %v", ds.Browse)
+	if !reflect.DeepEqual(ds.Browse, device.BrowseTypes) || ds.Queues == nil || ds.StageEULAs == nil {
+		t.Fatalf("desired state %+v", ds)
 	}
 	return ds
 }
 
-func usbConfig(name string) *config.Config {
-	c := config.Default(name)
+// dev is the fixture's device with the given vendor:product.
+func dev(t *testing.T, fixture, vendorProduct string) device.USBDevice {
+	t.Helper()
+	for _, d := range catalog.Fixture(fixture).Devices {
+		if d.VendorID+":"+d.ProductID == vendorProduct {
+			return d
+		}
+	}
+	t.Fatalf("no %s in fixture %s", vendorProduct, fixture)
+	return device.USBDevice{}
+}
+
+func sel(d device.USBDevice) *config.USB {
+	return &config.USB{VendorID: d.VendorID, ProductID: d.ProductID, Serial: d.Serial}
+}
+
+func usbPrinter(id string, d device.USBDevice) config.Printer {
+	return config.Printer{ID: id, Name: id, Enabled: true, Mode: config.ModeUSB, USB: sel(d), Driver: config.Auto}
+}
+
+func usbScanner(id string, d device.USBDevice) config.Scanner {
+	return config.Scanner{ID: id, Name: id, Enabled: true, Mode: config.ModeUSB, USB: sel(d), Backend: config.BackendAuto}
+}
+
+func simPrinter(id string) config.Printer {
+	return config.Printer{ID: id, Name: id, Enabled: true, Mode: config.ModeSimulated, Driver: config.Auto}
+}
+
+func simScanner(id string) config.Scanner {
+	return config.Scanner{ID: id, Name: id, Enabled: true, Mode: config.ModeSimulated, Backend: config.BackendAuto}
+}
+
+func cfgOf(printers []config.Printer, scanners ...config.Scanner) *config.Config {
+	c := config.Default("Home")
+	c.Printers, c.Scanners = append(c.Printers, printers...), append(c.Scanners, scanners...)
 	return &c
 }
 
-func simConfig(name string) *config.Config {
-	c := config.Default(name)
-	c.Device.Mode = config.ModeSimulated
-	return &c
+// mfpConfig is a printer and a scanner entry on the fixture's first device.
+func mfpConfig(t *testing.T, fixture string) *config.Config {
+	t.Helper()
+	d := catalog.Fixture(fixture).Devices[0]
+	return cfgOf([]config.Printer{usbPrinter("printer", d)}, usbScanner("scanner", d))
+}
+
+func simConfig() *config.Config {
+	return cfgOf([]config.Printer{simPrinter("printer")}, simScanner("scanner"))
 }
 
 func wantPhase(t *testing.T, s apitypes.Status, phase, message string) {
 	t.Helper()
-	if s.Device.Phase != phase || (message != "*" && s.Device.Message != message) {
-		t.Fatalf("phase = %q %q, want %q %q", s.Device.Phase, s.Device.Message, phase, message)
+	if s.Phase != phase || (message != "*" && s.Message != message) {
+		t.Fatalf("phase = %q %q, want %q %q", s.Phase, s.Message, phase, message)
+	}
+}
+
+func printerStatus(t *testing.T, s apitypes.Status, id string) apitypes.StatusPrinter {
+	t.Helper()
+	for _, p := range s.Printers {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("no printer %s in %+v", id, s.Printers)
+	return apitypes.StatusPrinter{}
+}
+
+func scannerStatus(t *testing.T, s apitypes.Status, id string) apitypes.StatusScanner {
+	t.Helper()
+	for _, sc := range s.Scanners {
+		if sc.ID == id {
+			return sc
+		}
+	}
+	t.Fatalf("no scanner %s in %+v", id, s.Scanners)
+	return apitypes.StatusScanner{}
+}
+
+func wantEntry(t *testing.T, gotPhase, gotMsg, phase, message string) {
+	t.Helper()
+	if gotPhase != phase || (message != "*" && gotMsg != message) {
+		t.Fatalf("entry phase = %q %q, want %q %q", gotPhase, gotMsg, phase, message)
 	}
 }
 
@@ -195,49 +374,21 @@ func wantApplies(t *testing.T, b *fakeBackend, n int) {
 	}
 }
 
-func running(endpoints device.Endpoints) device.Observation {
+func running(endpoints ...device.Endpoint) device.Observation {
 	return device.Observation{Phase: device.PhaseRunning, HostIP: "127.0.0.1", Endpoints: endpoints}
 }
 
-func TestInitialStatus(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	got := h.c.Current()
-	want := apitypes.Status{
-		Config: apitypes.StatusConfig{State: "missing", Etag: "", AppliedEtag: "", Errors: []config.FieldError{}, ChangedAt: time.Time{}},
-		Device: apitypes.StatusDevice{
-			Phase: "none", Mode: "none", Decision: nil, Inventory: nil, Message: "",
-			Advertised: []apitypes.AdvertisedService{}, Blobs: []device.BlobStatus{},
-		},
-		Printer: apitypes.StatusPrinter{
-			Available: false, URI: "", State: "unknown",
-			Reasons: []string{}, Formats: []string{}, ConvertedFormats: []apitypes.FormatConversion{},
-			Media: []string{}, Markers: []apitypes.Marker{},
-		},
-		Scanner:   apitypes.StatusScanner{Available: false, URL: "", State: "unknown"},
-		Reconcile: []apitypes.ReconcileItem{},
-		Connect:   apitypes.Connect{DNSSDName: "", IPPURIs: []string{}, ESCLURLs: []string{}},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Current() =\n%+v\nwant\n%+v", got, want)
-	}
-	b, err := json.Marshal(got)
+func validateStatus(t *testing.T, s apitypes.Status) {
+	t.Helper()
+	validate(t, "Status", s)
+}
+
+func validate(t *testing.T, def string, v any) {
+	t.Helper()
+	b, err := json.Marshal(v)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{`"state":""`, `"mode":""`, `"phase":""`} {
-		if bytes.Contains(b, []byte(bad)) {
-			t.Errorf("initial Status contains %s: %s", bad, b)
-		}
-	}
-	if !strings.Contains(string(b), `"changedAt":"0001-01-01T00:00:00Z"`) {
-		t.Errorf("changedAt not the zero time: %s", b)
-	}
-	validateStatus(t, b)
-	wantApplies(t, h.b, 0)
-}
-
-func validateStatus(t *testing.T, b []byte) {
-	t.Helper()
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema.API()))
 	if err != nil {
 		t.Fatal(err)
@@ -247,17 +398,67 @@ func validateStatus(t *testing.T, b []byte) {
 	if err := comp.AddResource(schema.APIID, doc); err != nil {
 		t.Fatal(err)
 	}
-	sch, err := comp.Compile(schema.APIID + "#/$defs/Status")
+	sch, err := comp.Compile(schema.APIID + "#/$defs/" + def)
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := jsonschema.UnmarshalJSON(bytes.NewReader(b))
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sch.Validate(v); err != nil {
-		t.Fatalf("Status does not validate: %v\n%s", err, b)
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("%s does not validate: %v\n%s", def, err, b)
 	}
+}
+
+func TestNoLockAcrossBackendCalls(t *testing.T) {
+	nb := newNodeBackend()
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	call := func() {
+		h.c.Current()
+		h.c.Setup()
+		if _, err := h.c.AgentReport(context.Background(), device.AgentReport{Inventory: catalog.Fixture("ippusb-mfp")}); err != nil {
+			t.Error(err)
+		}
+	}
+	h.b.onApply, h.b.onObserve, nb.onNodes = call, call, call
+	done := make(chan struct{})
+	go func() {
+		h.c.step(context.Background())
+		h.c.step(context.Background())
+		_ = h.c.Detect(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop blocked: a lock is held across a backend call")
+	}
+	wantApplies(t, h.b, 1)
+}
+
+func TestInitialStatus(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	got := h.c.Current()
+	want := apitypes.Status{
+		Config:   apitypes.StatusConfig{State: "missing", Errors: []config.FieldError{}},
+		Phase:    "none",
+		Printers: []apitypes.StatusPrinter{}, Scanners: []apitypes.StatusScanner{},
+		Workloads: []apitypes.StatusWorkload{}, Devices: []apitypes.DetectedDevice{},
+		Reconcile: []apitypes.ReconcileItem{},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Current() =\n%+v\nwant\n%+v", got, want)
+	}
+	b, _ := json.Marshal(got)
+	for _, bad := range []string{`"state":""`, `"phase":""`, `null`} {
+		if bytes.Contains(b, []byte(bad)) {
+			t.Errorf("initial Status contains %s: %s", bad, b)
+		}
+	}
+	validateStatus(t, got)
+	wantApplies(t, h.b, 0)
 }
 
 func TestConfigEffective(t *testing.T) {
@@ -265,477 +466,1027 @@ func TestConfigEffective(t *testing.T) {
 	if got := h.c.Config(); !reflect.DeepEqual(got, config.Default("Printer")) {
 		t.Fatalf("before input: %+v", got)
 	}
-	applied := usbConfig("Applied")
-	h.c.ConfigApplied(applied, "e1")
-	if got := h.c.Config(); got.Name != "Applied" {
+	h.c.ConfigApplied(cfgOf(nil), "e1")
+	if got := h.c.Config(); got.Name != "Home" {
 		t.Fatalf("after apply: %q", got.Name)
-	}
-	good := usbConfig("Good")
-	h.c.ConfigInvalid(errors.New("bad"), "e2", good)
-	if got := h.c.Config(); got.Name != "Good" {
-		t.Fatalf("after invalid: %q", got.Name)
 	}
 	h.c.ConfigInvalid(errors.New("bad"), "e3", nil)
 	if got := h.c.Config(); got.Name != "Printer" {
 		t.Fatalf("after invalid without last-good: %q", got.Name)
 	}
-	h.c.ConfigMissing()
-	if got := h.c.Config(); !reflect.DeepEqual(got, config.Default("Printer")) {
-		t.Fatalf("after missing: %+v", got)
-	}
 }
 
-func TestMissingConfig(t *testing.T) {
-	t.Run("usb resource", func(t *testing.T) {
+func TestOverallPhase(t *testing.T) {
+	t.Run("no config with usb: probing", func(t *testing.T) {
 		h := newHarness(t, Options{USBAvailable: true})
 		h.c.ConfigMissing()
 		s := h.step()
-		if sp := h.b.last(t); sp == nil || sp.Mode != device.ModeProbe || sp.Hash != device.SpecHash(sp) {
-			t.Fatalf("applied %+v, want the probe spec", sp)
-		}
-		if s.Device.Mode != "probe" {
-			t.Fatalf("mode %q", s.Device.Mode)
+		if sp := h.b.one(t); sp.Mode != device.ModeProbe || sp.Node != "" || sp.Hash != device.SpecHash(sp) {
+			t.Fatalf("spec %+v", sp)
 		}
 		wantPhase(t, s, "probing", msgWaitingAgent)
+		if len(s.Workloads) != 1 || s.Workloads[0].Mode != "probe" {
+			t.Fatalf("workloads %+v", s.Workloads)
+		}
+		validateStatus(t, s)
 	})
-	t.Run("no usb resource", func(t *testing.T) {
+	t.Run("no config, no usb: none", func(t *testing.T) {
 		h := newHarness(t, Options{})
 		h.c.ConfigMissing()
 		s := h.step()
 		h.step()
-		a := h.b.applies()
-		if len(a) != 1 || a[0] != nil {
-			t.Fatalf("applies %v, want one Apply(nil)", a)
-		}
-		if s.Device.Mode != "none" {
-			t.Fatalf("mode %q", s.Device.Mode)
+		if a := h.b.applies(); len(a) != 1 || len(a[0]) != 0 {
+			t.Fatalf("applies %v, want one empty Apply", a)
 		}
 		wantPhase(t, s, "none", "")
+	})
+	t.Run("no config, probe failed: error", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		h.c.ConfigMissing()
+		h.step()
+		h.b.set(device.Observation{Phase: device.PhaseFailed, Message: "probe: CrashLoopBackOff"})
+		wantPhase(t, h.step(), "error", "probe: CrashLoopBackOff")
+	})
+	t.Run("no config, unschedulable probe", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+		h.c.ConfigMissing()
+		h.step()
+		h.b.set(device.Observation{Phase: device.PhasePending, Unschedulable: true, Message: "0/3 nodes"})
+		wantPhase(t, h.step(), "probing", msgUnschedulable)
+	})
+	t.Run("every entry disabled: none", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		cfg := mfpConfig(t, "ippusb-mfp")
+		cfg.Printers[0].Enabled, cfg.Scanners[0].Enabled = false, false
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, "ippusb-mfp")
+		s := h.step()
+		wantPhase(t, s, "none", msgNothingInUse)
+		wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "none", "")
+		if sp := h.b.one(t); sp.Mode != device.ModeProbe {
+			t.Fatalf("spec %+v, want the probe", sp)
+		}
+	})
+	t.Run("unplugged device: deploying", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		cfg := mfpConfig(t, "ippusb-mfp")
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, "no-printer")
+		h.b.set(running())
+		s := h.step()
+		wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "probing", msgNotPlugged)
+		wantPhase(t, s, "deploying", "printer: "+msgNotPlugged)
+		if sp := h.b.one(t); sp.Mode != device.ModeProbe {
+			t.Fatalf("spec %+v", sp)
+		}
 	})
 }
 
 func TestIPPUSBReachesReady(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
-	h.step()
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e1")
 	h.report(t, "ippusb-mfp")
-	h.step()
-	h.c.ConfigApplied(usbConfig("Printer"), "e1")
-	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:4000/ipp/print", ScannerURL: "http://127.0.0.1:4001/eSCL"}))
+	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: "ipp://127.0.0.1:4000/ipp/print"}, device.Endpoint{ID: "scanner", ScannerURL: "http://127.0.0.1:4001/eSCL"}))
 	s := h.step()
-	sp := h.b.last(t)
-	if sp.Mode != device.ModeUSB || sp.Printer != "ipp-usb" || sp.Scanner != "ipp-usb" {
+	sp := h.b.one(t)
+	want := []device.PrinterSpec{{ID: "printer", Family: "ipp-usb", USB: dev(t, "ippusb-mfp", "03f0:2754").Key()}}
+	if sp.Mode != device.ModeUSB || !reflect.DeepEqual(sp.Printers, want) || len(sp.Scanners) != 1 || sp.Scanners[0].Family != "ipp-usb" {
 		t.Fatalf("spec %+v", sp)
 	}
 	wantPhase(t, s, "ready", "")
-	if !s.Printer.Available || s.Printer.URI != "ipp://127.0.0.1:4000/ipp/print" || s.Printer.State != "idle" {
-		t.Fatalf("printer %+v", s.Printer)
+	p, sc := s.Printers[0], s.Scanners[0]
+	if !p.Available || p.URI != "ipp://127.0.0.1:4000/ipp/print" || p.Decision == nil || p.Decision.Rule != "ipp-over-usb" || p.Device == nil {
+		t.Fatalf("printer %+v", p)
 	}
-	if !s.Scanner.Available || s.Scanner.URL != "http://127.0.0.1:4001/eSCL" || s.Scanner.State != "idle" {
-		t.Fatalf("scanner %+v", s.Scanner)
+	if !sc.Available || sc.URL != "http://127.0.0.1:4001/eSCL" || !reflect.DeepEqual(sc.Connect.ESCLURLs, []string{sc.URL}) {
+		t.Fatalf("scanner %+v", sc)
 	}
-	if s.Device.Decision == nil || s.Device.Decision.Rule != "ipp-over-usb" || s.Device.Inventory == nil {
-		t.Fatalf("decision %+v", s.Device.Decision)
-	}
-	if len(h.pubs) == 0 || h.pubs[len(h.pubs)-1].Device.Phase != "ready" {
+	if len(h.pubs) == 0 || h.pubs[len(h.pubs)-1].Phase != "ready" {
 		t.Fatal("ready not published")
 	}
-	b, _ := json.Marshal(s)
-	validateStatus(t, b)
+	validateStatus(t, s)
 }
 
-func TestUSBNoReportAbsentOrFailed(t *testing.T) {
-	for _, ph := range []string{device.PhaseAbsent, device.PhaseFailed} {
-		t.Run(ph, func(t *testing.T) {
-			h := newHarness(t, Options{USBAvailable: true})
-			h.b.set(device.Observation{Phase: ph})
-			h.c.ConfigApplied(usbConfig("P"), "e")
-			h.step()
-			wantApplies(t, h.b, 1)
-			if sp := h.b.last(t); sp == nil || sp.Mode != device.ModeProbe {
-				t.Fatalf("spec %+v", sp)
+// officeServices are the browsed services of the office node: ipp-usb's
+// HP (IPP and eSCL on one port) and AirSane's Samsung and LiDE.
+func officeServices() []device.DNSSDService {
+	return []device.DNSSDService{
+		{Type: device.ServiceIPP, Name: "HP OfficeJet Pro 8020 [USB]", Port: 60000, TXT: map[string]string{"rp": "ipp/print", "usb_MFG": "HP", "usb_MDL": "OfficeJet Pro 8020 series"}},
+		{Type: device.ServiceUScan, Name: "HP OfficeJet Pro 8020 [USB] scanner", Port: 60000, TXT: map[string]string{"rs": "eSCL"}},
+		{Type: device.ServiceUScan, Name: "Samsung SCX-4300", Port: 8090, TXT: map[string]string{"rs": "eSCL/samsung", "ty": "SCX-4300 Series"}},
+		{Type: device.ServiceUScan, Name: "CanoScan", Port: 8090, TXT: map[string]string{"rs": "eSCL/lide", "ty": "CanoScan LiDE 100"}},
+		{Type: device.ServiceIPP, Name: "samsung", Port: 8005, TXT: map[string]string{"rp": "ipp/print/samsung"}},
+	}
+}
+
+func officeConfig(t *testing.T) *config.Config {
+	t.Helper()
+	hp, sam := dev(t, "office", "03f0:2754"), dev(t, "office", "04e8:342e")
+	return cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}, usbScanner("hp-scan", hp), usbScanner("samsung-scan", sam))
+}
+
+func samsungQueue(r *device.AgentReport) {
+	r.Queues = []device.QueueResult{{ID: "samsung", State: device.QueueOK, PrinterURI: "ipp://127.0.0.1:8005/ipp/print/samsung"}}
+}
+
+func TestTwoPrintersTwoScanners(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	h.c.ConfigApplied(officeConfig(t), "e")
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	withServices := func(r *device.AgentReport) { r.Services = officeServices() }
+	h.report(t, "office", withServices, samsungQueue)
+	s := h.step()
+	sp := h.b.one(t)
+	if len(sp.Printers) != 2 || sp.Printers[0].Family != "ipp-usb" || sp.Printers[1].Family != "legacy" ||
+		len(sp.Scanners) != 2 || sp.Scanners[0].Family != "ipp-usb" || sp.Scanners[1].Family != "airsane" {
+		t.Fatalf("spec %+v", sp)
+	}
+	want := map[string]string{
+		"hp":           "ipp://192.168.1.20:60000/ipp/print",
+		"samsung":      "ipp://192.168.1.20:8005/ipp/print/samsung",
+		"hp-scan":      "http://192.168.1.20:60000/eSCL",
+		"samsung-scan": "http://192.168.1.20:8090/eSCL/samsung",
+	}
+	names := map[string]string{"hp": "HP OfficeJet Pro 8020 [USB]", "samsung": "samsung", "hp-scan": "HP OfficeJet Pro 8020 [USB] scanner", "samsung-scan": "Samsung SCX-4300"}
+	for _, p := range s.Printers {
+		if p.URI != want[p.ID] || !reflect.DeepEqual(p.Connect.IPPURIs, []string{want[p.ID]}) || p.Connect.DNSSDName != names[p.ID] {
+			t.Errorf("printer %s: uri %q connect %+v", p.ID, p.URI, p.Connect)
+		}
+		wantEntry(t, p.Phase, p.Message, "ready", "")
+	}
+	for _, sc := range s.Scanners {
+		if sc.URL != want[sc.ID] || !reflect.DeepEqual(sc.Connect.ESCLURLs, []string{want[sc.ID]}) || sc.Connect.DNSSDName != names[sc.ID] {
+			t.Errorf("scanner %s: url %q connect %+v", sc.ID, sc.URL, sc.Connect)
+		}
+	}
+	wantPhase(t, s, "ready", "")
+	validateStatus(t, s)
+	if len(s.Devices) != 4 {
+		t.Fatalf("devices %+v", s.Devices)
+	}
+
+	// One queue error turns only that printer to error.
+	h.report(t, "office", withServices, func(r *device.AgentReport) {
+		r.Queues = []device.QueueResult{{ID: "samsung", State: device.QueueError, Message: "create queue: bad driver"}}
+	})
+	s = h.step()
+	wantEntry(t, printerStatus(t, s, "samsung").Phase, printerStatus(t, s, "samsung").Message, "error", "create queue: bad driver")
+	wantEntry(t, printerStatus(t, s, "hp").Phase, "", "ready", "*")
+	wantEntry(t, scannerStatus(t, s, "samsung-scan").Phase, "", "ready", "*")
+	wantPhase(t, s, "error", "samsung: create queue: bad driver")
+}
+
+func TestTwoNodes(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	hp, sam := dev(t, "ippusb-mfp", "03f0:2754"), dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+	h.reportOn(t, "n1", "ippusb-mfp")
+	h.reportOn(t, "n2", "samsung-scx4300-mfp")
+	h.step()
+	specs := h.b.last(t)
+	if len(specs) != 2 || specs[0].Node != "n1" || specs[1].Node != "n2" ||
+		specs[0].Printers[0].ID != "hp" || specs[1].Printers[0].ID != "samsung" {
+		t.Fatalf("specs %+v", specs)
+	}
+	if ds := h.reportOn(t, "n2", "samsung-scx4300-mfp"); ds.Hash != specs[1].Hash || len(ds.Queues) != 1 || ds.Queues[0].ID != "samsung" {
+		t.Fatalf("n2 desired state %+v", ds)
+	}
+	if ds := h.reportOn(t, "n1", "ippusb-mfp"); ds.Hash != specs[0].Hash || len(ds.Queues) != 0 {
+		t.Fatalf("n1 desired state %+v", ds)
+	}
+
+	t.Run("lister error: single-node", func(t *testing.T) {
+		nb := newNodeBackend()
+		nb.nodesErr = fmt.Errorf("%w: nodes is forbidden", device.ErrSingleNode)
+		h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+		h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp)}), "e")
+		h.report(t, "ippusb-mfp")
+		h.step()
+		if sp := h.b.one(t); sp.Node != "" || len(sp.Printers) != 1 {
+			t.Fatalf("spec %+v", sp)
+		}
+	})
+	t.Run("transient lister error: keep the set, no Apply", func(t *testing.T) {
+		nb := newNodeBackend("n1", "n2")
+		h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+		h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+		h.reportOn(t, "n1", "ippusb-mfp")
+		h.reportOn(t, "n2", "samsung-scx4300-mfp")
+		h.step()
+		before := len(h.b.applies())
+		nb.mu.Lock()
+		nb.nodesErr = errors.New("list nodes: etcd timeout")
+		nb.mu.Unlock()
+		h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp)}), "e2") // a change that would Apply
+		h.clock.add(resync)
+		s := h.step()
+		if n := len(h.b.applies()); n != before {
+			t.Fatalf("%d Applies during a transient node-list error, want %d: %+v", n, before, h.b.last(t))
+		}
+		if ws := workloadNodes(s); !slices.Equal(ws, []string{"n1", "n2"}) {
+			t.Errorf("workloads %v, want the previous set", ws)
+		}
+		i := slices.IndexFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == "nodes" })
+		if i < 0 || s.Reconcile[i].OK || !strings.Contains(s.Reconcile[i].Message, "listing nodes failed: list nodes: etcd timeout") {
+			t.Errorf("reconcile %+v, want a failed nodes item during the blip", s.Reconcile)
+		}
+		nb.mu.Lock()
+		nb.nodesErr = nil
+		nb.mu.Unlock()
+		s = h.step()
+		if i := slices.IndexFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == "nodes" }); i < 0 || !s.Reconcile[i].OK {
+			t.Errorf("reconcile %+v, want the nodes item cleared after the blip", s.Reconcile)
+		}
+		if specs := h.b.last(t); len(specs) != 2 || specs[0].Node != "n1" || len(specs[1].Printers) != 0 {
+			t.Errorf("after the blip specs %+v", specs)
+		}
+	})
+	t.Run("transient lister error at cold start: reports kept", func(t *testing.T) {
+		nb := newNodeBackend("n1", "n2")
+		nb.nodesErr = errors.New("list nodes: etcd timeout")
+		h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+		h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+		h.reportOn(t, "n1", "ippusb-mfp")
+		h.reportOn(t, "n2", "samsung-scx4300-mfp")
+		h.step()
+		h.step()
+		wantApplies(t, h.b, 0)
+		nb.mu.Lock()
+		nb.nodesErr = nil
+		nb.mu.Unlock()
+		s := h.step()
+		if i := slices.IndexFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == "nodes" }); i < 0 || !s.Reconcile[i].OK {
+			t.Errorf("reconcile %+v, want the nodes item cleared after the blip", s.Reconcile)
+		}
+		for _, sp := range h.b.last(t) {
+			if sp.Mode == device.ModeProbe || len(sp.Printers) != 1 {
+				t.Fatalf("spec %+v, want the node's printer", sp)
 			}
+		}
+	})
+	t.Run("empty node list: one node-less probe", func(t *testing.T) {
+		nb := newNodeBackend()
+		h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+		h.c.ConfigMissing()
+		h.step()
+		if sp := h.b.one(t); sp.Node != "" || sp.Mode != device.ModeProbe {
+			t.Fatalf("spec %+v", sp)
+		}
+	})
+	t.Run("no config: a probe per node", func(t *testing.T) {
+		nb := newNodeBackend("n1", "n2")
+		h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+		h.c.ConfigMissing()
+		h.step()
+		specs := h.b.last(t)
+		if len(specs) != 2 || specs[0].Node != "n1" || specs[1].Node != "n2" || specs[0].Mode != device.ModeProbe || specs[1].Mode != device.ModeProbe {
+			t.Fatalf("specs %+v", specs)
+		}
+	})
+}
+
+func TestStandaloneScanner(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	lide := dev(t, "canon-lide-scanner", "04a9:1904")
+	h.c.ConfigApplied(cfgOf(nil, usbScanner("lide", lide)), "e")
+	h.report(t, "canon-lide-scanner")
+	h.step()
+	sp := h.b.one(t)
+	if sp.Mode != device.ModeUSB || len(sp.Printers) != 0 || len(sp.Scanners) != 1 ||
+		sp.Scanners[0].Family != "airsane" || !slices.Equal(sp.Scanners[0].SaneBackends, []string{"genesys"}) {
+		t.Fatalf("spec %+v", sp)
+	}
+}
+
+func TestDisabledEntries(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	cfg := mfpConfig(t, "ippusb-mfp")
+	cfg.Scanners[0].Enabled = false
+	h.c.ConfigApplied(cfg, "e")
+	h.report(t, "ippusb-mfp")
+	s := h.step()
+	if sp := h.b.one(t); len(sp.Printers) != 1 || len(sp.Scanners) != 0 {
+		t.Fatalf("spec %+v", sp)
+	}
+	sc := s.Scanners[0]
+	if sc.Enabled || sc.Phase != "none" || sc.Decision != nil || sc.Device != nil {
+		t.Fatalf("scanner %+v", sc)
+	}
+}
+
+func TestSimulatedJoinFirstWorkload(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	sam := dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	cfg := cfgOf([]config.Printer{usbPrinter("samsung", sam), simPrinter("sim-b"), simPrinter("sim-a")}, simScanner("sim-scan"))
+	h.c.ConfigApplied(cfg, "e")
+	h.reportOn(t, "n1", "none")
+	h.reportOn(t, "n2", "samsung-scx4300-mfp")
+	h.step()
+	specs := h.b.last(t)
+	if len(specs) != 2 || specs[0].Node != "n1" || specs[0].Mode != device.ModeSimulated {
+		t.Fatalf("specs %+v", specs)
+	}
+	want := []device.PrinterSpec{
+		{ID: "sim-a", Family: "sim", Name: "sim-a", Port: 8631},
+		{ID: "sim-b", Family: "sim", Name: "sim-b", Port: 8632},
+	}
+	if !reflect.DeepEqual(specs[0].Printers, want) || len(specs[0].Scanners) != 1 || specs[0].Scanners[0].Family != "sim" {
+		t.Fatalf("n1 spec %+v", specs[0])
+	}
+	if specs[1].Mode != device.ModeUSB || len(specs[1].Printers) != 1 {
+		t.Fatalf("n2 spec %+v", specs[1])
+	}
+
+	single := newHarness(t, Options{})
+	single.c.ConfigApplied(simConfig(), "e")
+	single.step()
+	if sp := single.b.one(t); sp.Node != "" || sp.Mode != device.ModeSimulated || len(sp.Printers) != 1 || len(sp.Scanners) != 1 {
+		t.Fatalf("sim spec %+v", sp)
+	}
+}
+
+// samsungCaps are the Samsung queue's live attributes (section 0 of the plan).
+var samsungCaps = device.PrinterCaps{
+	Media: []string{"iso_a4_210x297mm", "na_letter_8.5x11in"}, MediaDefault: "na_letter_8.5x11in",
+	Sides: []string{"one-sided"}, SidesDefault: "one-sided",
+	ColorModes: []string{"monochrome"}, ColorModeDefault: "monochrome",
+	Qualities: []string{"draft", "normal", "high"}, QualityDefault: "normal",
+	Resolutions: []int{300, 600}, ResolutionDefault: 600, CopiesMax: 999,
+}
+
+func TestOptionWarnings(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	cfg := mfpConfig(t, "samsung-scx4300-mfp")
+	cfg.Printers[0].Defaults = config.PrintDefaults{ColorMode: "auto", MediaSource: "tray-1"}
+	cfg.Scanners[0].Defaults = config.ScanDefaults{Intent: "photo", Source: "platen"}
+	h.c.ConfigApplied(cfg, "e")
+	const uri = "ipp://127.0.0.1:8005/ipp/print/printer"
+	h.attrs[uri] = printing.Attributes{State: "idle", Caps: samsungCaps}
+	h.scanCaps["http://127.0.0.1:8090/eSCL"] = scanning.Caps{
+		Sources: []string{"platen", "adf"}, Resolutions: []int{75, 150, 300, 600}, ColorModes: []string{"color", "grayscale"}, ADF: true,
+	}
+	h.b.set(running(device.Endpoint{ID: "scanner", ScannerURL: "http://127.0.0.1:8090/eSCL"}))
+	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
+		r.Queues = []device.QueueResult{{
+			ID: "printer", State: device.QueueOK, PrinterURI: uri, Warnings: []string{"Could not set the printer's defaults: x"},
+			Refused: []device.Dropped{{Option: "quality", Value: "high", Using: "normal"}},
+		}}
+	})
+	s := h.step()
+	p := s.Printers[0]
+	wantEntry(t, p.Phase, p.Message, "ready", "")
+	want := []apitypes.Warning{
+		{Option: "mediaSource", Value: "tray-1", Using: "", Message: "mediaSource tray-1 is not offered by this printer; it uses its own default"},
+		{Option: "colorMode", Value: "auto", Using: "monochrome", Message: "colorMode auto is not offered by this printer; it uses monochrome"},
+		{Option: "quality", Value: "high", Using: "normal", Message: "quality high could not be set as the printer's default; it uses normal"},
+		{Option: "other", Message: "Could not set the printer's defaults: x"},
+	}
+	if !reflect.DeepEqual(p.Warnings, want) {
+		t.Fatalf("printer warnings %+v", p.Warnings)
+	}
+	if !reflect.DeepEqual(p.Capabilities.ColorModes, []string{"monochrome"}) || p.Capabilities.MediaSources == nil {
+		t.Fatalf("capabilities %+v", p.Capabilities)
+	}
+	sc := s.Scanners[0]
+	if len(sc.Warnings) != 1 || sc.Warnings[0].Option != "intent" || sc.Warnings[0].Value != "photo" || sc.Warnings[0].Using != "" {
+		t.Fatalf("scanner warnings %+v", sc.Warnings)
+	}
+	for _, r := range s.Reconcile {
+		if r.Item != "workload/default" {
+			t.Fatalf("unexpected reconcile item %+v", r)
+		}
+	}
+	validateStatus(t, s)
+}
+
+func TestDesiredStateQueue(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	cfg := mfpConfig(t, "hp-legacy-mfp")
+	cfg.Printers[0].Name, cfg.Printers[0].Location = "HP", "Office"
+	cfg.Printers[0].Defaults = config.PrintDefaults{
+		Media: "na_letter_8.5x11in", MediaSource: "manual", Sides: "two-sided-long-edge", ColorMode: "monochrome",
+		Quality: "high", Resolution: 600, ContentOptimize: "text", Orientation: "landscape", NumberUp: 2,
+		PrintScaling: "fit", OutputBin: "face-down", Finishings: "staple",
+	}
+	h.c.ConfigApplied(cfg, "e")
+	if ds := h.report(t, "hp-legacy-mfp"); ds.Hash != "" || len(ds.Queues) != 0 {
+		t.Fatalf("before any spec: %+v", ds)
+	}
+	h.step()
+	sp := h.b.one(t)
+	ds := h.report(t, "hp-legacy-mfp")
+	if ds.Hash != sp.Hash || len(ds.Queues) != 1 {
+		t.Fatalf("desired %+v", ds)
+	}
+	q := ds.Queues[0]
+	hp := catalog.Fixture("hp-legacy-mfp").Devices[0]
+	want := device.QueueSpec{
+		ID: "printer", Name: "HP", Location: "Office", Driver: hpDriver, Schemes: []string{"hp", "usb"},
+		SystemURI: device.PAPPLSystemURI(8002), Device: hp, Defaults: device.PrintSettings(cfg.Printers[0].Defaults),
+	}
+	if !reflect.DeepEqual(q, want) {
+		t.Fatalf("queue\n%+v\nwant\n%+v", q, want)
+	}
+	if q.Defaults.Finishings != "staple" || q.Defaults.NumberUp != 2 || q.Device.DeviceID == "" {
+		t.Fatalf("queue defaults %+v", q.Defaults)
+	}
+	// Queue settings never roll the pod.
+	loc := mfpConfig(t, "hp-legacy-mfp")
+	loc.Printers[0].Location = "Hall"
+	h.c.ConfigApplied(loc, "e2")
+	h.step()
+	if ds := h.report(t, "hp-legacy-mfp"); ds.Queues[0].Location != "Hall" || ds.Hash != sp.Hash {
+		t.Fatalf("desired %+v", ds)
+	}
+	wantApplies(t, h.b, 1)
+}
+
+func TestQueueDeviceIDFromCache(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	sam := dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("samsung", sam)}), "e")
+	h.report(t, "samsung-scx4300-mfp")
+	h.step()
+	// A new pod started while the printer was off; it is back, attached only.
+	live := sam
+	live.DeviceID, live.Address = "", 12
+	ds := h.report(t, "none", func(r *device.AgentReport) {
+		r.PodUID, r.Attached, r.ProbeNodes = "pod-2", []device.USBDevice{live}, []string{}
+	})
+	if len(ds.Queues) != 1 || ds.Queues[0].Device.DeviceID != sam.DeviceID || ds.Queues[0].Device.Address != 12 {
+		t.Fatalf("queues %+v, want the cached device ID at the new address", ds.Queues)
+	}
+	h.step()
+	wantApplies(t, h.b, 1)
+}
+
+func TestQueueDriverName(t *testing.T) {
+	queue := func(t *testing.T, cfg *config.Config, fixture string) (device.QueueSpec, apitypes.Status) {
+		t.Helper()
+		h := newHarness(t, Options{USBAvailable: true})
+		h.c.ConfigApplied(cfg, "e")
+		h.report(t, fixture)
+		h.b.set(running())
+		s := h.step()
+		ds := h.report(t, fixture)
+		if len(ds.Queues) != 1 {
+			t.Fatalf("queues %+v", ds.Queues)
+		}
+		return ds.Queues[0], s
+	}
+	t.Run("legacy model match", func(t *testing.T) {
+		q, _ := queue(t, mfpConfig(t, "samsung-scx4300-mfp"), "samsung-scx4300-mfp")
+		if q.Driver != "samsung--scx-4300--2-0-0-en" || q.DriverPinned || q.SystemURI != device.PAPPLSystemURI(8005) {
+			t.Fatalf("queue %+v", q)
+		}
+	})
+	t.Run("driverName pins the driver", func(t *testing.T) {
+		cfg := mfpConfig(t, "samsung-scx4300-mfp")
+		cfg.Printers[0].DriverName = "samsung--scx-4300--2-0-0-en"
+		if q, _ := queue(t, cfg, "samsung-scx4300-mfp"); q.Driver != cfg.Printers[0].DriverName || !q.DriverPinned {
+			t.Fatalf("queue %+v", q)
+		}
+	})
+	t.Run("driverName no app lists", func(t *testing.T) {
+		cfg := mfpConfig(t, "samsung-scx4300-mfp")
+		cfg.Printers[0].DriverName = "acme--x-en"
+		q, s := queue(t, cfg, "samsung-scx4300-mfp")
+		if q.Driver != "samsung--scx-4300--2-0-0-en" || q.DriverPinned {
+			t.Fatalf("queue %+v", q)
+		}
+		p := s.Printers[0]
+		wantEntry(t, p.Phase, p.Message, "degraded", fmt.Sprintf(msgDriverNotListed, "acme--x-en"))
+	})
+	t.Run("family override without a match", func(t *testing.T) {
+		cfg := mfpConfig(t, "unknown-printer")
+		cfg.Printers[0].Driver = "gutenprint"
+		if q, _ := queue(t, cfg, "unknown-printer"); q.Driver != config.Auto || q.SystemURI != device.PAPPLSystemURI(8003) {
+			t.Fatalf("queue %+v", q)
+		}
+	})
+}
+
+const hpDriver = "hp--laserjet-professional-m-1132-mfp--requires-proprietary-plugin-en"
+
+func TestNoDriver(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	h.c.ConfigApplied(mfpConfig(t, "unknown-printer"), "e")
+	h.report(t, "unknown-printer")
+	h.b.set(running())
+	s := h.step()
+	sp := h.b.one(t)
+	if sp.Mode != device.ModeUSB || len(sp.Printers) != 0 || len(sp.Scanners) != 1 || sp.Scanners[0].Family != "airsane" {
+		t.Fatalf("spec %+v, want the scanner only", sp)
+	}
+	p := s.Printers[0]
+	wantEntry(t, p.Phase, p.Message, "degraded", msgNoDriver)
+	if p.Decision == nil || p.Decision.Rule != device.RuleNone {
+		t.Fatalf("decision %+v", p.Decision)
+	}
+	if ds := h.report(t, "unknown-printer"); len(ds.Queues) != 0 {
+		t.Fatalf("queues %+v, want none", ds.Queues)
+	}
+}
+
+func TestStickyPrinterOff(t *testing.T) {
+	rb := &restartBackend{fakeBackend: &fakeBackend{}}
+	h := newHarness(t, Options{Backend: rb, BackendName: BackendK8s, USBAvailable: true})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.c.ConfigApplied(mfpConfig(t, "samsung-scx4300-mfp"), "e")
+	sam := catalog.Fixture("samsung-scx4300-mfp").Devices[0]
+	healthy := func(r *device.AgentReport) {
+		r.Attached, r.ProbeNodes = []device.USBDevice{sam}, []string{sam.Node()}
+	}
+	h.report(t, "samsung-scx4300-mfp", healthy)
+	h.step()
+	first := h.b.one(t)
+	off := func(r *device.AgentReport) { r.Attached, r.ProbeNodes = []device.USBDevice{}, []string{sam.Node()} }
+	for range 3 {
+		h.clock.add(20 * time.Second)
+		h.report(t, "samsung-scx4300-mfp", off)
+		h.step()
+	}
+	// The pod restarts while the printer is off: its probe finds nothing.
+	h.report(t, "none", off, func(r *device.AgentReport) { r.PodUID, r.ProbeNodes = "pod-2", []string{} })
+	h.step()
+	h.clock.add(time.Minute)
+	ds := h.report(t, "none", off, func(r *device.AgentReport) { r.PodUID, r.ProbeNodes = "pod-2", []string{} })
+	h.step()
+	wantApplies(t, h.b, 1)
+	if ds.Hash != first.Hash || len(ds.Queues) != 1 {
+		t.Fatalf("desired %+v, want the sticky printer's queue", ds)
+	}
+	if rb.count() != 0 {
+		t.Fatalf("%d restarts for a switched-off printer", rb.count())
+	}
+}
+
+// TestStickySurvivesInvalidConfig: an invalid file without last-good keeps
+// the sticky placement, so a printer that is off when the file turns valid
+// again does not roll the pod.
+func TestStickySurvivesInvalidConfig(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	cfg := mfpConfig(t, "samsung-scx4300-mfp")
+	h.c.ConfigApplied(cfg, "e")
+	h.report(t, "samsung-scx4300-mfp")
+	h.step()
+	first := h.b.one(t)
+	h.c.ConfigInvalid(errors.New("bad"), "e2", nil)
+	h.step()
+	h.report(t, "none", func(r *device.AgentReport) { r.PodUID = "pod-2" })
+	h.c.ConfigApplied(cfg, "e3")
+	h.step()
+	wantApplies(t, h.b, 1)
+	if sp := h.b.one(t); sp.Hash != first.Hash {
+		t.Fatalf("spec %+v, want the sticky one", sp)
+	}
+}
+
+// replug runs the replug restart cases per device on k8s.
+type replug struct {
+	t  *testing.T
+	h  *harness
+	rb *restartBackend
+	p  device.USBDevice
+}
+
+func newReplug(t *testing.T, backend string) *replug {
+	rb := &restartBackend{fakeBackend: &fakeBackend{}}
+	h := newHarness(t, Options{Backend: rb, BackendName: backend, USBAvailable: true})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	return &replug{t: t, h: h, rb: rb, p: catalog.Fixture("ippusb-mfp").Devices[0]}
+}
+
+// at moves p to address a in Attached; probeNodes nil keeps p's node.
+func (r *replug) send(pod string, invAddr, attAddr int, probeNodes []string) {
+	r.t.Helper()
+	r.h.report(r.t, "ippusb-mfp", func(rep *device.AgentReport) {
+		rep.PodUID = pod
+		inv := r.p
+		inv.Address = invAddr
+		rep.Inventory.Devices = []device.USBDevice{inv}
+		att := r.p
+		att.Address, att.DeviceID = attAddr, ""
+		rep.Attached = []device.USBDevice{att}
+		rep.ProbeNodes = probeNodes
+		if rep.ProbeNodes == nil {
+			rep.ProbeNodes = []string{inv.Node()}
+		}
+	})
+	r.h.step()
+}
+
+func (r *replug) want(n int) {
+	r.t.Helper()
+	if got := r.rb.count(); got != n {
+		r.t.Fatalf("%d restarts, want %d", got, n)
+	}
+}
+
+func TestReplugMovedRestartsOnce(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 4, nil)
+	r.send("pod", 4, 5, nil)
+	r.h.clock.add(20 * time.Second)
+	r.send("pod", 4, 5, nil)
+	r.want(0)
+	r.h.clock.add(10 * time.Second)
+	r.send("pod", 4, 5, nil)
+	r.want(1)
+	for range 3 {
+		r.h.clock.add(20 * time.Second)
+		r.send("pod", 4, 5, nil)
+	}
+	r.want(1)
+	s := r.h.c.Current()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "degraded", msgUSBStale)
+	wantEntry(t, s.Scanners[0].Phase, s.Scanners[0].Message, "degraded", msgUSBStale)
+}
+
+func TestUnallocatedNodeRestartsOnce(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 4, []string{"001/099"})
+	r.h.clock.add(resync)
+	r.send("pod", 4, 4, []string{"001/099"})
+	r.want(1)
+	for range 4 {
+		r.h.clock.add(30 * time.Second)
+		r.send("pod-2", 4, 4, []string{"001/099"})
+	}
+	r.want(1)
+	s := r.h.c.Current()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "degraded", msgUSBStale)
+}
+
+func TestReplugTwiceRestartsTwice(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 5, nil)
+	r.h.clock.add(resync)
+	r.send("pod", 4, 5, nil)
+	r.want(1)
+	r.send("pod-2", 5, 5, nil) // the new pod holds the new node: the latch resets
+	r.send("pod-2", 5, 6, nil)
+	r.h.clock.add(resync)
+	r.send("pod-2", 5, 6, nil)
+	r.want(2)
+}
+
+func TestReplugFlapNoRestart(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 5, nil)
+	r.h.clock.add(20 * time.Second)
+	r.send("pod", 4, 4, nil)
+	r.send("pod", 4, 5, nil)
+	r.h.clock.add(20 * time.Second)
+	r.send("pod", 4, 5, nil)
+	r.want(0)
+}
+
+func TestTwoDevicesOneRestart(t *testing.T) {
+	rb := &restartBackend{fakeBackend: &fakeBackend{}}
+	h := newHarness(t, Options{Backend: rb, BackendName: BackendK8s, USBAvailable: true})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.c.ConfigApplied(officeConfig(t), "e")
+	office := catalog.Fixture("office").Devices
+	moved := func(r *device.AgentReport) {
+		for _, d := range office {
+			d.DeviceID = ""
+			if d.VendorID == "03f0" || d.VendorID == "04e8" {
+				d.Address += 20
+			}
+			r.Attached = append(r.Attached, d)
+		}
+		for _, d := range office {
+			r.ProbeNodes = append(r.ProbeNodes, d.Node())
+		}
+	}
+	h.report(t, "office", moved)
+	h.step()
+	h.clock.add(resync)
+	h.report(t, "office", moved)
+	h.step()
+	if !slices.Equal(rb.restarts, []string{""}) {
+		t.Fatalf("restarts %v, want one of the node-less workload", rb.restarts)
+	}
+}
+
+func TestOldAgentNoRestarts(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	for range 3 {
+		r.h.report(t, "ippusb-mfp")
+		r.h.step()
+		r.h.clock.add(resync)
+	}
+	r.want(0)
+}
+
+// A device that appears without a known device ID restarts the pod once,
+// and the new pod's report adds it to the spec.
+func TestAppearedWithoutDeviceID(t *testing.T) {
+	for _, backend := range []string{BackendK8s, BackendDocker} {
+		t.Run(backend, func(t *testing.T) {
+			r := newReplug(t, backend)
+			att := r.p
+			att.DeviceID = ""
+			appeared := func(rep *device.AgentReport) { rep.Attached, rep.ProbeNodes = []device.USBDevice{att}, []string{} }
+			r.h.report(t, "none", appeared)
+			s := r.h.step()
+			if sp := r.h.b.one(t); len(sp.Printers) != 0 || len(sp.Scanners) != 1 {
+				t.Fatalf("spec %+v, want the scanner only until the printer's device ID is known", sp)
+			}
+			wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgNewDevice)
+			r.h.clock.add(resync)
+			r.h.report(t, "none", appeared)
+			r.h.step()
+			r.want(1)
+			r.h.clock.add(resync)
+			r.h.report(t, "none", appeared)
+			r.h.step()
+			r.want(1)
+			r.send("pod-2", 4, 4, nil)
+			if sp := r.h.b.one(t); len(sp.Printers) != 1 || len(sp.Scanners) != 1 {
+				t.Fatalf("spec %+v, want the printer and scanner", sp)
+			}
+			r.want(1)
 		})
 	}
 }
 
-func TestUSBUnavailable(t *testing.T) {
-	const msg = "device.mode usb needs a USB resource (set --usb-resource)"
-	for _, invalid := range []bool{false, true} {
-		h := newHarness(t, Options{BackendName: BackendK8s, USBUnavailable: msg})
-		if invalid {
-			h.c.ConfigInvalid(errors.New("bad"), "e", usbConfig("P"))
-		} else {
-			h.c.ConfigApplied(usbConfig("P"), "e")
-		}
-		s := h.step()
-		wantPhase(t, s, "error", msg)
-		h.report(t, "ippusb-mfp")
-		h.clock.add(resync)
-		h.step()
-		a := h.b.applies()
-		if len(a) != 1 || a[0] != nil {
-			t.Fatalf("invalid=%v: applies %v, want exactly one Apply(nil)", invalid, a)
-		}
+// k8s: a sticky entry whose pod started while the device was off, with the
+// device ID cached: when the device attaches, one restart after 30 s.
+func TestAppearedStickyRestartsOnce(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 4, nil)
+	first := r.h.b.one(t)
+	off := func(rep *device.AgentReport) {
+		rep.PodUID, rep.Attached, rep.ProbeNodes = "pod-2", []device.USBDevice{}, []string{}
+	}
+	r.h.report(t, "none", off)
+	r.h.step()
+	att := r.p
+	att.DeviceID, att.Address = "", 7
+	on := func(rep *device.AgentReport) {
+		rep.PodUID, rep.Attached, rep.ProbeNodes = "pod-2", []device.USBDevice{att}, []string{}
+	}
+	r.h.report(t, "none", on)
+	r.h.step()
+	r.want(0)
+	r.h.clock.add(resync)
+	r.h.report(t, "none", on)
+	r.h.step()
+	r.want(1)
+	if sp := r.h.b.one(t); sp.Hash != first.Hash {
+		t.Fatalf("spec changed: %+v", sp)
 	}
 }
 
-func TestUSBWithoutResourceInSim(t *testing.T) {
-	h := newHarness(t, Options{})
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.step()
-	if sp := h.b.last(t); sp == nil || sp.Mode != device.ModeProbe {
-		t.Fatalf("spec %+v", sp)
-	}
-	h.b.set(running(device.Endpoints{}))
-	h.report(t, "none") // empty inventory
-	s := h.step()
-	wantPhase(t, s, "probing", msgNoPrinter)
-	wantApplies(t, h.b, 1)
-}
-
-func TestRestartWithRunningPod(t *testing.T) {
+func TestConnectionRefusedGrace(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
 	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
-	h.c.ConfigApplied(usbConfig("P"), "e")
+	h.c.ConfigApplied(mfpConfig(t, "samsung-scx4300-mfp"), "e")
+	refused := func(r *device.AgentReport) {
+		r.Queues = []device.QueueResult{{ID: "printer", State: device.QueueError, Message: "get-printers: connection refused", Unreachable: true}}
+	}
+	h.report(t, "samsung-scx4300-mfp", refused)
 	s := h.step()
-	wantPhase(t, s, "deploying", msgWaitingAgent)
-	h.clock.add(29 * time.Second)
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgStartingApp)
+	h.clock.add(20 * time.Second)
+	h.report(t, "samsung-scx4300-mfp", refused)
+	s = h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgStartingApp)
+	h.clock.add(10 * time.Second)
+	h.report(t, "samsung-scx4300-mfp", refused)
+	s = h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "error", "get-printers: connection refused")
+	// A container still waiting (pulling) keeps the grace.
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20", Message: "printer-app-legacy: ContainerCreating"})
+	s = h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgStartingApp)
+	// A new pod gets a new grace.
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.report(t, "samsung-scx4300-mfp", refused, func(r *device.AgentReport) { r.PodUID = "pod-2" })
+	s = h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgStartingApp)
+}
+
+func TestScannerCapsCached(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	const u = "http://127.0.0.1:4001/eSCL"
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	h.report(t, "ippusb-mfp")
+	h.b.set(running(device.Endpoint{ID: "scanner", ScannerURL: u}))
+	h.capsErr[u] = errors.New("timeout")
 	h.step()
-	wantApplies(t, h.b, 0)
+	h.step()
+	if h.capsCalls[u] != 1 {
+		t.Fatalf("%d caps calls after a failure within resync, want 1", h.capsCalls[u])
+	}
+	h.capsErr[u] = nil
+	h.clock.add(resync)
+	s := h.step()
+	h.step()
+	h.clock.add(time.Hour)
 	h.report(t, "ippusb-mfp")
 	h.step()
-	if sp := h.b.last(t); sp.Mode != device.ModeUSB || sp.Printer != "ipp-usb" {
-		t.Fatalf("spec %+v", sp)
+	if h.capsCalls[u] != 2 || !slices.Equal(s.Scanners[0].Capabilities.Sources, []string{"platen"}) {
+		t.Fatalf("%d caps calls, caps %+v", h.capsCalls[u], s.Scanners[0].Capabilities)
 	}
-	wantApplies(t, h.b, 1)
-}
-
-func TestRestartWithPendingPod(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
-	h.b.set(device.Observation{Phase: device.PhasePending})
-	h.c.ConfigApplied(usbConfig("P"), "e")
+	h.b.set(running(device.Endpoint{ID: "scanner", ScannerURL: u + "2"}))
 	h.step()
-	h.clock.set(t0, 31*time.Second)
-	h.step()
-	h.clock.set(t0, 4*time.Minute)
-	h.step()
-	wantApplies(t, h.b, 0)
-	h.clock.set(t0, 5*time.Minute)
-	h.step()
-	if sp := h.b.last(t); sp.Mode != device.ModeProbe {
-		t.Fatalf("spec %+v", sp)
+	if h.capsCalls[u+"2"] != 1 {
+		t.Fatal("a new URL was not queried")
 	}
 }
 
-// A control-plane restart must not replace a running device pod whose agent
-// is still backing off (up to 30 s) or waiting for Service endpoints.
-func TestRestartWithRunningPodNoReport(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
-	h.b.set(device.Observation{Phase: device.PhaseRunning})
-	h.c.ConfigApplied(usbConfig("P"), "e")
+func TestBlobWorkload(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	hp, sam := dev(t, "hp-legacy-mfp", "03f0:042a"), dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	cfg := cfgOf([]config.Printer{usbPrinter("samsung", sam), usbPrinter("hp", hp)})
+	cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
+	h.c.ConfigApplied(cfg, "e")
+	h.reportOn(t, "n1", "samsung-scx4300-mfp")
+	h.reportOn(t, "n2", "hp-legacy-mfp")
 	h.step()
-	wantApplies(t, h.b, 0)
-	h.clock.set(t0, resync)
-	h.step()
-	h.clock.set(t0, 2*time.Minute)
+	specs := h.b.last(t)
+	if len(specs[0].Blobs) != 0 || len(specs[1].Blobs) != 1 {
+		t.Fatalf("specs %+v, want the blob on n2", specs)
+	}
+	want := []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+	if ds := h.reportOn(t, "n2", "hp-legacy-mfp"); !reflect.DeepEqual(ds.StageEULAs, want) {
+		t.Fatalf("n2 stage %+v", ds.StageEULAs)
+	}
+	if ds := h.reportOn(t, "n1", "samsung-scx4300-mfp"); len(ds.StageEULAs) != 0 {
+		t.Fatalf("n1 stage %+v", ds.StageEULAs)
+	}
+
+	// Two nodes needing blobs: the first keeps them, and the nodes item says so.
+	hp2 := hp
+	hp2.Serial = "OTHER"
+	cfg2 := cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("hp2", hp2)})
+	cfg2.Licenses = cfg.Licenses
+	h.c.ConfigApplied(cfg2, "e2")
+	h.reportOn(t, "n1", "hp-legacy-mfp", func(r *device.AgentReport) { r.Inventory.Devices[0].Serial = "OTHER" })
 	s := h.step()
-	wantApplies(t, h.b, 0)
-	wantPhase(t, s, "deploying", msgWaitingAgent)
-	h.report(t, "ippusb-mfp")
-	h.step()
-	if sp := h.b.last(t); sp.Mode != device.ModeUSB {
-		t.Fatalf("spec %+v, want the usb spec without a probe in between", sp)
+	specs = h.b.last(t)
+	if len(specs[0].Blobs) != 1 || len(specs[1].Blobs) != 0 {
+		t.Fatalf("specs %+v", specs)
 	}
-	wantApplies(t, h.b, 1)
+	i := slices.IndexFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == "nodes" })
+	if i < 0 || s.Reconcile[i].OK || !strings.Contains(s.Reconcile[i].Message, "n1, n2") {
+		t.Fatalf("reconcile %+v", s.Reconcile)
+	}
 }
 
-func TestRestartWithRunningPodNeverReporting(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
-	h.b.set(device.Observation{Phase: device.PhaseRunning})
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.clock.set(t0, pendingWait-time.Second)
+// A control-plane restart with a running pod: no Apply until it reports,
+// and its first report yields the same spec hash.
+func TestControlPlaneRestartSingleNode(t *testing.T) {
+	before := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	before.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	before.report(t, "ippusb-mfp")
+	before.step()
+	running := before.b.one(t)
+
+	for _, phase := range []string{device.PhaseRunning, device.PhasePending} {
+		t.Run(phase, func(t *testing.T) {
+			h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+			h.b.set(device.Observation{Phase: phase})
+			h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+			s := h.step()
+			wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgWaitingAgent)
+			h.clock.set(t0, resync)
+			h.step()
+			h.clock.set(t0, pendingWait-time.Second)
+			h.step()
+			wantApplies(t, h.b, 0)
+			h.report(t, "ippusb-mfp")
+			h.step()
+			if sp := h.b.one(t); sp.Hash != running.Hash {
+				t.Fatalf("spec %+v, want the running hash", sp)
+			}
+		})
+	}
+	t.Run("never reporting", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+		h.b.set(device.Observation{Phase: device.PhaseRunning})
+		h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+		h.clock.set(t0, pendingWait)
+		h.step()
+		if sp := h.b.one(t); sp.Mode != device.ModeProbe {
+			t.Fatalf("spec %+v", sp)
+		}
+	})
+	t.Run("absent pod applies at once", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+		h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+		h.step()
+		wantApplies(t, h.b, 1)
+	})
+}
+
+func TestControlPlaneRestartMultiNode(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	listed := false
+	nb.onNodes = func() { listed = true }
+	nb.onObserve = func() {
+		if listed {
+			nb.obs = []device.Observation{{Workload: "n1", Phase: device.PhaseRunning}, {Workload: "n2", Phase: device.PhaseRunning}}
+		}
+	}
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	hp, sam := dev(t, "ippusb-mfp", "03f0:2754"), dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+	h.step()
+	if nb.calls[0] != "nodes" || nb.calls[1] != "observe" {
+		t.Fatalf("calls %v, want the node list before Observe", nb.calls)
+	}
+	h.reportOn(t, "n1", "ippusb-mfp")
 	h.step()
 	wantApplies(t, h.b, 0)
-	h.clock.set(t0, pendingWait)
+	h.reportOn(t, "n2", "samsung-scx4300-mfp")
 	h.step()
-	if sp := h.b.last(t); sp.Mode != device.ModeProbe {
-		t.Fatalf("spec %+v", sp)
+	wantApplies(t, h.b, 1)
+	specs := h.b.last(t)
+
+	ref := newHarness(t, Options{Backend: newNodeBackend("n1", "n2"), BackendName: BackendK8s, USBAvailable: true})
+	ref.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+	ref.reportOn(t, "n1", "ippusb-mfp")
+	ref.reportOn(t, "n2", "samsung-scx4300-mfp")
+	ref.step()
+	want := ref.b.last(t)
+	if specs[0].Hash != want[0].Hash || specs[1].Hash != want[1].Hash {
+		t.Fatal("the first reports after a restart changed the hashes")
 	}
 }
 
 // Until the watcher's first callback the file is not known to be missing, so
 // the controller must not tear down or probe over a running device pod.
 func TestNoApplyBeforeConfigRead(t *testing.T) {
-	for _, usb := range []bool{true, false} {
-		h := newHarness(t, Options{USBAvailable: usb, BackendName: BackendK8s})
-		h.b.set(device.Observation{Phase: device.PhaseRunning})
-		h.step()
-		h.clock.set(t0, 10*time.Minute)
-		h.report(t, "ippusb-mfp")
-		s := h.step()
-		wantApplies(t, h.b, 0)
-		if s.Config.State != "missing" {
-			t.Fatalf("config state %q", s.Config.State)
-		}
-		h.c.ConfigMissing()
-		h.step()
-		wantApplies(t, h.b, 1)
+	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	h.b.set(device.Observation{Phase: device.PhaseRunning})
+	h.step()
+	h.clock.set(t0, 10*time.Minute)
+	h.report(t, "ippusb-mfp")
+	s := h.step()
+	wantApplies(t, h.b, 0)
+	if s.Config.State != "missing" {
+		t.Fatalf("config state %q", s.Config.State)
 	}
-}
-
-func TestUnschedulable(t *testing.T) {
-	t.Run("probe pod", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
-		h.c.ConfigMissing()
-		h.step()
-		h.b.set(device.Observation{Phase: device.PhasePending, Unschedulable: true, Message: "0/3 nodes"})
-		s := h.step()
-		wantPhase(t, s, "probing", msgUnschedulable)
-		wantApplies(t, h.b, 1)
-	})
-	t.Run("usb pod before first report", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
-		h.b.set(device.Observation{Phase: device.PhasePending, Unschedulable: true})
-		h.c.ConfigApplied(usbConfig("P"), "e")
-		s := h.step()
-		wantPhase(t, s, "probing", msgUnschedulable)
-		h.clock.set(t0, 2*time.Minute)
-		h.step()
-		wantApplies(t, h.b, 0)
-		h.clock.set(t0, 5*time.Minute)
-		h.step()
-		wantApplies(t, h.b, 1)
-	})
-}
-
-func TestProbeThenConfigAppliesOnce(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
 	h.c.ConfigMissing()
 	h.step()
-	h.report(t, "brother-pcl-laser")
-	h.step()
-	if d := h.c.Setup().Decision; d == nil || d.Rule != device.RuleModel {
-		t.Fatalf("setup decision %+v", d)
+	wantApplies(t, h.b, 1)
+}
+
+func TestUSBUnavailable(t *testing.T) {
+	const msg = "USB printers and scanners need a USB resource (set --usb-resource)"
+	h := newHarness(t, Options{BackendName: BackendK8s, USBUnavailable: msg})
+	cfg := mfpConfig(t, "ippusb-mfp")
+	cfg.Printers = append(cfg.Printers, simPrinter("sim"))
+	h.c.ConfigApplied(cfg, "e")
+	s := h.step()
+	wantEntry(t, printerStatus(t, s, "printer").Phase, printerStatus(t, s, "printer").Message, "error", msg)
+	wantEntry(t, scannerStatus(t, s, "scanner").Phase, "", "error", "*")
+	if sp := h.b.one(t); sp.Mode != device.ModeSimulated || len(sp.Printers) != 1 || sp.Printers[0].ID != "sim" {
+		t.Fatalf("spec %+v, want the simulated printer only", sp)
 	}
-	h.c.ConfigApplied(usbConfig("Brother"), "e")
-	h.step()
-	wantApplies(t, h.b, 2)
-	if sp := h.b.last(t); sp.Mode != device.ModeUSB || sp.Printer != "legacy" {
-		t.Fatalf("spec %+v", sp)
-	}
-	h.report(t, "brother-pcl-laser")
-	h.step()
-	wantApplies(t, h.b, 2)
+	wantPhase(t, s, "error", "printer: "+msg)
 }
 
 func TestAgentOutage(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("P"), "e")
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
 	h.report(t, "ippusb-mfp")
-	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:1/ipp/print", ScannerURL: "http://127.0.0.1:2/eSCL"}))
+	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: "ipp://127.0.0.1:1/ipp/print"}, device.Endpoint{ID: "scanner", ScannerURL: "http://127.0.0.1:2/eSCL"}))
 	wantPhase(t, h.step(), "ready", "")
 	h.clock.add(31 * time.Second)
 	s := h.step()
-	wantPhase(t, s, "degraded", msgNotReporting)
+	wantPhase(t, s, "degraded", "printer: "+msgNotReporting)
 	wantApplies(t, h.b, 1)
-	if s.Device.Inventory == nil || len(s.Device.Inventory.Devices) == 0 {
-		t.Fatal("inventory dropped")
-	}
-}
-
-func TestNoPrinterKeepsProbe(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.report(t, "no-printer")
-	h.b.set(running(device.Endpoints{}))
-	s := h.step()
-	wantPhase(t, s, "probing", msgNoPrinter)
-	if sp := h.b.last(t); sp.Mode != device.ModeProbe {
-		t.Fatalf("spec %+v", sp)
-	}
-	sel := usbConfig("P")
-	sel.Device.USB = &config.USB{VendorID: "ffff", ProductID: "ffff"}
-	h.c.ConfigApplied(sel, "e2")
-	wantPhase(t, h.step(), "probing", msgNoMatch)
-	wantApplies(t, h.b, 1)
-}
-
-func TestPodRelevantChange(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	cfg := usbConfig("P")
-	h.c.ConfigApplied(cfg, "e1")
-	h.report(t, "ippusb-mfp")
-	h.step()
-	first := h.b.last(t)
-	h.c.ConfigApplied(usbConfig("P"), "e2") // unchanged content
-	h.step()
-	wantApplies(t, h.b, 1)
-	none := usbConfig("P")
-	none.Device.Scanner = config.ScannerNone
-	h.c.ConfigApplied(none, "e3")
-	h.step()
-	wantApplies(t, h.b, 2)
-	if sp := h.b.last(t); sp.Hash == first.Hash || sp.Scanner != "" {
-		t.Fatalf("spec %+v", sp)
-	}
-	h.step()
-	wantApplies(t, h.b, 2)
-}
-
-const hpDriver = "hp--laserjet-professional-m-1132-mfp--requires-proprietary-plugin-en"
-
-func TestQueueDriverName(t *testing.T) {
-	t.Run("legacy model match", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		h.c.ConfigApplied(usbConfig("Samsung"), "e")
-		h.report(t, "samsung-scx4300-mfp")
-		h.step()
-		if sp := h.b.last(t); sp.Printer != "legacy" {
-			t.Fatalf("spec %+v", sp)
-		}
-		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != "samsung--scx-4300--2-0-0-en" || ds.Queue.DriverPinned {
-			t.Fatalf("queue %+v, want the index's driver, not pinned", ds.Queue)
-		}
-	})
-	t.Run("driverName pins the driver", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		cfg := usbConfig("Samsung")
-		cfg.Device.DriverName = "samsung--scx-4300--2-0-0-en"
-		h.c.ConfigApplied(cfg, "e")
-		h.report(t, "samsung-scx4300-mfp")
-		h.step()
-		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != cfg.Device.DriverName || !ds.Queue.DriverPinned {
-			t.Fatalf("queue %+v, want the pinned driverName", ds.Queue)
-		}
-	})
-	// A driverName the index no longer lists keeps the config valid: the
-	// automatic choice runs, unpinned, and the device is degraded.
-	t.Run("driverName no app lists", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		cfg := usbConfig("Samsung")
-		cfg.Device.DriverName = "acme--x-en"
-		h.c.ConfigApplied(cfg, "e")
-		h.report(t, "samsung-scx4300-mfp")
-		h.b.set(running(device.Endpoints{}))
-		s := h.step()
-		if sp := h.b.last(t); sp.Printer != "legacy" {
-			t.Fatalf("spec %+v", sp)
-		}
-		wantPhase(t, s, "degraded", fmt.Sprintf(msgDriverNotListed, "acme--x-en"))
-		if ds := h.report(t, "samsung-scx4300-mfp"); ds.Queue == nil || ds.Queue.Driver != "samsung--scx-4300--2-0-0-en" || ds.Queue.DriverPinned {
-			t.Fatalf("queue %+v, want the automatic driver, not pinned", ds.Queue)
-		}
-	})
-	t.Run("family override without a match", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		cfg := usbConfig("P")
-		cfg.Device.Driver = "gutenprint"
-		h.c.ConfigApplied(cfg, "e")
-		h.report(t, "unknown-printer")
-		h.step()
-		if sp := h.b.last(t); sp.Printer != "gutenprint" {
-			t.Fatalf("spec %+v", sp)
-		}
-		if ds := h.report(t, "unknown-printer"); ds.Queue == nil || ds.Queue.Driver != config.Auto {
-			t.Fatalf("queue %+v", ds.Queue)
-		}
-	})
-}
-
-func TestNoDriver(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigMissing()
-	h.step()
-	h.report(t, "unknown-printer")
-	h.step()
-	if d := h.c.Setup().Decision; d == nil || d.Rule != device.RuleNone || d.Device == nil || d.Device.DeviceID == "" {
-		t.Fatalf("setup decision %+v", d)
-	}
-
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.b.set(running(device.Endpoints{}))
-	s := h.step()
-	sp := h.b.last(t)
-	if sp.Mode != device.ModeUSB || sp.Printer != "" || sp.Scanner != "airsane" {
-		t.Fatalf("spec %+v, want the usb spec with the scanner only", sp)
-	}
-	wantPhase(t, s, "degraded", msgNoDriver)
-	if ds := h.report(t, "unknown-printer"); ds.Queue != nil {
-		t.Fatalf("queue %+v, want none", ds.Queue)
-	}
-}
-
-func TestQueueChangesWithoutApply(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("HP"), "e1")
-	h.report(t, "hp-legacy-mfp")
-	h.step()
-	sp := h.b.last(t)
-	ds := h.report(t, "hp-legacy-mfp")
-	if ds.Hash != sp.Hash || ds.Queue == nil {
-		t.Fatalf("desired %+v", ds)
-	}
-	want := device.QueueSpec{
-		Name: "HP", Driver: hpDriver, Schemes: []string{"hp", "usb"},
-		Media: "iso_a4_210x297mm", Sides: "one-sided", ColorMode: "auto", Quality: "normal",
-	}
-	if !reflect.DeepEqual(*ds.Queue, want) {
-		t.Fatalf("queue %+v", *ds.Queue)
-	}
-
-	media := usbConfig("HP")
-	media.Print.Defaults.Media = "na_letter_8.5x11in"
-	h.c.ConfigApplied(media, "e2")
-	if ds := h.report(t, "hp-legacy-mfp"); ds.Queue.Media != "na_letter_8.5x11in" || ds.Hash != sp.Hash {
-		t.Fatalf("desired %+v", ds)
-	}
-	h.step()
-
-	loc := usbConfig("HP")
-	loc.Location = "Office"
-	h.c.ConfigApplied(loc, "e3")
-	if ds := h.report(t, "hp-legacy-mfp"); ds.Queue.Location != "Office" || ds.Hash != sp.Hash {
-		t.Fatalf("desired %+v", ds)
-	}
-	h.step()
-	wantApplies(t, h.b, 1)
-}
-
-func TestSimulatedNameChange(t *testing.T) {
-	h := newHarness(t, Options{})
-	h.c.ConfigApplied(simConfig("One"), "e1")
-	s := h.step()
-	first := h.b.last(t)
-	if first.Mode != device.ModeSimulated || first.Name != "One" {
-		t.Fatalf("spec %+v", first)
-	}
-	if s.Device.Decision == nil || s.Device.Decision.Device != nil || s.Device.Mode != "simulated" {
-		t.Fatalf("decision %+v", s.Device.Decision)
-	}
-	h.c.ConfigApplied(simConfig("Two"), "e2")
-	h.step()
-	h.step()
-	wantApplies(t, h.b, 2)
-	if sp := h.b.last(t); sp.Name != "Two" || sp.Hash == first.Hash {
-		t.Fatalf("spec %+v", sp)
+	if len(s.Devices) != 1 {
+		t.Fatal("devices dropped")
 	}
 }
 
 func deviceItem(t *testing.T, s apitypes.Status) apitypes.ReconcileItem {
 	t.Helper()
 	for _, r := range s.Reconcile {
-		if r.Item == "device" {
+		if r.Item == "workload/default" {
 			return r
 		}
 	}
-	t.Fatalf("no device reconcile item in %+v", s.Reconcile)
+	t.Fatalf("no workload/default reconcile item in %+v", s.Reconcile)
 	return apitypes.ReconcileItem{}
 }
 
 func TestApplyFailureRetried(t *testing.T) {
 	h := newHarness(t, Options{})
 	h.b.applyErr = errors.New("owner deployment printing/pagewire: not found")
-	h.c.ConfigApplied(simConfig("S"), "e")
+	h.c.ConfigApplied(simConfig(), "e")
 	s := h.step()
 	if r := deviceItem(t, s); r.OK || r.Message != "owner deployment printing/pagewire: not found" {
 		t.Fatalf("item %+v", r)
@@ -759,70 +1510,81 @@ func TestOptionalBlob(t *testing.T) {
 		r.Inventory.Devices[0].DeviceID = "MFG:Hewlett-Packard;CMD:PJL,PCL,POSTSCRIPT;MDL:HP LaserJet P2055dn;CLS:PRINTER;"
 	}
 	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("HP"), "e1")
+	h.c.ConfigApplied(mfpConfig(t, "hp-legacy-mfp"), "e1")
 	h.report(t, "hp-legacy-mfp", p2055)
 	h.step()
-	if sp := h.b.last(t); len(sp.Blobs) != 0 {
+	if sp := h.b.one(t); len(sp.Blobs) != 0 {
 		t.Fatalf("blobs %+v without an accepted EULA", sp.Blobs)
 	}
-	acc := usbConfig("HP")
+	acc := mfpConfig(t, "hp-legacy-mfp")
 	acc.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 	h.c.ConfigApplied(acc, "e2")
 	h.step()
-	want := []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}}
-	sp := h.b.last(t)
-	if !reflect.DeepEqual(sp.Blobs, want) {
+	sp := h.b.one(t)
+	if want := []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}}; !reflect.DeepEqual(sp.Blobs, want) {
 		t.Fatalf("blobs %+v", sp.Blobs)
 	}
 	if want := []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}; !reflect.DeepEqual(sp.AcceptedEULAs, want) {
 		t.Fatalf("acceptedEulas %+v", sp.AcceptedEULAs)
 	}
-	// Accepting another text rolls the pod.
-	acc2 := usbConfig("HP")
-	acc2.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: strings.Repeat("b", 64)}}
-	h.c.ConfigApplied(acc2, "e3")
-	h.step()
-	if h.b.last(t).Hash == sp.Hash {
-		t.Fatal("a new accepted text sha did not change the spec hash")
-	}
-	h.b.set(running(device.Endpoints{}))
+	h.b.set(running())
 	h.report(t, "hp-legacy-mfp", p2055, func(r *device.AgentReport) {
 		r.Blobs = []device.BlobStatus{{ID: "hplip-plugin", Version: "3.24.4", State: "failed", Message: "download failed"}}
 	})
 	s := h.step()
-	if len(s.Device.Blobs) != 1 || s.Device.Blobs[0].State != "failed" {
-		t.Fatalf("blobs %+v", s.Device.Blobs)
+	if len(s.Workloads) != 1 || len(s.Workloads[0].Blobs) != 1 || s.Workloads[0].Blobs[0].State != "failed" {
+		t.Fatalf("workloads %+v", s.Workloads)
 	}
-	wantPhase(t, s, "degraded", "HP Linux Imaging and Printing proprietary plug-in: download failed")
+	p := s.Printers[0]
+	wantEntry(t, p.Phase, p.Message, "degraded", "HP Linux Imaging and Printing proprietary plug-in: download failed")
 }
 
-func TestQueueError(t *testing.T) {
+// TestRequiredEULA: hplip's plug-in drivers need the plug-in, so the M1132 needs it out of the box.
+func TestRequiredEULA(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("HP"), "e1")
-	h.b.set(running(device.Endpoints{}))
-	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
-		r.Queue = &device.QueueResult{State: device.QueueError, Message: "agent has no --pappl-url"}
-	})
-	wantPhase(t, h.step(), "error", "agent has no --pappl-url")
+	h.report(t, "hp-legacy-mfp")
+	if e := h.c.Setup().EULAs; len(e) != 1 || !e[0].Required {
+		t.Fatalf("eulas %+v", e)
+	}
+	h.c.ConfigApplied(mfpConfig(t, "hp-legacy-mfp"), "e")
+	h.b.set(running())
+	s := h.step()
+	if sp := h.b.one(t); sp.Mode != device.ModeUSB || len(sp.Blobs) != 0 {
+		t.Fatalf("spec %+v, want the usb spec without the blob", sp)
+	}
+	p := s.Printers[0]
+	wantEntry(t, p.Phase, p.Message, "degraded", "Accept EULA HP Linux Imaging and Printing proprietary plug-in in Settings")
 }
 
 // A queue that runs the app's own driver choice instead of the decided one
-// (the app lacks the index's driver) leaves the device degraded.
+// (the app lacks the index's driver) leaves the printer degraded.
 func TestQueueDriverFallbackDegraded(t *testing.T) {
 	h := newHarness(t, Options{BackendName: BackendK8s, USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("x"), "e1")
+	h.c.ConfigApplied(mfpConfig(t, "samsung-scx4300-mfp"), "e1")
 	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
 	msg := "Driver x is not in use: the printer application runs its own driver choice."
 	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
-		r.Queue = &device.QueueResult{State: device.QueueOK, Message: msg, PrinterURI: "ipp://127.0.0.1:8002/ipp/print/x"}
+		r.Queues = []device.QueueResult{{ID: "printer", State: device.QueueOK, Message: msg, PrinterURI: "ipp://127.0.0.1:8005/ipp/print/x"}}
 	})
-	wantPhase(t, h.step(), "degraded", msg)
+	s := h.step()
+	p := s.Printers[0]
+	wantEntry(t, p.Phase, p.Message, "degraded", msg)
+	if p.URI != "ipp://192.168.1.20:8005/ipp/print/x" {
+		t.Fatalf("uri %q", p.URI)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, u := range h.printed {
+		if strings.Contains(u, "127.0.0.1") {
+			t.Fatalf("queried loopback URI %s", u)
+		}
+	}
 }
 
 func TestInvalidConfig(t *testing.T) {
 	t.Run("keeps last-good spec", func(t *testing.T) {
 		h := newHarness(t, Options{})
-		good := simConfig("S")
+		good := simConfig()
 		h.c.ConfigApplied(good, "e1")
 		h.step()
 		el := &config.ErrorList{Errors: []config.FieldError{{Path: "/name", Line: 2, Column: 7, Message: "bad"}}}
@@ -832,8 +1594,8 @@ func TestInvalidConfig(t *testing.T) {
 		if s.Config.State != "invalid" || s.Config.Etag != "e2" || s.Config.AppliedEtag != "e1" || s.Config.Errors[0].Line != 2 {
 			t.Fatalf("config %+v", s.Config)
 		}
-		if s.Device.Mode != "simulated" {
-			t.Fatalf("mode %q", s.Device.Mode)
+		if len(s.Printers) != 1 || s.Workloads[0].Mode != "simulated" {
+			t.Fatalf("status %+v", s)
 		}
 	})
 	t.Run("no last-good", func(t *testing.T) {
@@ -848,183 +1610,29 @@ func TestInvalidConfig(t *testing.T) {
 		h := newHarness(t, Options{USBAvailable: true})
 		h.c.ConfigMissing()
 		h.step()
-		h.b.set(running(device.Endpoints{}))
+		h.b.set(running())
 		h.c.ConfigInvalid(errors.New("bad"), "e", nil)
 		s := h.step()
 		wantApplies(t, h.b, 1)
-		if s.Device.Phase != "probing" {
-			t.Fatalf("phase %q", s.Device.Phase)
+		if s.Phase != "probing" {
+			t.Fatalf("phase %q", s.Phase)
 		}
 	})
-}
-
-func TestDeviceLossRestartsPod(t *testing.T) {
-	rb := &restartBackend{fakeBackend: &fakeBackend{obs: device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"}}}
-	h := newHarness(t, Options{Backend: rb, BackendName: BackendK8s, USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.report(t, "ippusb-mfp")
-	h.step()
-	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.DevicePresent = false })
-	h.step()
-	h.clock.add(20 * time.Second)
-	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.DevicePresent = false })
-	h.step()
-	if rb.restarts != 0 {
-		t.Fatal("restarted before 30 s")
-	}
-	h.clock.add(10 * time.Second)
-	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.DevicePresent = false })
-	h.step()
-	h.clock.add(10 * time.Second)
-	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.DevicePresent = false })
-	h.step()
-	if rb.restarts != 1 {
-		t.Fatalf("%d restarts, want 1", rb.restarts)
-	}
-}
-
-func TestPrinterURIK8sPAPPL(t *testing.T) {
-	h := newHarness(t, Options{BackendName: BackendK8s, USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("x"), "e")
-	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
-	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
-		r.Queue = &device.QueueResult{State: device.QueueOK, PrinterURI: "ipp://127.0.0.1:8002/ipp/print/x"}
-	})
-	s := h.step()
-	const want = "ipp://192.168.1.20:8002/ipp/print/x"
-	if s.Printer.URI != want || !reflect.DeepEqual(s.Connect.IPPURIs, []string{want}) || !s.Printer.Available {
-		t.Fatalf("printer %+v connect %+v", s.Printer, s.Connect)
-	}
-	wantPhase(t, s, "ready", "")
-	if s.Scanner.Available || s.Scanner.State != "unknown" {
-		t.Fatalf("scanner %+v without _uscan._tcp", s.Scanner)
-	}
-	for _, u := range h.printed {
-		if strings.Contains(u, "127.0.0.1") {
-			t.Fatalf("queried loopback URI %s", u)
-		}
-	}
-}
-
-func TestPrinterURISimPAPPL(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("Printer"), "e")
-	h.b.set(running(device.Endpoints{PrinterURI: "", ScannerURL: "http://127.0.0.1:41234/eSCL"}))
-	h.report(t, "samsung-scx4300-mfp")
-	s := h.step()
-	if s.Printer.Available || s.Printer.State != "unknown" || s.Printer.URI != "" {
-		t.Fatalf("printer before QueueResult %+v", s.Printer)
-	}
-	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
-		r.Queue = &device.QueueResult{State: device.QueueOK, PrinterURI: "ipp://127.0.0.1:39001/ipp/print/Printer"}
-	})
-	s = h.step()
-	if s.Printer.URI != "ipp://127.0.0.1:39001/ipp/print/Printer" || s.Scanner.URL != "http://127.0.0.1:41234/eSCL" {
-		t.Fatalf("printer %+v scanner %+v", s.Printer, s.Scanner)
-	}
-	wantPhase(t, s, "ready", "")
-}
-
-func TestPrinterURISimIPPUSB(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("Printer"), "e")
-	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:40000/ipp/print"}))
-	h.report(t, "ippusb-mfp", func(r *device.AgentReport) {
-		r.Services = []device.DNSSDService{{Type: device.ServiceIPP, Name: "x", Port: 1, TXT: map[string]string{"rp": "ipp/print"}}}
-	})
-	if s := h.step(); s.Printer.URI != "ipp://127.0.0.1:40000/ipp/print" {
-		t.Fatalf("printer %+v", s.Printer)
-	}
-}
-
-func TestPrinterURIK8sSimulated(t *testing.T) {
-	ipp := func(name string, port int) device.DNSSDService {
-		return device.DNSSDService{Type: device.ServiceIPP, Name: name, Port: port, TXT: map[string]string{"rp": "ipp/print"}}
-	}
-	cases := []struct {
-		services []device.DNSSDService
-		uri      string
-		name     string
-	}{
-		{[]device.DNSSDService{ipp("Other printer", 631), ipp("Living room printer", 8631)}, "ipp://192.168.1.20:8631/ipp/print", "Living room printer"},
-		{[]device.DNSSDService{ipp("Something else", 8631)}, "ipp://192.168.1.20:8631/ipp/print", "Something else"},
-	}
-	for _, tc := range cases {
-		h := newHarness(t, Options{BackendName: BackendK8s})
-		h.c.ConfigApplied(simConfig("Living room printer"), "e")
-		h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
-		h.report(t, "none", func(r *device.AgentReport) {
-			r.Services = append(tc.services, device.DNSSDService{
-				Type: device.ServiceUScan, Name: "scan", Port: 8090, TXT: map[string]string{"rs": "eSCL"},
-			})
-		})
-		s := h.step()
-		if s.Printer.URI != tc.uri || s.Connect.DNSSDName != tc.name {
-			t.Fatalf("printer %q dnssd %q, want %q %q", s.Printer.URI, s.Connect.DNSSDName, tc.uri, tc.name)
-		}
-		if s.Scanner.URL != "http://192.168.1.20:8090/eSCL" {
-			t.Fatalf("scanner %q", s.Scanner.URL)
-		}
-		if len(s.Device.Advertised) != len(tc.services)+1 {
-			t.Fatalf("advertised %+v", s.Device.Advertised)
-		}
-	}
-}
-
-func TestNoLockAcrossBackendCalls(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigMissing()
-	call := func() {
-		h.c.Current()
-		if _, err := h.c.AgentReport(context.Background(), device.AgentReport{Inventory: catalog.Fixture("ippusb-mfp"), DevicePresent: true}); err != nil {
-			t.Error(err)
-		}
-	}
-	h.b.onApply, h.b.onObserve = call, call
-	done := make(chan struct{})
-	go func() {
-		h.c.step(context.Background())
-		h.c.step(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("loop blocked: a lock is held across a backend call")
-	}
-	wantApplies(t, h.b, 1)
-}
-
-func TestDesiredStateHash(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	if ds := h.report(t, "ippusb-mfp"); ds.Hash != "" || ds.Queue != nil {
-		t.Fatalf("before any spec: %+v", ds)
-	}
-	h.c.ConfigMissing()
-	h.step()
-	if ds := h.report(t, "ippusb-mfp"); ds.Hash != h.b.last(t).Hash || ds.Hash == "" {
-		t.Fatalf("hash %q, want %q", ds.Hash, h.b.last(t).Hash)
-	}
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.step()
-	if ds := h.report(t, "ippusb-mfp"); ds.Hash != h.b.last(t).Hash || ds.Queue != nil {
-		t.Fatalf("desired %+v, spec %+v", ds, h.b.last(t))
-	}
 }
 
 func TestPublishesConfigAndReconcileChanges(t *testing.T) {
 	h := newHarness(t, Options{})
 	ch, cancel := h.c.Subscribe()
 	defer cancel()
-	h.c.ConfigApplied(simConfig("S"), "e1")
-	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:1/ipp/print", ScannerURL: "http://127.0.0.1:2/eSCL"}))
+	h.c.ConfigApplied(simConfig(), "e1")
+	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: "ipp://127.0.0.1:1/ipp/print"}))
 	h.step()
 	n := len(h.pubs)
 	h.step()
 	if len(h.pubs) != n {
 		t.Fatal("published an unchanged Status")
 	}
-	h.c.ConfigInvalid(errors.New("bad"), "e2", simConfig("S"))
+	h.c.ConfigInvalid(errors.New("bad"), "e2", simConfig())
 	h.step()
 	if len(h.pubs) != n+1 || h.pubs[n].Config.State != "invalid" {
 		t.Fatalf("config change not published: %d publishes", len(h.pubs))
@@ -1042,89 +1650,6 @@ func TestPublishesConfigAndReconcileChanges(t *testing.T) {
 	default:
 		t.Fatal("subscriber got nothing")
 	}
-}
-
-func TestSetup(t *testing.T) {
-	t.Run("missing with hp-legacy", func(t *testing.T) {
-		h := newHarness(t, Options{BackendName: BackendK8s, USBAvailable: true})
-		h.report(t, "hp-legacy-mfp")
-		s := h.c.Setup()
-		if !s.Required || s.Backend != "k8s" || !s.USBResourceConfigured || s.Inventory == nil {
-			t.Fatalf("setup %+v", s)
-		}
-		if s.Decision == nil || s.Decision.Rule != device.RuleModel {
-			t.Fatalf("decision %+v", s.Decision)
-		}
-		if len(s.EULAs) != 1 || s.EULAs[0].ID != "hplip-plugin" || !s.EULAs[0].Required || s.EULAs[0].Version != "3.24.4" || s.EULAs[0].Title == "" {
-			t.Fatalf("eulas %+v", s.EULAs)
-		}
-		want := config.Default("HP LaserJet Professional M1132 MFP")
-		if !reflect.DeepEqual(s.Suggested, want) {
-			t.Fatalf("suggested %+v", s.Suggested)
-		}
-	})
-	t.Run("missing before any report", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		s := h.c.Setup()
-		if !s.Required || s.Inventory != nil || s.Decision != nil || len(s.EULAs) != 0 || s.EULAs == nil || s.Suggested.Name != "Printer" {
-			t.Fatalf("setup %+v", s)
-		}
-	})
-	t.Run("no usb", func(t *testing.T) {
-		h := newHarness(t, Options{})
-		s := h.c.Setup()
-		if s.USBResourceConfigured || s.Decision != nil || s.Suggested.Device.Mode != "simulated" || s.Backend != "sim" {
-			t.Fatalf("setup %+v", s)
-		}
-	})
-	t.Run("sanitised name", func(t *testing.T) {
-		for product, want := range map[string]string{
-			"":                                "Printer",
-			"  \t":                            "Printer",
-			"A\x01" + strings.Repeat("é", 70): "A" + strings.Repeat("é", 62),
-		} {
-			h := newHarness(t, Options{USBAvailable: true})
-			h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Inventory.Devices[0].Product = product })
-			s := h.c.Setup()
-			if s.Suggested.Name != want {
-				t.Fatalf("product %q: name %q, want %q", product, s.Suggested.Name, want)
-			}
-			raw, _ := json.Marshal(s.Suggested)
-			if _, err := config.Check(raw, catalog.Known()); err != nil {
-				t.Fatalf("suggested %q invalid: %v", s.Suggested.Name, err)
-			}
-		}
-	})
-	t.Run("invalid with simulated last-good", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		h.c.ConfigInvalid(errors.New("bad"), "e", simConfig("S"))
-		s := h.c.Setup()
-		if s.Required || s.Decision == nil || s.Decision.Rule != "simulated" || s.Decision.Device != nil {
-			t.Fatalf("setup %+v", s)
-		}
-	})
-	t.Run("accepted EULA listed", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		cfg := usbConfig("P")
-		cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
-		h.c.ConfigApplied(cfg, "e")
-		h.report(t, "ippusb-mfp")
-		s := h.c.Setup()
-		if s.Required || len(s.EULAs) != 1 || s.EULAs[0].ID != "hplip-plugin" || s.EULAs[0].Required {
-			t.Fatalf("eulas %+v", s.EULAs)
-		}
-	})
-	t.Run("EULA text state", func(t *testing.T) {
-		h := newHarness(t, Options{USBAvailable: true})
-		h.report(t, "hp-legacy-mfp")
-		if e := h.c.Setup().EULAs[0]; e.State != apitypes.EULAPending || e.TextSHA256 != nil {
-			t.Fatalf("before any text: %+v", e)
-		}
-		h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
-		if e := h.c.Setup().EULAs[0]; e.State != apitypes.EULAAvailable || e.TextSHA256 == nil || *e.TextSHA256 != textSHA {
-			t.Fatalf("after the text: %+v", e)
-		}
-	})
 }
 
 // textSHA is a well-formed accepted text sha256.
@@ -1150,21 +1675,19 @@ func TestEULA(t *testing.T) {
 		t.Fatal("EULA found for an id not in the catalog")
 	}
 	e, ok := h.c.EULA("hplip-plugin")
-	if !ok || e.State != apitypes.EULAPending || e.Text != nil || e.TextSHA256 != nil || e.Version != "3.24.4" || e.Title == "" || e.Vendor != "HP" {
+	if !ok || e.State != apitypes.EULAPending || e.Text != nil || e.Version != "3.24.4" || e.Vendor != "HP" {
 		t.Fatalf("before any report: %+v, %v", e, ok)
 	}
 	h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
-	e, _ = h.c.EULA("hplip-plugin")
-	if e.State != apitypes.EULAAvailable || e.Text == nil || *e.Text != "licence\n" || e.TextSHA256 == nil || *e.TextSHA256 != textSHA {
+	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAAvailable || e.Text == nil || *e.Text != "licence\n" {
 		t.Fatalf("available: %+v", e)
 	}
-	// A rolled pod reports pending again; the known text stays.
 	h.report(t, "hp-legacy-mfp", withText(device.EULAPending))
 	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAAvailable {
 		t.Fatalf("pending replaced the known text: %+v", e)
 	}
 	h.report(t, "hp-legacy-mfp", withText(device.EULAFailed))
-	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAFailed || e.Message != "download failed" || e.Text != nil {
+	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAFailed || e.Message != "download failed" {
 		t.Fatalf("failed: %+v", e)
 	}
 	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
@@ -1176,27 +1699,20 @@ func TestEULA(t *testing.T) {
 	if stored {
 		t.Error("stored the text of a EULA not in the catalog")
 	}
-	// A text of another version is not this catalog's text.
-	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
-		r.EULAs = []device.EULAText{{ID: "hplip-plugin", Version: "1.0", State: device.EULAAvailable, Text: "old", TextSHA256: textSHA}}
-	})
-	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAPending {
-		t.Fatalf("other version: %+v", e)
-	}
 }
 
 func TestStageEULAs(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
 	want := []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
-	// No config: the default selector's decision offers the HP plug-in.
+	// No config: the suggested printer's decision offers the HP plug-in.
 	if ds := h.report(t, "hp-legacy-mfp"); !reflect.DeepEqual(ds.StageEULAs, want) {
 		t.Fatalf("no config: stageEulas %+v", ds.StageEULAs)
 	}
-	if ds := h.report(t, "ippusb-mfp"); ds.StageEULAs == nil || len(ds.StageEULAs) != 0 {
+	if ds := h.report(t, "ippusb-mfp"); len(ds.StageEULAs) != 0 {
 		t.Fatalf("no EULA device: stageEulas %#v, want empty", ds.StageEULAs)
 	}
 	// An accepted EULA stays staged even when the device does not offer it.
-	cfg := usbConfig("P")
+	cfg := mfpConfig(t, "ippusb-mfp")
 	cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 	h.c.ConfigApplied(cfg, "e")
 	if ds := h.report(t, "ippusb-mfp"); !reflect.DeepEqual(ds.StageEULAs, want) {
@@ -1216,7 +1732,7 @@ func TestAcceptedMatchesIDAndVersion(t *testing.T) {
 }
 
 func TestRunReactsToInputsAndStops(t *testing.T) {
-	b := &fakeBackend{obs: device.Observation{Phase: device.PhaseAbsent}}
+	b := &fakeBackend{}
 	c := New(Options{Backend: b, BackendName: BackendSim})
 	ch, cancelSub := c.Subscribe()
 	defer cancelSub()
@@ -1226,13 +1742,13 @@ func TestRunReactsToInputsAndStops(t *testing.T) {
 		c.Run(ctx)
 		close(done)
 	}()
-	c.ConfigApplied(simConfig("S"), "e1")
+	c.ConfigApplied(simConfig(), "e1")
 	deadline := time.After(2 * time.Second)
-	for s := (apitypes.Status{}); s.Device.Mode != "simulated"; {
+	for s := (apitypes.Status{}); len(s.Printers) == 0; {
 		select {
 		case s = <-ch:
 		case <-deadline:
-			t.Fatal("no simulated Status published within 2 s")
+			t.Fatal("no Status with the simulated printer published within 2 s")
 		}
 	}
 	cancel()
@@ -1243,120 +1759,264 @@ func TestRunReactsToInputsAndStops(t *testing.T) {
 	}
 }
 
-// TestRequiredEULA: hplip's plug-in drivers need the plug-in, so the M1132 needs it out of the box.
-func TestRequiredEULA(t *testing.T) {
-	h := newHarness(t, Options{USBAvailable: true})
-	h.report(t, "hp-legacy-mfp")
-	if e := h.c.Setup().EULAs; len(e) != 1 || !e[0].Required {
-		t.Fatalf("eulas %+v", e)
-	}
-	h.c.ConfigApplied(usbConfig("HP"), "e")
-	h.b.set(running(device.Endpoints{}))
-	s := h.step()
-	if sp := h.b.last(t); sp.Mode != device.ModeUSB || len(sp.Blobs) != 0 {
-		t.Fatalf("spec %+v, want the usb spec without the blob", sp)
-	}
-	wantPhase(t, s, "degraded", "Accept EULA HP Linux Imaging and Printing proprietary plug-in in Settings")
-}
-
-func TestPickPrefersFamilyPort(t *testing.T) {
-	cat := catalog.Default()
-	obs := device.Observation{HostIP: "192.168.1.20"}
-	svc := func(typ, name string, port int, key string) device.DNSSDService {
-		return device.DNSSDService{Type: typ, Name: name, Port: port, TXT: map[string]string{key: "x"}}
-	}
-	// The foreign instances sort first and the first name is even preferred.
-	r := &device.AgentReport{Services: []device.DNSSDService{
-		svc(device.ServiceIPP, "AAA foreign", 631, "rp"),
-		svc(device.ServiceIPP, "ZZZ ipp-usb", device.IPPUSBMinPort+3, "rp"),
-		svc(device.ServiceUScan, "AAA foreign", 9000, "rs"),
-		svc(device.ServiceUScan, "ZZZ ipp-usb", device.IPPUSBMaxPort, "rs"),
-		svc(device.ServiceUScan, "ZZZ airsane", 8090, "rs"),
-	}}
-	ippusb, _ := cat.Printer("ipp-usb")
-	if got := printerURI(BackendK8s, ippusb, obs, r, "AAA foreign"); got != "ipp://192.168.1.20:60003/x" {
-		t.Errorf("ipp-usb printer URI %q, want the instance on the ipp-usb port", got)
-	}
-	if got := connect(r, ippusb, "AAA foreign", "", "").DNSSDName; got != "ZZZ ipp-usb" {
-		t.Errorf("connect DNS-SD name %q, want the picked printer's", got)
-	}
-	for scanner, want := range map[string]string{
-		"ipp-usb": "http://192.168.1.20:60009/x",
-		"airsane": "http://192.168.1.20:8090/x",
-	} {
-		if got := scannerURL(cat, BackendK8s, &device.Spec{Scanner: scanner}, obs, r); got != want {
-			t.Errorf("%s scanner URL %q, want %q", scanner, got, want)
-		}
-	}
-	// No instance on the family's port: name preference, then name order, as before.
-	only := &device.AgentReport{Services: []device.DNSSDService{
-		svc(device.ServiceIPP, "BBB", 631, "rp"), svc(device.ServiceIPP, "AAA", 632, "rp"),
-	}}
-	if got := printerURI(BackendK8s, ippusb, obs, only, ""); got != "ipp://192.168.1.20:632/x" {
-		t.Errorf("fallback printer URI %q, want the first by name", got)
-	}
-	// A family with no port set keeps the name preference.
-	sim, _ := cat.Printer("sim")
-	if got := printerURI(BackendK8s, sim, obs, r, "AAA foreign"); got != "ipp://192.168.1.20:631/x" {
-		t.Errorf("sim printer URI %q, want the preferred name", got)
-	}
-}
-
-func TestSanitizeName(t *testing.T) {
-	for in, want := range map[string]string{
-		"OfficeJet Pro 8710": "OfficeJet Pro 8710",
-		"--printer":          "printer",
-		" - - x":             "x",
-		"---":                defaultName,
-		"\x01-\x02":          defaultName,
-		"":                   defaultName,
-	} {
-		if got := sanitizeName(in); got != want {
-			t.Errorf("sanitizeName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestConvertedFormats(t *testing.T) {
 	h := newHarness(t, Options{USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("Printer"), "e")
-	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:40000/ipp/print"}))
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: "ipp://127.0.0.1:40000/ipp/print"}))
 	h.report(t, "ippusb-mfp")
 	s := h.step()
 	// The fake printer lists only application/pdf.
 	want := []apitypes.FormatConversion{{From: "image/png", To: "application/pdf"}, {From: "image/jpeg", To: "application/pdf"}}
-	if !s.Printer.Available || !reflect.DeepEqual(s.Printer.ConvertedFormats, want) {
-		t.Fatalf("printer %+v, want convertedFormats %v", s.Printer, want)
-	}
-	if got := h.c.Current().Printer.ConvertedFormats; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Current convertedFormats %v", got)
+	if p := s.Printers[0]; !p.Available || !reflect.DeepEqual(p.ConvertedFormats, want) {
+		t.Fatalf("printer %+v, want convertedFormats %v", p, want)
 	}
 }
 
-func TestUSBDevicePassedBeforeApply(t *testing.T) {
-	db := &deviceBackend{fakeBackend: &fakeBackend{obs: device.Observation{Phase: device.PhaseRunning}}}
+func TestUSBDevicesPassedBeforeApply(t *testing.T) {
+	db := &deviceBackend{fakeBackend: &fakeBackend{obs: []device.Observation{{Phase: device.PhaseRunning}}}}
 	h := newHarness(t, Options{Backend: db, BackendName: BackendDocker, USBAvailable: true})
-	h.c.ConfigApplied(usbConfig("P"), "e")
-	h.step() // no inventory yet: wait, no Apply and no device
+	h.c.ConfigApplied(officeConfig(t), "e")
+	h.step() // no report yet: wait, no Apply and no devices
 	if len(db.devs) != 0 {
-		t.Fatalf("device set while waiting: %v", db.devs)
+		t.Fatalf("devices set while waiting: %v", db.devs)
 	}
-	h.report(t, "ippusb-mfp")
+	h.report(t, "office")
 	h.step()
-	want := catalog.Fixture("ippusb-mfp").Devices[0]
-	if len(db.devs) != 1 || db.devs[0] == nil || db.devs[0].Bus != want.Bus || db.devs[0].Address != want.Address {
-		t.Fatalf("devices %+v, want %+v", db.devs, want)
+	if len(db.devs) != 1 || len(db.devs[0]) != 2 || db.devs[0][0].Address != 4 || db.devs[0][1].Address != 9 {
+		t.Fatalf("devices %+v, want the HP and the Samsung once each", db.devs)
 	}
 	if !slices.Equal(db.applies, []int{1}) {
-		t.Fatalf("Apply after %v SetUSBDevice calls, want [1]", db.applies)
+		t.Fatalf("Apply after %v SetUSBDevices calls, want [1]", db.applies)
 	}
-	h.step() // same spec, no Apply: the device is taken at once
+	h.step() // same specs, no Apply: the devices are taken at once
 	if !slices.Equal(db.staged, []bool{true, false}) || !slices.Equal(db.applies, []int{1}) {
 		t.Fatalf("staged %v, applies %v: want [true false], [1]", db.staged, db.applies)
 	}
-	h.c.ConfigApplied(simConfig("P"), "e2")
+	h.c.ConfigApplied(simConfig(), "e2")
 	h.step()
-	if last := db.devs[len(db.devs)-1]; last != nil {
-		t.Fatalf("simulated mode device %+v, want nil", last)
+	if last := db.devs[len(db.devs)-1]; len(last) != 0 {
+		t.Fatalf("simulated devices %+v, want none", last)
 	}
+}
+
+func TestDetect(t *testing.T) {
+	rb := &restartBackend{fakeBackend: &fakeBackend{}}
+	h := newHarness(t, Options{Backend: rb, BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigMissing()
+	h.step()
+	if err := h.c.Detect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.add(10 * time.Second)
+	_ = h.c.Detect(context.Background())
+	if !slices.Equal(rb.restarts, []string{""}) {
+		t.Fatalf("restarts %v, want one within 30 s", rb.restarts)
+	}
+	sim := newHarness(t, Options{})
+	if err := sim.c.Detect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// After a control-plane restart, a node whose only printer is off is not
+// listed but still runs its pod: nothing is applied until it reports, so its
+// workload is not deleted.
+func TestControlPlaneRestartUnlistedNode(t *testing.T) {
+	nb := newNodeBackend("n1")
+	nb.obs = []device.Observation{{Workload: "n1", Phase: device.PhaseRunning}, {Workload: "n2", Phase: device.PhaseRunning}}
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	hp, sam := dev(t, "ippusb-mfp", "03f0:2754"), dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+	h.reportOn(t, "n1", "ippusb-mfp")
+	h.step()
+	wantApplies(t, h.b, 0)
+	h.reportOn(t, "n2", "samsung-scx4300-mfp", func(r *device.AgentReport) { r.Attached = []device.USBDevice{} })
+	h.step()
+	specs := h.b.last(t)
+	if len(specs) != 2 || specs[1].Node != "n2" || len(specs[1].Printers) != 1 {
+		t.Fatalf("specs %+v, want both nodes", specs)
+	}
+}
+
+func TestTooManyNodes(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3", "n4", "n5"}
+	nb := newNodeBackend(nodes...)
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	var printers []config.Printer
+	for i, n := range nodes {
+		d := catalog.Fixture("ippusb-mfp").Devices[0]
+		d.Serial = fmt.Sprint("S", i)
+		printers = append(printers, usbPrinter(n, d))
+		h.reportOn(t, n, "ippusb-mfp", func(r *device.AgentReport) { r.Inventory.Devices[0].Serial = d.Serial })
+	}
+	h.c.ConfigApplied(cfgOf(printers), "e")
+	s := h.step()
+	i := slices.IndexFunc(s.Reconcile, func(r apitypes.ReconcileItem) bool { return r.Item == "nodes" })
+	if i < 0 || s.Reconcile[i].OK || !strings.Contains(s.Reconcile[i].Message, "n5 are left out") {
+		t.Fatalf("reconcile %+v", s.Reconcile)
+	}
+	// The backend gets only what fits its slots; the left-out printer says so.
+	if specs := h.b.last(t); len(specs) != 4 || specs[3].Node != "n4" {
+		t.Fatalf("specs %+v, want n1-n4", specs)
+	}
+	p := printerStatus(t, s, "n5")
+	wantEntry(t, p.Phase, p.Message, "error", msgLeftOut)
+	wantEntry(t, printerStatus(t, s, "n1").Phase, "", "deploying", "*")
+
+	// A node that sorts first but is new does not evict a node already served.
+	nb.mu.Lock()
+	nb.nodes = append([]string{"n0"}, nodes...)
+	nb.mu.Unlock()
+	d := catalog.Fixture("ippusb-mfp").Devices[0]
+	d.Serial = "S-new"
+	h.reportOn(t, "n0", "ippusb-mfp", func(r *device.AgentReport) { r.Inventory.Devices[0].Serial = d.Serial })
+	h.c.ConfigApplied(cfgOf(append(printers, usbPrinter("n0", d))), "e2")
+	h.step()
+	var got []string
+	for _, sp := range h.b.last(t) {
+		got = append(got, sp.Node)
+	}
+	if !slices.Equal(got, []string{"n1", "n2", "n3", "n4"}) {
+		t.Fatalf("specs for %v, want the served nodes kept", got)
+	}
+}
+
+// TestNoConfigProbesCapped: with no config, probes fit the backend's slots.
+func TestNoConfigProbesCapped(t *testing.T) {
+	nb := newNodeBackend("n1", "n2", "n3", "n4", "n5")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigMissing()
+	s := h.step()
+	if specs := h.b.last(t); len(specs) != maxWorkloads {
+		t.Fatalf("%d probe specs, want %d", len(specs), maxWorkloads)
+	}
+	for _, r := range s.Reconcile {
+		if !r.OK {
+			t.Errorf("item %+v failed", r)
+		}
+	}
+}
+
+// TestProbeSpecsDroppedFirst: probe-only nodes give way to nodes with devices
+// when the slots run out, and no nodes item is set for them.
+func TestProbeSpecsDroppedFirst(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3", "n4", "n5"}
+	nb := newNodeBackend(nodes...)
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	var printers []config.Printer
+	for i, n := range []string{"n1", "n2", "n4", "n5"} {
+		d := catalog.Fixture("ippusb-mfp").Devices[0]
+		d.Serial = fmt.Sprint("S", i)
+		printers = append(printers, usbPrinter(n, d))
+		h.reportOn(t, n, "ippusb-mfp", func(r *device.AgentReport) { r.Inventory.Devices[0].Serial = d.Serial })
+	}
+	h.reportOn(t, "n3", "no-printer")
+	h.c.ConfigApplied(cfgOf(printers), "e")
+	s := h.step()
+	var got []string
+	for _, sp := range h.b.last(t) {
+		if sp.Mode == device.ModeProbe {
+			t.Errorf("probe spec for %s applied", sp.Node)
+		}
+		got = append(got, sp.Node)
+	}
+	if !slices.Equal(got, []string{"n1", "n2", "n4", "n5"}) {
+		t.Fatalf("specs for %v", got)
+	}
+	for _, r := range s.Reconcile {
+		if !r.OK {
+			t.Errorf("item %+v failed", r)
+		}
+	}
+}
+
+// TestApplyFailsOneWorkload: a backend error naming one workload marks only
+// that workload's item and printers, and the other workload's item stays ok.
+func TestApplyFailsOneWorkload(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	hp, sam := dev(t, "ippusb-mfp", "03f0:2754"), dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp), usbPrinter("samsung", sam)}), "e")
+	h.reportOn(t, "n1", "ippusb-mfp")
+	h.reportOn(t, "n2", "samsung-scx4300-mfp")
+	h.b.applyErr = device.WorkloadErrors{"n2": errors.New("denied by admission")}
+	s := h.step()
+	p := printerStatus(t, s, "samsung")
+	if p.Phase != "error" || !strings.Contains(p.Message, "denied by admission") {
+		t.Fatalf("samsung %s %q, want the n2 error", p.Phase, p.Message)
+	}
+	if p := printerStatus(t, s, "hp"); p.Phase == "error" {
+		t.Fatalf("hp %s %q, want it unaffected", p.Phase, p.Message)
+	}
+	items := map[string]bool{}
+	for _, r := range s.Reconcile {
+		items[r.Item] = r.OK
+	}
+	if ok, set := items["workload/n2"]; !set || ok || !items["workload/n1"] {
+		t.Fatalf("reconcile %+v", s.Reconcile)
+	}
+	// n2 recovers: its item clears.
+	h.b.applyErr = nil
+	h.clock.add(resync)
+	s = h.step()
+	for _, r := range s.Reconcile {
+		if !r.OK {
+			t.Fatalf("item %+v still failed", r)
+		}
+	}
+}
+
+func TestStaleWorkloadItemCleared(t *testing.T) {
+	nb := newNodeBackend("n1", "n2")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigMissing()
+	h.b.applyErr = errors.New("quota")
+	h.step()
+	nb.mu.Lock()
+	nb.nodes = []string{"n1"}
+	nb.mu.Unlock()
+	h.b.applyErr = nil
+	h.clock.add(resync)
+	s := h.step()
+	for _, r := range s.Reconcile {
+		if !r.OK {
+			t.Fatalf("item %+v still failed", r)
+		}
+	}
+	if len(s.Reconcile) != 2 {
+		t.Fatalf("reconcile %+v", s.Reconcile)
+	}
+}
+
+func workloadNodes(s apitypes.Status) []string {
+	var out []string
+	for _, w := range s.Workloads {
+		out = append(out, w.Node)
+	}
+	return out
+}
+
+// TestUpgradeFromSingleWorkload: after the upgrade that adds the nodes
+// ClusterRole, the backend still observes the old unpinned slot 0 as workload
+// "" and its old agent reports as "". With one listed node, that report is
+// the node's: the first Apply pins the full spec to it, with no probe spec in
+// between.
+func TestUpgradeFromSingleWorkload(t *testing.T) {
+	nb := newNodeBackend("n1")
+	nb.set(running())
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	sam := dev(t, "samsung-scx4300-mfp", "04e8:342e")
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("samsung", sam)}), "e")
+	h.report(t, "samsung-scx4300-mfp")
+	h.step()
+	h.report(t, "samsung-scx4300-mfp")
+	h.step()
+	for i, specs := range h.b.applies() {
+		for _, sp := range specs {
+			if sp.Mode == device.ModeProbe || sp.Node != "n1" || len(sp.Printers) != 1 {
+				t.Fatalf("Apply %d: spec %+v, want the full spec pinned to n1", i, sp)
+			}
+		}
+	}
+	wantApplies(t, h.b, 1)
 }

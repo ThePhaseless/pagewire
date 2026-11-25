@@ -24,7 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenPrinting/goipp"
+
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 	"github.com/ThePhaseless/pagewire/internal/pappl"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
@@ -70,7 +73,19 @@ func (cp *controlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cp.latest = &rep
 	cp.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(cp.desired)
+	cp.mu.Lock()
+	desired := cp.desired
+	cp.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(desired)
+}
+
+// setDefaults changes the queue defaults the agent is told to keep.
+func (cp *controlPlane) setDefaults(d device.PrintSettings) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	q := slices.Clone(cp.desired.Queues)
+	q[0].Defaults = d
+	cp.desired.Queues = q
 }
 
 func (cp *controlPlane) fail(msg string) {
@@ -101,17 +116,21 @@ func TestDevicePod(t *testing.T) {
 	driver := genericPostScriptDriver(ctx, t)
 	t.Logf("PAPPL driver: %s", driver)
 
+	want := device.QueueSpec{
+		ID:        queueName,
+		Name:      queueName,
+		Location:  "Integration test",
+		Driver:    driver,
+		DeviceURI: "cups:" + simPrinterURI,
+		Schemes:   []string{"ipp"},
+		// The agent's own printer app, named by the controller in production.
+		SystemURI: papplSystemURI,
+		Device:    device.USBDevice{DeviceID: "MFG:Generic;MDL:PostScript Printer;CMD:POSTSCRIPT;"},
+		Defaults:  device.PrintSettings{Media: "iso_a4_210x297mm", Sides: "one-sided"},
+	}
 	cp := &controlPlane{token: token, desired: device.DesiredState{
-		Hash: "it",
-		Queue: &device.QueueSpec{
-			Name:      queueName,
-			Location:  "Integration test",
-			Driver:    driver,
-			DeviceURI: "cups:" + simPrinterURI,
-			Schemes:   []string{"ipp"},
-			Media:     "iso_a4_210x297mm",
-			Sides:     "one-sided",
-		},
+		Hash:   "it",
+		Queues: []device.QueueSpec{want},
 		Browse: device.BrowseTypes,
 	}}
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", controlPlaneAddr)
@@ -124,14 +143,14 @@ func TestDevicePod(t *testing.T) {
 
 	// The agent backs off up to 30 s while the control plane is down, then
 	// reconciles and browses once per 5 s cycle.
-	rep := waitReport(ctx, t, cp, *cp.desired.Queue, 120*time.Second)
+	rep := waitReport(ctx, t, cp, want, 120*time.Second)
 	if rep.PodUID != "it" {
 		t.Errorf("podUid = %q, want it", rep.PodUID)
 	}
-	if rep.Queue.DeviceURI != "cups:"+simPrinterURI {
-		t.Errorf("queue device URI = %q, want cups:%s", rep.Queue.DeviceURI, simPrinterURI)
+	if q := rep.Queues[0]; q.ID != queueName || q.DeviceURI != "cups:"+simPrinterURI {
+		t.Errorf("queue %+v, want id %s and device URI cups:%s", q, queueName, simPrinterURI)
 	}
-	queueURI := rep.Queue.PrinterURI
+	queueURI := rep.Queues[0].PrinterURI
 	t.Logf("PAPPL queue: %s", queueURI)
 
 	sample, err := os.ReadFile("../../internal/printing/testdata/sample.pdf")
@@ -176,6 +195,56 @@ func TestDevicePod(t *testing.T) {
 				scanOnePage(ctx, t, s)
 			})
 		}
+	})
+
+	// Every default the queue reports and PAPPL accepts reads back as set, so
+	// the agent's set-only-on-change guard does not resend it every cycle. A
+	// default the printer refuses (ps-printer-app refuses output-bin-default
+	// face-down while listing it as supported) is left out of the check.
+	t.Run("queue defaults read back", func(t *testing.T) {
+		c := pappl.New(papplSystemURI)
+		q := onlyQueue(ctx, t, c)
+		fitted, dropped := device.FitPrint(otherDefaults(q.Caps), q.Caps)
+		if len(dropped) != 0 {
+			t.Fatalf("dropped %+v from values the queue reports", dropped)
+		}
+		t.Logf("caps %+v; setting %+v", q.Caps, fitted)
+		cp.setDefaults(fitted) // the agent then wants the same and leaves the queue alone
+		rejected, err := c.SetDefaults(ctx, q.URI, ippcaps.Defaults(fitted))
+		if err != nil {
+			t.Fatalf("set-printer-attributes: %v", err)
+		}
+		refused := func(attrs ...string) bool {
+			return slices.ContainsFunc(rejected, func(a goipp.Attribute) bool { return slices.Contains(attrs, a.Name) })
+		}
+		t.Logf("refused: %v", rejected)
+		// The agent may still be applying the previous desired defaults: poll.
+		waitFor(ctx, t, 30*time.Second, "every set default to read back", func() (bool, string) {
+			got := onlyQueue(ctx, t, c).Caps
+			var bad []string
+			media := []string{"media-default", "media-col-default"}
+			for _, k := range []struct {
+				kind            string
+				attrs           []string
+				set, read, zero any
+			}{
+				{"media", media, fitted.Media, got.MediaDefault, ""},
+				{"mediaSource", media, fitted.MediaSource, got.MediaSourceDefault, ""},
+				{"mediaType", media, fitted.MediaType, got.MediaTypeDefault, ""},
+				{"sides", []string{"sides-default"}, fitted.Sides, got.SidesDefault, ""},
+				{"colorMode", []string{"print-color-mode-default"}, fitted.ColorMode, got.ColorModeDefault, ""},
+				{"quality", []string{"print-quality-default"}, fitted.Quality, got.QualityDefault, ""},
+				{"resolution", []string{"printer-resolution-default"}, fitted.Resolution, got.ResolutionDefault, 0},
+				{"contentOptimize", []string{"print-content-optimize-default"}, fitted.ContentOptimize, got.ContentOptimizeDefault, ""},
+				{"orientation", []string{"orientation-requested-default"}, fitted.Orientation, got.OrientationDefault, ""},
+				{"outputBin", []string{"output-bin-default"}, fitted.OutputBin, got.OutputBinDefault, ""},
+			} {
+				if k.set != k.zero && k.set != k.read && !refused(k.attrs...) {
+					bad = append(bad, fmt.Sprintf("%s set %v, reads %v", k.kind, k.set, k.read))
+				}
+			}
+			return len(bad) == 0, strings.Join(bad, "; ")
+		})
 	})
 
 	if _, errs := cp.report(); len(errs) > 0 {
@@ -243,8 +312,8 @@ func waitReport(ctx context.Context, t *testing.T, cp *controlPlane, want device
 		for _, s := range r.Services {
 			types = append(types, s.Type+" "+s.Name)
 		}
-		state := fmt.Sprintf("queue %+v, services %q", r.Queue, types)
-		if r.Queue == nil || r.Queue.State != device.QueueOK || r.Queue.PrinterURI == "" ||
+		state := fmt.Sprintf("queues %+v, services %q", r.Queues, types)
+		if len(r.Queues) != 1 || r.Queues[0].State != device.QueueOK || r.Queues[0].PrinterURI == "" ||
 			!hasService(r.Services, device.ServiceIPP) || !hasService(r.Services, device.ServiceUScan) {
 			return false, state
 		}
@@ -256,10 +325,56 @@ func waitReport(ctx context.Context, t *testing.T, cp *controlPlane, want device
 		// Location is not compared: PAPPL 1.4.12's Set-Printer-Attributes passes
 		// printer-location to papplPrinterSetGeoLocation (printer-ipp.c), so it never sticks.
 		return len(printers) == 1 && printers[0].Name == want.Name && printers[0].DeviceURI == want.DeviceURI &&
-			printers[0].Driver == want.Driver && printers[0].Media == want.Media &&
-			printers[0].URI == r.Queue.PrinterURI, state
+			printers[0].Driver == want.Driver && printers[0].Caps.MediaDefault == want.Defaults.Media &&
+			printers[0].URI == r.Queues[0].PrinterURI, state
 	})
 	return rep
+}
+
+// onlyQueue is the printer app's one queue.
+func onlyQueue(ctx context.Context, t *testing.T, c *pappl.Client) pappl.Printer {
+	t.Helper()
+	printers, err := c.Printers(ctx)
+	if err != nil || len(printers) != 1 {
+		t.Fatalf("get-printers: %+v, %v; want one queue", printers, err)
+	}
+	return printers[0]
+}
+
+// otherDefaults picks, for every kind caps reports, a supported value other
+// than the current default when there is one.
+func otherDefaults(caps device.PrinterCaps) device.PrintSettings {
+	str := func(supported []string, def string) string {
+		for _, v := range supported {
+			if v != def {
+				return v
+			}
+		}
+		return def
+	}
+	num := func(supported []int, def int) int {
+		for _, v := range supported {
+			if v != def {
+				return v
+			}
+		}
+		return def
+	}
+	return device.PrintSettings{
+		Media:           str(caps.Media, caps.MediaDefault),
+		MediaSource:     str(caps.MediaSources, caps.MediaSourceDefault),
+		MediaType:       str(caps.MediaTypes, caps.MediaTypeDefault),
+		Sides:           str(caps.Sides, caps.SidesDefault),
+		ColorMode:       str(caps.ColorModes, caps.ColorModeDefault),
+		Quality:         str(caps.Qualities, caps.QualityDefault),
+		Resolution:      num(caps.Resolutions, caps.ResolutionDefault),
+		ContentOptimize: str(caps.ContentOptimize, caps.ContentOptimizeDefault),
+		Orientation:     str(caps.Orientations, caps.OrientationDefault),
+		NumberUp:        num(caps.NumberUp, caps.NumberUpDefault),
+		PrintScaling:    str(caps.PrintScalings, caps.PrintScalingDefault),
+		OutputBin:       str(caps.OutputBins, caps.OutputBinDefault),
+		Finishings:      str(caps.Finishings, caps.FinishingsDefault),
+	}
 }
 
 func hasService(services []device.DNSSDService, typ string) bool {

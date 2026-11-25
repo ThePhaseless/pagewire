@@ -24,7 +24,7 @@ import (
 )
 
 // dockerSimContainers are the device containers of simulated mode, in plan order.
-var dockerSimContainers = []string{"probe", "dbus", "avahi", "agent", "sim-printer", "airsane"}
+var dockerSimContainers = []string{"probe", "dbus", "avahi", "agent", "sim-printer-0", "airsane"}
 
 // dockerCommonCaps are the capabilities both Docker and Podman grant by
 // default. Podman's compat inspect lists the dropped defaults in CapDrop
@@ -54,7 +54,9 @@ func TestDockerBackend(t *testing.T) {
 	dockerWaitHealthz(ctx, t, base)
 	code, body, _ := dockerHTTP(ctx, t, http.MethodPut, base+"/api/v1/config",
 		map[string]string{"If-None-Match": "*", "Content-Type": "application/json"},
-		`{"apiVersion":"pagewire/v1","name":"pagewire-it-docker","device":{"mode":"simulated"}}`)
+		`{"apiVersion":"pagewire/v2","name":"pagewire-it-docker",`+
+			`"printers":[{"id":"sim","name":"pagewire-it-docker","mode":"simulated"}],`+
+			`"scanners":[{"id":"sim-scan","name":"pagewire-it-docker scanner","mode":"simulated"}]}`)
 	if code != http.StatusCreated {
 		t.Fatalf("PUT config: %d %s (a config already exists? run compose down -v first)", code, body)
 	}
@@ -65,14 +67,14 @@ func TestDockerBackend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("printer %s, scanner %s", st.Printer.URI, st.Scanner.URL)
-		printAndWait(ctx, t, st.Printer.URI, sample)
+		t.Logf("printer %s, scanner %s", st.Printers[0].URI, st.Scanners[0].URL)
+		printAndWait(ctx, t, st.Printers[0].URI, sample)
 		for _, c := range []struct {
 			name string
 			new  func(string) (scanning.Scanner, error)
 		}{{"mfp", scanning.NewMFP}, {"xml", scanning.NewXML}} {
 			t.Run(c.name, func(t *testing.T) {
-				s, err := c.new(st.Scanner.URL)
+				s, err := c.new(st.Scanners[0].URL)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -118,13 +120,13 @@ func TestDockerBackend(t *testing.T) {
 	})
 
 	t.Run("self-heal", func(t *testing.T) {
-		old := dockerIDs(dockerOwned(ctx, t, eng))["sim-printer"]
-		if _, err := eng.ContainerRemove(ctx, docker.Prefix+"sim-printer", client.ContainerRemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+		old := dockerIDs(dockerOwned(ctx, t, eng))["sim-printer-0"]
+		if _, err := eng.ContainerRemove(ctx, docker.Prefix+"sim-printer-0", client.ContainerRemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 			t.Fatal(err)
 		}
 		waitFor(ctx, t, 3*time.Minute, "a new sim-printer and every device container running", func() (bool, string) {
 			owned := dockerOwned(ctx, t, eng)
-			id := dockerIDs(owned)["sim-printer"]
+			id := dockerIDs(owned)["sim-printer-0"]
 			return id != "" && id != old && dockerAllRunning(owned), dockerState(owned)
 		})
 		dockerWaitReady(ctx, t, base, 3*time.Minute)
@@ -138,7 +140,7 @@ func TestDockerBackend(t *testing.T) {
 		}
 		code, body, _ = dockerHTTP(ctx, t, http.MethodPatch, base+"/api/v1/config",
 			map[string]string{"If-Match": hdr.Get("ETag"), "Content-Type": "application/merge-patch+json"},
-			`{"name":"pagewire-it-docker-2"}`)
+			`{"printers":[{"id":"sim","name":"pagewire-it-docker-2","mode":"simulated"}]}`) // the simulated printer's name is in the spec
 		if code != http.StatusOK {
 			t.Fatalf("PATCH config: %d %s", code, body)
 		}
@@ -299,7 +301,7 @@ func dockerWaitHealthz(ctx context.Context, t *testing.T, base string) {
 	})
 }
 
-// dockerWaitReady waits for device phase ready with the printer and the
+// dockerWaitReady waits for phase ready with the one printer and the one
 // scanner available, and returns that status.
 func dockerWaitReady(ctx context.Context, t *testing.T, base string, d time.Duration) apitypes.Status {
 	t.Helper()
@@ -316,9 +318,13 @@ func dockerWaitReady(ctx context.Context, t *testing.T, base string, d time.Dura
 		if err := json.Unmarshal([]byte(body), &st); err != nil {
 			return false, err.Error()
 		}
-		return st.Device.Phase == "ready" && st.Printer.Available && st.Scanner.Available,
-			fmt.Sprintf("device %s %q, printer %v %s, scanner %v %s", st.Device.Phase, st.Device.Message,
-				st.Printer.Available, st.Printer.URI, st.Scanner.Available, st.Scanner.URL)
+		if len(st.Printers) != 1 || len(st.Scanners) != 1 {
+			return false, fmt.Sprintf("phase %s %q, %d printers, %d scanners", st.Phase, st.Message, len(st.Printers), len(st.Scanners))
+		}
+		p, sc := st.Printers[0], st.Scanners[0]
+		return st.Phase == "ready" && p.Available && sc.Available,
+			fmt.Sprintf("phase %s %q, printer %s %v %s, scanner %s %v %s", st.Phase, st.Message,
+				p.Phase, p.Available, p.URI, sc.Phase, sc.Available, sc.URL)
 	})
 	return st
 }

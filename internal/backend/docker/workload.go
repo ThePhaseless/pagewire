@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Labels and names of the objects the backend owns.
@@ -27,7 +29,7 @@ const (
 	LabelWorkloadHash = "io.github.thephaseless.pagewire.workload-hash"
 	LabelContainer    = "io.github.thephaseless.pagewire.container"
 	LabelInit         = "io.github.thephaseless.pagewire.init"       // "true" only for run-to-completion inits
-	LabelUSBDevice    = "io.github.thephaseless.pagewire.usb-device" // the usbfs node a USB daemon was given
+	LabelUSBDevice    = "io.github.thephaseless.pagewire.usb-device" // the usbfs nodes a USB daemon was given, sorted and comma-joined
 
 	Prefix        = "pagewire-device-" // + the workload container's name
 	SeedContainer = Prefix + "seed"
@@ -55,13 +57,13 @@ const (
 )
 
 // plannedContainer is one device container ready for ContainerCreate. RunOnce
-// marks an init that runs to completion. usbDaemon marks a LAN-facing daemon
-// that gets the matched printer's usbfs node, and only that, from withDevice.
+// marks an init that runs to completion. usb lists the devices of a LAN-facing
+// USB daemon, which gets their usbfs nodes, and only those, from withDevice.
 type plannedContainer struct {
-	Name      string
-	Opts      client.ContainerCreateOptions
-	RunOnce   bool
-	usbDaemon bool
+	Name    string
+	Opts    client.ContainerCreateOptions
+	RunOnce bool
+	usb     []device.USBKey
 }
 
 // namedVolumes maps k8s volume names to the Docker named volume behind them.
@@ -149,7 +151,7 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 	if runOnce {
 		hc.RestartPolicy.Name = container.RestartPolicyDisabled
 	}
-	for _, m := range c.Mounts {
+	for _, m := range c.Mounts { // SubPath is only on per-container volumes here, so it needs no mapping
 		switch {
 		case namedVolumes[m.Vol] != "":
 			hc.Mounts = append(hc.Mounts, namedMount(namedVolumes[m.Vol], m.Path, m.RO))
@@ -172,8 +174,11 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 			})
 		}
 	}
-	usbDaemon := c.USB && !runOnce
-	if c.USB && runOnce { // the probe, our own code and not LAN-facing
+	var usb []device.USBKey
+	if !runOnce {
+		usb = slices.Clone(c.USB)
+	}
+	if c.USBAll { // the probe, our own code and not LAN-facing
 		hc.Mounts = append(hc.Mounts, mount.Mount{Type: mount.TypeBind, Source: usbDevDir, Target: usbDevDir, ReadOnly: true})
 		hc.DeviceCgroupRules = []string{usbCgroupRule}
 	}
@@ -192,9 +197,9 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 	labels[LabelContainer] = c.Name
 	labels[LabelInit] = strconv.FormatBool(runOnce)
 	return plannedContainer{
-		Name:      c.Name,
-		RunOnce:   runOnce,
-		usbDaemon: usbDaemon,
+		Name:    c.Name,
+		RunOnce: runOnce,
+		usb:     usb,
 		Opts: client.ContainerCreateOptions{
 			Name: Prefix + c.Name,
 			Config: &container.Config{
@@ -212,21 +217,30 @@ func translateOne(c k8s.Container, runOnce bool) (plannedContainer, error) {
 	}, nil
 }
 
-// withDevice returns cs as they run with the matched printer at the usbfs
-// node: each USB daemon gets that node alone (rw, no mknod) and a label naming
-// it. With node "" the USB daemons are left out, never given the whole bus.
-// cs itself is not changed.
-func withDevice(cs []plannedContainer, node string) []plannedContainer {
+// withDevice returns cs as they run with the devices at the usbfs nodes in
+// nodes: each USB daemon gets the nodes of its own devices alone (rw, no
+// mknod) and a label naming them. A daemon none of whose devices has a node is
+// left out, never given the whole bus. cs itself is not changed.
+func withDevice(cs []plannedContainer, nodes map[device.USBKey][]string) []plannedContainer {
 	out := make([]plannedContainer, 0, len(cs))
 	for _, c := range cs {
-		if c.usbDaemon {
-			if node == "" {
+		if len(c.usb) > 0 {
+			var own []string
+			for _, k := range c.usb {
+				own = append(own, nodes[k]...)
+			}
+			if len(own) == 0 {
 				continue
 			}
+			slices.Sort(own)
+			own = slices.Compact(own)
 			cfg, hc := *c.Opts.Config, *c.Opts.HostConfig
 			cfg.Labels = maps.Clone(cfg.Labels)
-			cfg.Labels[LabelUSBDevice] = node
-			hc.Devices = []container.DeviceMapping{{PathOnHost: node, PathInContainer: node, CgroupPermissions: "rw"}}
+			cfg.Labels[LabelUSBDevice] = strings.Join(own, ",")
+			hc.Devices = make([]container.DeviceMapping, 0, len(own))
+			for _, n := range own {
+				hc.Devices = append(hc.Devices, container.DeviceMapping{PathOnHost: n, PathInContainer: n, CgroupPermissions: "rw"})
+			}
 			c.Opts.Config, c.Opts.HostConfig = &cfg, &hc
 		}
 		out = append(out, c)

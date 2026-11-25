@@ -5,25 +5,15 @@ import { z } from "zod";
 // or zod probes new Function() and the browser logs a CSP violation.
 z.config({ jitless: true });
 
-export const USBSchema = z.strictObject({
+export const IgnoredDeviceSchema = z.strictObject({
   vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
   productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
   /** USB serial number, at most 126 characters, no control characters. */
   serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
+  /** printer, scanner or both. */
+  roles: z.array(z.enum(["printer","scanner"])).min(1).refine((a) => new Set(a.map((v) => JSON.stringify(v))).size === a.length, { message: "Items must be unique" }).optional(),
 });
-export type USB = z.infer<typeof USBSchema>;
-
-export const DeviceSchema = z.strictObject({
-  /** usb, or simulated (test printer and SANE test scanner, no USB resource). */
-  mode: z.enum(["usb","simulated"]).optional(),
-  /** Optional selector when several USB devices are visible. Only allowed with mode usb. */
-  usb: USBSchema.optional(),
-  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript","legacy"]).optional(),
-  /** Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the device degraded. Not allowed with driver ipp-usb or mode simulated. */
-  driverName: z.string().max(255).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
-  scanner: z.enum(["auto","ipp-usb","airsane","none"]).optional(),
-});
-export type Device = z.infer<typeof DeviceSchema>;
+export type IgnoredDevice = z.infer<typeof IgnoredDeviceSchema>;
 
 export const EULARefSchema = z.strictObject({
   id: z.string().optional(),
@@ -39,43 +29,107 @@ export const LicensesSchema = z.strictObject({
 });
 export type Licenses = z.infer<typeof LicensesSchema>;
 
-export const PrintDefaultsSchema = z.strictObject({
-  /** PWG self-describing media name. */
-  media: z.string().regex(new RegExp("^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$", "u")).optional(),
-  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]).optional(),
-  colorMode: z.enum(["auto","color","monochrome"]).optional(),
-  quality: z.enum(["draft","normal","high"]).optional(),
-});
-export type PrintDefaults = z.infer<typeof PrintDefaultsSchema>;
-
 export const PrintConfigSchema = z.strictObject({
-  defaults: PrintDefaultsSchema.optional(),
   maxUploadMiB: z.int().min(1).max(500).optional(),
 });
 export type PrintConfig = z.infer<typeof PrintConfigSchema>;
 
-export const ScanDefaultsSchema = z.strictObject({
-  source: z.enum(["platen","adf","adf-duplex"]).optional(),
-  resolution: z.int().min(75).max(1200).optional(),
-  colorMode: z.enum(["color","grayscale","blackandwhite"]).optional(),
-  format: z.enum(["pdf","jpeg"]).optional(),
+export const PrintDefaultsSchema = z.strictObject({
+  /** PWG self-describing media name, such as iso_a4_210x297mm. */
+  media: z.string().regex(new RegExp("^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$", "u")).optional(),
+  /** Tray keyword the printer reports, such as auto, main, tray-1 or manual. */
+  mediaSource: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  /** Media type keyword the printer reports, such as stationery or photographic-glossy. */
+  mediaType: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  sides: z.enum(["one-sided","two-sided-long-edge","two-sided-short-edge"]).optional(),
+  colorMode: z.enum(["auto","color","monochrome"]).optional(),
+  quality: z.enum(["draft","normal","high"]).optional(),
+  /** Dots per inch. */
+  resolution: z.int().min(75).max(2400).optional(),
+  contentOptimize: z.enum(["auto","graphic","photo","text","text-and-graphic"]).optional(),
+  orientation: z.enum(["portrait","landscape","reverse-landscape","reverse-portrait"]).optional(),
+  /** Pages per sheet. */
+  numberUp: z.int().min(1).max(16).optional(),
+  printScaling: z.enum(["auto","auto-fit","fill","fit","none"]).optional(),
+  /** Output bin keyword the printer reports, such as face-down or top. */
+  outputBin: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
+  /** One IANA finishings keyword, such as none, staple or punch. */
+  finishings: z.string().regex(new RegExp("^[a-z0-9][a-z0-9._-]{0,254}$", "u")).optional(),
 });
-export type ScanDefaults = z.infer<typeof ScanDefaultsSchema>;
+export type PrintDefaults = z.infer<typeof PrintDefaultsSchema>;
+
+export const USBSchema = z.strictObject({
+  vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
+  productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
+  /** USB serial number, at most 126 characters, no control characters. */
+  serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
+});
+export type USB = z.infer<typeof USBSchema>;
+
+export const PrinterSchema = z.strictObject({
+  /** Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners. */
+  id: z.string().regex(new RegExp("^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -, unique among printers (ignoring case). The queue and DNS-SD name of PAPPL and simulated printers; ipp-usb and AirSane advertise the device's own names. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** printer-location, 0 to 127 characters. */
+  location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
+  /** false keeps the entry but does not serve the printer (default true). */
+  enabled: z.boolean().optional(),
+  /** usb, or simulated (a test printer, no USB resource). */
+  mode: z.enum(["usb","simulated"]).optional(),
+  /** Selects the USB device. Only allowed with mode usb; at most one usb printer may leave it out. */
+  usb: USBSchema.optional(),
+  driver: z.enum(["auto","ipp-usb","ps","hplip","gutenprint","ghostscript","legacy"]).optional(),
+  /** Optional exact driver name from the printer application, at most 255 characters. With driver auto, the first family that lists it runs; with a family, that family's driver of that name runs. A name that is not listed leaves pagewire's own choice running (within the family, when driver names one) and the printer degraded. Not allowed with driver ipp-usb or mode simulated. */
+  driverName: z.string().max(255).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
+  defaults: PrintDefaultsSchema.optional(),
+});
+export type Printer = z.infer<typeof PrinterSchema>;
 
 export const ScanConfigSchema = z.strictObject({
-  defaults: ScanDefaultsSchema.optional(),
   /** Days to keep scans; 0 keeps them forever. */
   retentionDays: z.int().min(0).max(3650).optional(),
 });
 export type ScanConfig = z.infer<typeof ScanConfigSchema>;
 
-export const ConfigSchema = z.strictObject({
-  apiVersion: z.literal("pagewire/v1"),
-  /** Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
+export const ScanDefaultsSchema = z.strictObject({
+  source: z.enum(["platen","adf","adf-duplex"]).optional(),
+  /** Dots per inch. */
+  resolution: z.int().min(75).max(1200).optional(),
+  colorMode: z.enum(["color","grayscale","blackandwhite"]).optional(),
+  intent: z.enum(["document","text-and-graphic","photo","preview","object","business-card"]).optional(),
+  format: z.enum(["pdf","jpeg"]).optional(),
+});
+export type ScanDefaults = z.infer<typeof ScanDefaultsSchema>;
+
+export const ScannerSchema = z.strictObject({
+  /** Required, 1 to 32 lower-case letters, digits or dashes, not starting or ending with a dash. Unique across printers and scanners. */
+  id: z.string().regex(new RegExp("^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. The scanner's name in the UI; ipp-usb and AirSane advertise the device's own name. */
   name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
-  /** printer-location, 0 to 127 characters. */
+  /** 0 to 127 characters. */
   location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
-  device: DeviceSchema.optional(),
+  /** false keeps the entry but does not serve the scanner (default true). */
+  enabled: z.boolean().optional(),
+  /** usb, or simulated (the SANE test scanner, no USB resource). At most one scanner may be simulated. */
+  mode: z.enum(["usb","simulated"]).optional(),
+  /** Selects the USB device. Only allowed with mode usb; at most one usb scanner may leave it out. */
+  usb: USBSchema.optional(),
+  backend: z.enum(["auto","ipp-usb","airsane"]).optional(),
+  defaults: ScanDefaultsSchema.optional(),
+});
+export type Scanner = z.infer<typeof ScannerSchema>;
+
+export const ConfigSchema = z.strictObject({
+  apiVersion: z.literal("pagewire/v2"),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. The UI title. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** Printers pagewire serves (default []). */
+  printers: z.array(PrinterSchema).optional(),
+  /** Scanners pagewire serves (default []). */
+  scanners: z.array(ScannerSchema).optional(),
+  /** USB devices the setup wizard does not offer again (default []). */
+  ignoredDevices: z.array(IgnoredDeviceSchema).optional(),
   print: PrintConfigSchema.optional(),
   scan: ScanConfigSchema.optional(),
   licenses: LicensesSchema.optional(),

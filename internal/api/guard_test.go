@@ -111,7 +111,7 @@ func TestReadDeadlines(t *testing.T) {
 		"PUT /api/v1/config HTTP/1.1\r\nHost: x\r\nIf-None-Match: *\r\nContent-Length: 100\r\n\r\n{",
 		"PATCH /api/v1/config HTTP/1.1\r\nHost: x\r\nIf-Match: *\r\nContent-Type: application/merge-patch+json\r\nContent-Length: 100\r\n\r\n{",
 		"POST /api/v1/scans HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{",
-		"POST /api/v1/print HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 1000\r\n\r\n--b\r\n",
+		"POST /api/v1/printers/p1/print HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 1000\r\n\r\n--b\r\n",
 	} {
 		start := time.Now()
 		var d net.Dialer

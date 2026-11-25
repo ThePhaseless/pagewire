@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
 	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
@@ -60,9 +62,17 @@ func tooLarge(w http.ResponseWriter, limitMiB int) {
 	writeProblem(w, http.StatusRequestEntityTooLarge, "too-large", fmt.Sprintf("the upload limit is %d MiB", limitMiB))
 }
 
-// print accepts one document: an options part, then a file part.
+// print accepts one document for printer {id}: an options part, then a file
+// part. Options the printer does not offer are left out and come back as
+// warnings; while its capabilities are unknown they are sent as given.
 func (s *server) print(w http.ResponseWriter, r *http.Request) {
 	readDeadline(w, s.d.printReadTimeout)
+	printerID := r.PathValue("id")
+	printer, err := s.d.Printers.Printer(printerID)
+	if err != nil {
+		printerError(w, err)
+		return
+	}
 	limitMiB := s.d.Config().Print.MaxUploadMiB
 	body := &limitedBody{r: http.MaxBytesReader(w, r.Body, int64(limitMiB)<<20)}
 
@@ -97,6 +107,10 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid-options", "the print options are not valid", errs...)
 		return
 	}
+	warnings := []apitypes.Warning{}
+	if caps, ok := s.d.PrinterCaps(printerID); ok {
+		opts, warnings = fitOptions(opts, caps)
+	}
 
 	file, err := mr.NextPart()
 	if err != nil || file.FormName() != "file" {
@@ -119,7 +133,7 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 	}
 	head = head[:n]
 	format := printing.Detect(head, file.FileName())
-	formats, err := s.d.Printer.Formats(r.Context())
+	formats, err := printer.Formats(r.Context())
 	if err != nil {
 		printerError(w, err)
 		return
@@ -163,7 +177,7 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		doc = converted
 	}
 	name := jobName(file.FileName())
-	id, err := s.d.Printer.Submit(r.Context(), name, userName(r), target, doc, opts)
+	id, err := printer.Submit(r.Context(), name, userName(r), target, doc, opts)
 	if err != nil {
 		if body.tooLarge(err) {
 			tooLarge(w, limitMiB)
@@ -172,17 +186,41 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		printerError(w, err)
 		return
 	}
-	job, err := s.d.Printer.Job(r.Context(), id)
+	job, err := printer.Job(r.Context(), id)
 	if err != nil {
 		job = apitypes.Job{ID: id, Name: name, State: "pending", Reasons: []string{}, CreatedAt: time.Now()}
 	}
+	job.Printer = printerID
 	s.hub.Publish(apitypes.EventJob, job)
 	watching = true
 	go func() {
 		defer func() { <-s.watchers }()
-		s.watchJob(job)
+		s.watchJob(printer, job)
 	}()
-	writeJSON(w, http.StatusAccepted, job)
+	writeJSON(w, http.StatusAccepted, apitypes.PrintResult{Job: job, Warnings: warnings})
+}
+
+// fitOptions leaves out the options caps does not offer and clamps copies to
+// the printer's maximum, with one warning for each.
+func fitOptions(o apitypes.PrintOptions, caps device.PrinterCaps) (apitypes.PrintOptions, []apitypes.Warning) {
+	var dropped []device.Dropped
+	o.PrintSettings, dropped = device.FitPrint(o.PrintSettings, caps)
+	if caps.CopiesMax > 0 && o.Copies > caps.CopiesMax {
+		dropped = append(dropped, device.Dropped{Option: device.OptionCopies, Value: strconv.Itoa(o.Copies), Using: strconv.Itoa(caps.CopiesMax)})
+		o.Copies = caps.CopiesMax
+	}
+	warnings := []apitypes.Warning{}
+	for _, d := range dropped {
+		using := d.Using
+		if using == "" {
+			using = "its own default"
+		}
+		warnings = append(warnings, apitypes.Warning{
+			Option: d.Option, Value: d.Value, Using: d.Using,
+			Message: fmt.Sprintf("%s %s is not offered by this printer; it uses %s", d.Option, d.Value, using),
+		})
+	}
+	return o, warnings
 }
 
 // convertUpload spools the upload to a temp file (disk, never memory),
@@ -260,24 +298,50 @@ func conversionError(w http.ResponseWriter, err error) {
 	}
 }
 
+// Syntactic rules of the print options, the same as the config defaults'.
+var (
+	pwgMediaRe = regexp.MustCompile(`^[a-z0-9-]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$`)
+	keywordRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}$`)
+)
+
+// validateOptions checks every option syntactically; an empty string or 0
+// is absent and passes. The printer decides later which values it offers.
 func validateOptions(o apitypes.PrintOptions) []config.FieldError {
 	var errs []config.FieldError
 	bad := func(p, msg string) { errs = append(errs, config.FieldError{Path: p, Message: msg}) }
-	if o.Copies < 1 || o.Copies > 99 {
-		bad("/copies", "must be 1 to 99")
+	oneOf := func(p, v string, values ...string) {
+		if v != "" && !slices.Contains(values, v) {
+			bad(p, "must be "+strings.Join(values[:len(values)-1], ", ")+" or "+values[len(values)-1])
+		}
 	}
-	if !slices.Contains([]string{"one-sided", "two-sided-long-edge", "two-sided-short-edge"}, o.Sides) {
-		bad("/sides", "must be one-sided, two-sided-long-edge or two-sided-short-edge")
+	keyword := func(p, v string) {
+		if v != "" && !keywordRe.MatchString(v) {
+			bad(p, "must be a lower-case IPP keyword")
+		}
 	}
-	if !slices.Contains([]string{"auto", "color", "monochrome"}, o.ColorMode) {
-		bad("/colorMode", "must be auto, color or monochrome")
+	between := func(p string, v, lo, hi int) {
+		if v != 0 && (v < lo || v > hi) {
+			bad(p, fmt.Sprintf("must be %d to %d", lo, hi))
+		}
 	}
-	if o.Media == "" {
-		bad("/media", "must be a media name from the printer's media-supported list")
+	if o.Copies < 0 || o.Copies > 99 {
+		bad("/copies", "must be 0 to 99")
 	}
-	if !slices.Contains([]string{"draft", "normal", "high"}, o.Quality) {
-		bad("/quality", "must be draft, normal or high")
+	if o.Media != "" && !pwgMediaRe.MatchString(o.Media) {
+		bad("/media", "must be a PWG media name such as iso_a4_210x297mm")
 	}
+	keyword("/mediaSource", o.MediaSource)
+	keyword("/mediaType", o.MediaType)
+	oneOf("/sides", o.Sides, "one-sided", "two-sided-long-edge", "two-sided-short-edge")
+	oneOf("/colorMode", o.ColorMode, "auto", "color", "monochrome")
+	oneOf("/quality", o.Quality, "draft", "normal", "high")
+	between("/resolution", o.Resolution, 75, 2400)
+	oneOf("/contentOptimize", o.ContentOptimize, "auto", "graphic", "photo", "text", "text-and-graphic")
+	oneOf("/orientation", o.Orientation, "portrait", "landscape", "reverse-landscape", "reverse-portrait")
+	between("/numberUp", o.NumberUp, 1, 16)
+	oneOf("/printScaling", o.PrintScaling, "auto", "auto-fit", "fill", "fit", "none")
+	keyword("/outputBin", o.OutputBin)
+	keyword("/finishings", o.Finishings)
 	return errs
 }
 
@@ -319,7 +383,7 @@ func terminalJob(state string) bool {
 // watchJob polls a web-submitted job and publishes a job event on every state
 // or reasons change, until a terminal state, ErrNotFound, JobWatchTimeout or
 // BaseContext's end.
-func (s *server) watchJob(last apitypes.Job) {
+func (s *server) watchJob(p Printer, last apitypes.Job) {
 	if terminalJob(last.State) {
 		return
 	}
@@ -334,7 +398,8 @@ func (s *server) watchJob(last apitypes.Job) {
 			return
 		case <-t.C:
 		}
-		job, err := s.d.Printer.Job(ctx, last.ID)
+		job, err := p.Job(ctx, last.ID)
+		job.Printer = last.Printer
 		if errors.Is(err, printing.ErrNotFound) {
 			return
 		}
@@ -366,6 +431,8 @@ func printerError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusNotFound, "not-found", "no such job")
 	case errors.Is(err, printing.ErrFinished):
 		writeProblem(w, http.StatusConflict, "job-finished", "the job has already finished")
+	case errors.Is(err, ErrUnknownPrinter):
+		writeProblem(w, http.StatusNotFound, "printer-not-found", "no enabled printer has this id")
 	case errors.Is(err, ErrNoPrinter):
 		writeProblem(w, http.StatusServiceUnavailable, "printer-unavailable", "no printer is available")
 	default:
@@ -375,45 +442,68 @@ func printerError(w http.ResponseWriter, err error) {
 }
 
 func jobID(r *http.Request) (int, bool) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := strconv.Atoi(r.PathValue("job"))
 	return id, err == nil && id > 0
 }
 
+// printerJob resolves {id} and {job}; ok false means the error is written.
+func (s *server) printerJob(w http.ResponseWriter, r *http.Request) (Printer, int, bool) {
+	p, err := s.d.Printers.Printer(r.PathValue("id"))
+	if err != nil {
+		printerError(w, err)
+		return nil, 0, false
+	}
+	id, ok := jobID(r)
+	if !ok {
+		printerError(w, printing.ErrNotFound)
+	}
+	return p, id, ok
+}
+
 func (s *server) getJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.d.Printer.Jobs(r.Context(), recentJobs)
+	printerID := r.PathValue("id")
+	p, err := s.d.Printers.Printer(printerID)
 	if err != nil {
 		printerError(w, err)
 		return
+	}
+	jobs, err := p.Jobs(r.Context(), recentJobs)
+	if err != nil {
+		printerError(w, err)
+		return
+	}
+	for i := range jobs {
+		jobs[i].Printer = printerID
 	}
 	writeJSON(w, http.StatusOK, jobs)
 }
 
 func (s *server) getJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := jobID(r)
+	p, id, ok := s.printerJob(w, r)
 	if !ok {
-		printerError(w, printing.ErrNotFound)
 		return
 	}
-	job, err := s.d.Printer.Job(r.Context(), id)
+	job, err := p.Job(r.Context(), id)
 	if err != nil {
 		printerError(w, err)
 		return
 	}
+	job.Printer = r.PathValue("id")
 	writeJSON(w, http.StatusOK, job)
 }
 
 // deleteJob cancels a job and publishes its new state.
 func (s *server) deleteJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := jobID(r)
+	p, id, ok := s.printerJob(w, r)
 	if !ok {
-		printerError(w, printing.ErrNotFound)
 		return
 	}
-	if err := s.d.Printer.Cancel(r.Context(), id); err != nil {
+	if err := p.Cancel(r.Context(), id); err != nil {
 		printerError(w, err)
 		return
 	}
-	if job, err := s.d.Printer.Job(r.Context(), id); err == nil {
+	if job, err := p.Job(r.Context(), id); err == nil {
+		job.Printer = r.PathValue("id")
 		s.hub.Publish(apitypes.EventJob, job)
 	}
 	w.WriteHeader(http.StatusNoContent)

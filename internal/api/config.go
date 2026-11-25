@@ -115,6 +115,8 @@ func (s *server) getConfigRaw(w http.ResponseWriter, _ *http.Request) {
 
 // putConfig creates the file (If-None-Match: *) or replaces it (If-Match).
 // The body is a config object as JSON; the file is written as YAML.
+// A pagewire/v1 body is accepted: the store migrates it to pagewire/v2 before
+// writing, so the ETag answered is that of the v2 file.
 func (s *server) putConfig(w http.ResponseWriter, r *http.Request) {
 	readDeadline(w, s.d.readTimeout)
 	inm, im := r.Header.Get("If-None-Match"), r.Header.Get("If-Match")

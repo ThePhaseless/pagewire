@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/OpenPrinting/go-mfp/proto/escl"
 	"github.com/OpenPrinting/go-mfp/transport"
@@ -16,7 +17,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
-// Caps is the scanner capability summary of GET /scanner.
+// Caps is the scanner capability summary of GET /scanners/{id}/capabilities.
 type Caps = apitypes.ScannerCaps
 
 // Settings is a scan request. Format only matters to the Service: pages are
@@ -63,7 +64,45 @@ func Validate(s Settings) error {
 	if s.Format != "pdf" && s.Format != "jpeg" {
 		return fmt.Errorf("%w: format %q", ErrInvalidSettings, s.Format)
 	}
+	if _, err := esclIntent(s.Intent); err != nil {
+		return err
+	}
 	return nil
+}
+
+// scanIntents maps eSCL intents to the API's intent keywords, in eSCL order.
+var scanIntents = []struct{ escl, api string }{
+	{"Document", "document"},
+	{"TextAndGraphic", "text-and-graphic"},
+	{"Photo", "photo"},
+	{"Preview", "preview"},
+	{"Object", "object"},
+	{"BusinessCard", "business-card"},
+}
+
+// esclIntent maps an API intent to the eSCL Intent; "" stays "" (no intent).
+func esclIntent(intent string) (string, error) {
+	if intent == "" {
+		return "", nil
+	}
+	names := make([]string, len(scanIntents))
+	for i, it := range scanIntents {
+		if it.api == intent {
+			return it.escl, nil
+		}
+		names[i] = it.api
+	}
+	return "", fmt.Errorf("%w: intent %q: must be one of %s", ErrInvalidSettings, intent, strings.Join(names, ", "))
+}
+
+// addIntent appends the API keyword of eSCL intent to in.intents once; an
+// intent outside the API's set is dropped.
+func (in *input) addIntent(intent string) {
+	for _, it := range scanIntents {
+		if it.escl == intent && !slices.Contains(in.intents, it.api) {
+			in.intents = append(in.intents, it.api)
+		}
+	}
 }
 
 // esclSource maps an API source to the eSCL InputSource and Duplex values.
@@ -126,6 +165,7 @@ type input struct {
 	modes      []string
 	res        []int    // discrete square resolutions
 	ranges     [][2]rng // X and Y resolution ranges
+	intents    []string // API intent keywords, from SupportedIntents
 }
 
 type rng struct{ min, max, step int }
@@ -140,11 +180,16 @@ var commonResolutions = []int{75, 100, 150, 200, 240, 300, 400, 600, 1200}
 // summarize builds the API capability summary from the inputs, limited to the
 // API's 75..1200 dpi.
 func summarize(inputs []input) Caps {
-	c := Caps{Sources: []string{}, Resolutions: []int{}, ColorModes: []string{}}
+	c := Caps{Sources: []string{}, Resolutions: []int{}, ColorModes: []string{}, Intents: []string{}}
 	for _, in := range inputs {
 		c.Sources = append(c.Sources, in.source)
 		c.ADF = c.ADF || in.source != "platen"
 		c.Duplex = c.Duplex || in.source == "adf-duplex"
+		for _, it := range in.intents {
+			if !slices.Contains(c.Intents, it) {
+				c.Intents = append(c.Intents, it)
+			}
+		}
 		for _, m := range in.modes {
 			if am := apiColorMode(m); am != "" && !slices.Contains(c.ColorModes, am) {
 				c.ColorModes = append(c.ColorModes, am)
@@ -167,12 +212,17 @@ func summarize(inputs []input) Caps {
 	slices.Sort(c.Resolutions)
 	order := []string{"color", "grayscale", "blackandwhite"}
 	slices.SortFunc(c.ColorModes, func(a, b string) int { return slices.Index(order, a) - slices.Index(order, b) })
+	intentIndex := func(api string) int {
+		return slices.IndexFunc(scanIntents, func(it struct{ escl, api string }) bool { return it.api == api })
+	}
+	slices.SortFunc(c.Intents, func(a, b string) int { return intentIndex(a) - intentIndex(b) })
 	return c
 }
 
 // request is a scan request in eSCL terms.
 type request struct {
 	input, colorMode string
+	intent           string // eSCL Intent, "" for none
 	duplex           bool
 	res, w, h        int
 }
@@ -188,11 +238,18 @@ func newRequest(s Settings, inputs []input) (request, error) {
 	if err != nil {
 		return request{}, err
 	}
+	intent, err := esclIntent(s.Intent)
+	if err != nil {
+		return request{}, err
+	}
 	i := slices.IndexFunc(inputs, func(in input) bool { return in.source == s.Source })
 	if i < 0 {
 		return request{}, fmt.Errorf("scanner has no %s input", s.Source)
 	}
-	return request{input: in, colorMode: mode, duplex: duplex, res: s.Resolution, w: inputs[i].maxW, h: inputs[i].maxH}, nil
+	if intent != "" && !slices.Contains(inputs[i].intents, s.Intent) {
+		return request{}, fmt.Errorf("scanner has no %s intent for %s", s.Intent, s.Source)
+	}
+	return request{input: in, colorMode: mode, intent: intent, duplex: duplex, res: s.Resolution, w: inputs[i].maxW, h: inputs[i].maxH}, nil
 }
 
 // useFormatExt reports whether the scanner's eSCL version (2.1 and later)
@@ -223,6 +280,9 @@ func (m *mfpScanner) caps(ctx context.Context) (*escl.ScannerCapabilities, []inp
 			return
 		}
 		in := input{source: source, maxW: ic.MaxWidth, maxH: ic.MaxHeight}
+		for _, it := range ic.SupportedIntents {
+			in.addIntent(it.String())
+		}
 		for _, p := range ic.SettingProfiles {
 			for _, cm := range p.ColorModes {
 				in.modes = append(in.modes, cm.String())
@@ -284,6 +344,9 @@ func (m *mfpScanner) Start(ctx context.Context, s Settings) (string, error) {
 		XResolution:    optional.New(rq.res),
 		YResolution:    optional.New(rq.res),
 		ColorMode:      optional.New(colorModes[rq.colorMode]),
+	}
+	if rq.intent != "" {
+		ss.Intent = optional.New(escl.DecodeIntent(rq.intent))
 	}
 	if useFormatExt(caps.Version.Major(), caps.Version.Minor()) {
 		ss.DocumentFormatExt = optional.New("image/jpeg")

@@ -3,49 +3,111 @@ package pappl
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 )
 
-// Reconcile makes the PAPPL system hold exactly one queue named want.Name on
-// the wanted device with the wanted driver, and applies want's defaults. It
-// is idempotent and never panics on IPP failures: every failure becomes a
-// QueueResult with State "error", retried on the agent's next cycle.
-func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device.Inventory) device.QueueResult {
+// findBackoff is how long a queue the application did not list waits before
+// Find-Devices is asked again for it.
+// shortcut: a 30 s delay before a newly listed printer gets its queue; shorten it if users notice.
+const findBackoff = 30 * time.Second
+
+// Reconcile makes the PAPPL system hold exactly one queue per want, named
+// want.Name, on the want's device with its driver, applies the defaults the
+// queue supports, and deletes the queues no want names. It returns one result
+// per want, in order. It is idempotent and never panics on IPP failures: every
+// failure becomes a QueueResult with State "error", retried on the agent's
+// next cycle. All wants belong to c's printer application.
+//
+// Find-Devices makes the application run every CUPS backend, and each claims
+// its printer's USB interface, so asking competes with a job that is printing.
+// Reconcile therefore asks at most once per call, only for the wants whose
+// queue is not settled (settledURI), and not again within findBackoff for
+// wants it listed nothing for. A settled want is never held back by a sibling.
+func Reconcile(ctx context.Context, c *Client, wants []device.QueueSpec) []device.QueueResult {
+	out := make([]device.QueueResult, len(wants))
 	printers, err := c.Printers(ctx)
 	if err != nil {
-		return failed(err.Error())
+		for i, w := range wants {
+			out[i] = failedErr(w, err)
+		}
+		return out
 	}
+	c.forgetGone(printers)
 
-	dev := Device{URI: want.DeviceURI}
-	if dev.URI == "" {
-		dev.URI = settledURI(printers, want, inv, c.picked(want))
-		if u := printerDevice(inv); dev.URI != "" && u != nil {
-			dev.DeviceID = u.DeviceID
+	devs := make([]Device, len(wants)) // the device each want's queue uses; URI "" when none
+	var unsettled []int
+	for i, w := range wants {
+		switch {
+		case w.DeviceURI != "":
+			devs[i] = Device{URI: w.DeviceURI}
+		default:
+			last, _ := c.picked(w)
+			if u := settledURI(printers, w, last.uri); u != "" {
+				devs[i] = Device{URI: u, DeviceID: w.Device.DeviceID}
+			} else {
+				unsettled = append(unsettled, i)
+			}
 		}
 	}
-	if dev.URI == "" {
-		devs, err := c.FindDevices(ctx)
+	done := make([]bool, len(wants))
+	if len(unsettled) > 0 && !c.backedOff(wants, unsettled) {
+		found, err := c.FindDevices(ctx)
 		if err != nil {
-			return failed(err.Error())
+			for _, i := range unsettled {
+				out[i], done[i] = failedErr(wants[i], err), true
+			}
+		} else {
+			pickDevices(found, wants, unsettled, devs)
+			for _, i := range unsettled {
+				c.setPicked(wants[i], devs[i].URI)
+			}
 		}
-		var ok bool
-		dev, ok = pickDevice(devs, want.Schemes, inv)
-		c.setPicked(want, dev.URI)
-		if !ok {
-			r := device.QueueResult{State: device.QueuePending, Message: "printer not listed by the printer application yet"}
-			if p := byName(printers, want.Name); p != nil {
+	}
+	for _, i := range unsettled {
+		if !done[i] && devs[i].URI == "" {
+			r := device.QueueResult{ID: wants[i].ID, State: device.QueuePending, Message: "printer not listed by the printer application yet"}
+			if p := byName(printers, wants[i].Name); p != nil {
 				r.PrinterURI = p.URI // keep the existing queue usable through a transient miss
 			}
-			return r
+			out[i], done[i] = r, true
 		}
 	}
 
+	for _, p := range printers {
+		if slices.ContainsFunc(wants, func(w device.QueueSpec) bool { return w.Name == p.Name }) {
+			continue
+		}
+		if err := c.DeletePrinter(ctx, p.ID); err != nil {
+			for i, w := range wants {
+				if !done[i] {
+					out[i], done[i] = failed(w, err.Error()), true
+				}
+			}
+		}
+	}
+
+	for i, w := range wants {
+		if !done[i] {
+			out[i] = reconcileQueue(ctx, c, printers, w, devs[i])
+		}
+	}
+	return out
+}
+
+// reconcileQueue keeps, recreates or creates the queue named want.Name on dev,
+// touching only queues of that name, then sets its defaults when they differ.
+func reconcileQueue(ctx context.Context, c *Client, printers []Printer, want device.QueueSpec, dev Device) device.QueueResult {
 	var keep *Printer
 	unlisted := lazyUnlisted(ctx, c, want.Driver)
 	// A pinned driver the app does not list is an error; check before deleting
@@ -55,10 +117,10 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 	}) {
 		missing, err := unlisted()
 		if err != nil {
-			return failed(err.Error())
+			return failed(want, err.Error())
 		}
 		if missing {
-			r := failed("driver " + want.Driver + " is not listed by the printer application")
+			r := failed(want, "driver "+want.Driver+" is not listed by the printer application")
 			if p := byName(printers, want.Name); p != nil {
 				r.PrinterURI = p.URI
 			}
@@ -67,10 +129,13 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 	}
 	for i := range printers {
 		p := &printers[i]
-		if p.Name == want.Name && p.DeviceURI == dev.URI {
+		if p.Name != want.Name {
+			continue
+		}
+		if p.DeviceURI == dev.URI {
 			ok, err := keepDriver(p.Driver, want, unlisted)
 			if err != nil {
-				return failed(err.Error())
+				return failed(want, err.Error())
 			}
 			if ok {
 				keep = p
@@ -78,36 +143,183 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 			}
 		}
 		if err := c.DeletePrinter(ctx, p.ID); err != nil {
-			return failed(err.Error())
+			return failed(want, err.Error())
 		}
 	}
 
 	if keep == nil {
 		if msg := create(ctx, c, want, dev, unlisted); msg != "" {
-			return failed(msg)
+			return failed(want, msg)
 		}
-		if printers, err = c.Printers(ctx); err != nil {
-			return failed(err.Error())
+		printers, err := c.Printers(ctx)
+		if err != nil {
+			return failed(want, err.Error())
 		}
 		if keep = byName(printers, want.Name); keep == nil {
-			return failed("printer " + want.Name + " missing after Create-Printer")
+			return failed(want, "printer "+want.Name+" missing after Create-Printer")
 		}
 	}
 	if keep.URI == "" {
-		return failed("printer " + want.Name + " has no ipp:// printer-uri-supported")
+		return failed(want, "printer "+want.Name+" has no ipp:// printer-uri-supported")
 	}
 
-	if keep.Location != want.Location || differs(keep.Media, want.Media) || differs(keep.Sides, want.Sides) ||
-		differs(keep.ColorMode, want.ColorMode) || differs(keep.Quality, want.Quality) {
-		if err := c.SetDefaults(ctx, keep.URI, want); err != nil {
-			return device.QueueResult{State: device.QueueError, Message: err.Error(), PrinterURI: keep.URI, DeviceURI: dev.URI}
-		}
-	}
-	r := device.QueueResult{State: device.QueueOK, PrinterURI: keep.URI, DeviceURI: dev.URI}
+	r := device.QueueResult{ID: want.ID, State: device.QueueOK, PrinterURI: keep.URI, DeviceURI: dev.URI}
+	r.Warnings, r.Refused = setDefaults(ctx, c, keep, want)
 	if want.Driver != "auto" && keep.Driver != want.Driver {
 		r.Message = "Driver " + want.Driver + " is not in use: the printer application runs its own driver choice."
 	}
 	return r
+}
+
+// queueMemo is what reconcileQueue sent one queue: the defaults PAPPL refused
+// and the last location set.
+type queueMemo struct {
+	refused map[string]string // attribute name -> refused value (goipp.Values.String)
+	// location was set while the queue read back locationSeen. PAPPL 1.4.12
+	// accepts printer-location but stores it as printer-geo-location
+	// (printer-ipp.c), so the read-back never changes.
+	location, locationSeen string
+	locationSet            bool
+}
+
+// setDefaults sets the queue's location and the defaults it supports, sending
+// only those that differ from what it reports: PAPPL rewrites its state file
+// on every Set-Printer-Attributes. A value PAPPL refused is not sent again
+// until the wanted value or the queue changes; it is reported in refused on
+// every cycle instead, by option kind. The controller warns about the defaults
+// the queue does not support.
+func setDefaults(ctx context.Context, c *Client, keep *Printer, want device.QueueSpec) (warnings []string, refusedOpts []device.Dropped) {
+	m := c.memo(keep.ID)
+	var send goipp.Attributes
+	if keep.Location != want.Location && (!m.locationSet || m.location != want.Location || m.locationSeen != keep.Location) {
+		send.Add(goipp.MakeAttribute("printer-location", goipp.TagText, goipp.String(want.Location)))
+	}
+	fitted, _ := device.FitPrint(want.Defaults, keep.Caps)
+	ch := changed(keep.Caps, fitted)
+	send = append(send, ippcaps.Defaults(ch)...)
+
+	// Only refusals of values still wanted and still differing are kept.
+	refused := map[string]string{}
+	send = slices.DeleteFunc(send, func(a goipp.Attribute) bool {
+		v, ok := m.refused[a.Name]
+		if !ok || v != a.Values.String() {
+			return false
+		}
+		refused[a.Name] = v
+		return true
+	})
+	if len(send) > 0 {
+		rejected, err := c.SetDefaults(ctx, keep.URI, send)
+		for _, a := range rejected {
+			refused[a.Name] = a.Values.String()
+		}
+		if err != nil {
+			warnings = append(warnings, "Could not set the printer's defaults: "+err.Error())
+		} else if send[0].Name == "printer-location" && !slices.ContainsFunc(rejected, func(a goipp.Attribute) bool { return a.Name == "printer-location" }) {
+			m.location, m.locationSeen, m.locationSet = want.Location, keep.Location, true
+		}
+	}
+	m.refused = refused
+	c.setMemo(keep.ID, m)
+	for _, name := range slices.Sorted(maps.Keys(refused)) {
+		if name == "printer-location" {
+			warnings = append(warnings, "The printer refused the location “"+want.Location+"”: it keeps its own.")
+		} else if d := refusedKinds(name, ch, keep.Caps); len(d) > 0 {
+			refusedOpts = append(refusedOpts, d...)
+		} else {
+			warnings = append(warnings, "The printer refused the default "+name+" "+refused[name]+": it keeps its own.")
+		}
+	}
+	return warnings, refusedOpts
+}
+
+// refusedKinds maps a refused -default attribute back to the option kinds it
+// carried, with the wanted value from ch and the queue's current default.
+func refusedKinds(name string, ch device.PrintSettings, have device.PrinterCaps) []device.Dropped {
+	var out []device.Dropped
+	add := func(kind, v, using string) {
+		if v != "" && v != using { // media-col-default carries unchanged members along
+			out = append(out, device.Dropped{Option: kind, Value: v, Using: using})
+		}
+	}
+	switch name {
+	case "media-default":
+		add(device.OptionMedia, ch.Media, have.MediaDefault)
+	case "media-col-default":
+		add(device.OptionMedia, ch.Media, have.MediaDefault)
+		add(device.OptionMediaSource, ch.MediaSource, have.MediaSourceDefault)
+		add(device.OptionMediaType, ch.MediaType, have.MediaTypeDefault)
+	case "sides-default":
+		add(device.OptionSides, ch.Sides, have.SidesDefault)
+	case "print-color-mode-default":
+		add(device.OptionColorMode, ch.ColorMode, have.ColorModeDefault)
+	case "print-quality-default":
+		add(device.OptionQuality, ch.Quality, have.QualityDefault)
+	case "printer-resolution-default":
+		if ch.Resolution != 0 {
+			using := ""
+			if have.ResolutionDefault != 0 {
+				using = strconv.Itoa(have.ResolutionDefault)
+			}
+			add(device.OptionResolution, strconv.Itoa(ch.Resolution), using)
+		}
+	case "print-content-optimize-default":
+		add(device.OptionContentOptimize, ch.ContentOptimize, have.ContentOptimizeDefault)
+	case "orientation-requested-default":
+		add(device.OptionOrientation, ch.Orientation, have.OrientationDefault)
+	case "output-bin-default":
+		add(device.OptionOutputBin, ch.OutputBin, have.OutputBinDefault)
+	}
+	return out
+}
+
+// changed returns the PAPPL-settable values of d that differ from the queue's
+// current defaults, the others left empty. Media, tray and media type stay
+// together, as media-col-default carries them together.
+func changed(have device.PrinterCaps, d device.PrintSettings) device.PrintSettings {
+	if !differs(have.MediaDefault, d.Media) && !differs(have.MediaSourceDefault, d.MediaSource) && !differs(have.MediaTypeDefault, d.MediaType) {
+		d.Media, d.MediaSource, d.MediaType = "", "", ""
+	}
+	blank := func(have string, want *string) {
+		if !differs(have, *want) {
+			*want = ""
+		}
+	}
+	blank(have.SidesDefault, &d.Sides)
+	blank(have.ColorModeDefault, &d.ColorMode)
+	blank(have.QualityDefault, &d.Quality)
+	blank(have.ContentOptimizeDefault, &d.ContentOptimize)
+	blank(have.OrientationDefault, &d.Orientation)
+	blank(have.OutputBinDefault, &d.OutputBin)
+	if !differsInt(have.ResolutionDefault, d.Resolution) {
+		d.Resolution = 0
+	}
+	return d
+}
+
+func (c *Client) memo(id int) queueMemo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.memos[id]
+}
+
+func (c *Client) setMemo(id int, m queueMemo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.memos == nil {
+		c.memos = map[int]queueMemo{}
+	}
+	c.memos[id] = m
+}
+
+// forgetGone drops the memos of queues the system no longer lists, so a
+// restarted PAPPL that hands out the same printer-id starts clean.
+func (c *Client) forgetGone(printers []Printer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	maps.DeleteFunc(c.memos, func(id int, _ queueMemo) bool {
+		return !slices.ContainsFunc(printers, func(p Printer) bool { return p.ID == id })
+	})
 }
 
 // keepDriver reports whether a queue with driver have serves want. An unpinned
@@ -182,12 +394,11 @@ func create(ctx context.Context, c *Client, want device.QueueSpec, dev Device, u
 }
 
 // settledURI returns the device URI of the queue named want.Name when it is a
-// CUPS backend URI on the inventory printer's serial (none matches none), and
-// either on the preferred scheme or on picked, this client's last Find-Devices
-// choice for want. Reconcile then leaves Find-Devices unasked: each call makes
-// the application run every CUPS backend and claim the printer's USB
-// interface, so asking on every cycle competes with the job that is printing.
-func settledURI(printers []Printer, want device.QueueSpec, inv device.Inventory, picked string) string {
+// CUPS backend URI on want.Device's serial (none matches none; not checked
+// when no device is bound), and either on the preferred scheme or on picked,
+// this client's last Find-Devices choice for want. Reconcile then leaves
+// Find-Devices unasked for want.
+func settledURI(printers []Printer, want device.QueueSpec, picked string) string {
 	p := byName(printers, want.Name)
 	if p == nil || len(want.Schemes) == 0 || !strings.HasPrefix(p.DeviceURI, "cups:") {
 		return ""
@@ -195,90 +406,126 @@ func settledURI(printers []Printer, want device.QueueSpec, inv device.Inventory,
 	if scheme(p.DeviceURI) != want.Schemes[0] && p.DeviceURI != picked {
 		return ""
 	}
-	if u := printerDevice(inv); u != nil && !strings.EqualFold(serialOf(p.DeviceURI), u.Serial) {
+	if want.Device.VendorID != "" && !strings.EqualFold(serialOf(p.DeviceURI), want.Device.Serial) {
 		return ""
 	}
 	return p.DeviceURI
 }
 
-// picked returns the device URI the last Find-Devices offered for want's name
-// and schemes, or "". The inventory is constant for the agent's life, so a
-// listing that offered nothing better than a lesser scheme stays settled.
-func (c *Client) picked(want device.QueueSpec) string {
+// picked returns the last Find-Devices choice for want's name, device and
+// schemes; ok is false when Find-Devices was never asked for it. The key holds
+// the device, so a want rebound to another device asks again, and a listing
+// that offered nothing better than a lesser scheme stays settled.
+func (c *Client) picked(want device.QueueSpec) (p pick, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.picks[pickKey(want)]
+	p, ok = c.picks[pickKey(want)]
+	return p, ok
 }
 
 func (c *Client) setPicked(want device.QueueSpec, uri string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.picks == nil {
-		c.picks = map[string]string{}
+		c.picks = map[string]pick{}
 	}
-	c.picks[pickKey(want)] = uri
+	c.picks[pickKey(want)] = pick{uri: uri, at: c.clock()}
+}
+
+// backedOff reports whether every unsettled want was listed nothing for by a
+// Find-Devices less than findBackoff ago. A want never asked for asks at once.
+func (c *Client) backedOff(wants []device.QueueSpec, unsettled []int) bool {
+	now := c.clock()
+	for _, i := range unsettled {
+		p, ok := c.picked(wants[i])
+		if !ok || p.uri != "" || now.Sub(p.at) >= findBackoff {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func pickKey(want device.QueueSpec) string {
-	return want.Name + "\x00" + strings.Join(want.Schemes, "\x00")
+	return want.Name + "\x00" + want.Device.Key().String() + "\x00" + strings.Join(want.Schemes, "\x00")
 }
 
-// pickDevice chooses the Find-Devices entry for the inventory's printer. The
-// agent's inventory is already narrowed by the device.usb selector, so the
-// printer is its first device with a printer-class interface. Matching never
+// pickDevices fills devs[i] for every unsettled want i from the Find-Devices
+// entries found. Matching runs in passes over all of them: serial, then MFG
+// and MDL from the device ID, then the single remaining candidate when exactly
+// one want is still unmatched. An entry another want already uses (by URI or
+// serial) is taken, and the later passes skip it, so a printer the app does
+// not list (switched off) never gets its sibling's device. Matching never
 // compares VID:PID, which CUPS backends do not list.
-func pickDevice(devs []Device, schemes []string, inv device.Inventory) (Device, bool) {
+func pickDevices(found []Device, wants []device.QueueSpec, unsettled []int, devs []Device) {
+	taken := func(i int, d Device) bool {
+		for j := range wants {
+			if j == i || devs[j].URI == "" {
+				continue
+			}
+			if devs[j].URI == d.URI {
+				return true
+			}
+			if s := serialOf(devs[j].URI); s != "" && strings.EqualFold(s, serialOf(d.URI)) {
+				return true
+			}
+		}
+		return false
+	}
+	pass := func(match func(w device.QueueSpec, d Device) bool) {
+		for _, i := range unsettled {
+			if devs[i].URI != "" {
+				continue
+			}
+			var matches []Device
+			for _, d := range found {
+				if slices.Contains(wants[i].Schemes, scheme(d.URI)) && !taken(i, d) && match(wants[i], d) {
+					matches = append(matches, d)
+				}
+			}
+			if len(matches) == 0 {
+				continue
+			}
+			// Stable: among equal schemes the first listed entry wins.
+			slices.SortStableFunc(matches, func(a, b Device) int {
+				return slices.Index(wants[i].Schemes, scheme(a.URI)) - slices.Index(wants[i].Schemes, scheme(b.URI))
+			})
+			devs[i] = matches[0]
+		}
+	}
+	pass(func(w device.QueueSpec, d Device) bool {
+		return w.Device.Serial != "" && strings.EqualFold(serialOf(d.URI), w.Device.Serial)
+	})
+	pass(func(w device.QueueSpec, d Device) bool {
+		want := device.ParseDeviceID(w.Device.DeviceID)
+		id := device.ParseDeviceID(d.DeviceID)
+		return want["MFG"] != "" && want["MDL"] != "" && strings.EqualFold(id["MFG"], want["MFG"]) && strings.EqualFold(id["MDL"], want["MDL"])
+	})
+	var left []int
+	for _, i := range unsettled {
+		if devs[i].URI == "" {
+			left = append(left, i)
+		}
+	}
+	if len(left) != 1 {
+		return
+	}
+	i := left[0]
 	var cands []Device
-	for _, d := range devs {
-		if slices.Contains(schemes, scheme(d.URI)) {
+	for _, d := range found {
+		if slices.Contains(wants[i].Schemes, scheme(d.URI)) && !taken(i, d) {
 			cands = append(cands, d)
 		}
 	}
-	var serial, mfg, mdl string
-	if u := printerDevice(inv); u != nil {
-		serial = u.Serial
-		id := device.ParseDeviceID(u.DeviceID)
-		mfg, mdl = id["MFG"], id["MDL"]
+	if len(cands) == 1 {
+		devs[i] = cands[0]
 	}
-
-	var matches []Device
-	if serial != "" {
-		for _, d := range cands {
-			if strings.EqualFold(serialOf(d.URI), serial) {
-				matches = append(matches, d)
-			}
-		}
-	}
-	if len(matches) == 0 && mfg != "" && mdl != "" {
-		for _, d := range cands {
-			id := device.ParseDeviceID(d.DeviceID)
-			if strings.EqualFold(id["MFG"], mfg) && strings.EqualFold(id["MDL"], mdl) {
-				matches = append(matches, d)
-			}
-		}
-	}
-	if len(matches) == 0 && len(cands) == 1 {
-		matches = cands
-	}
-	if len(matches) == 0 {
-		return Device{}, false
-	}
-	// Stable: among equal schemes the first listed entry wins.
-	slices.SortStableFunc(matches, func(a, b Device) int {
-		return slices.Index(schemes, scheme(a.URI)) - slices.Index(schemes, scheme(b.URI))
-	})
-	return matches[0], true
-}
-
-func printerDevice(inv device.Inventory) *device.USBDevice {
-	for i, d := range inv.Devices {
-		for _, it := range d.Interfaces {
-			if it.Class == 7 {
-				return &inv.Devices[i]
-			}
-		}
-	}
-	return nil
 }
 
 // backendURI strips the optional "cups:" prefix pappl-retrofit adds.
@@ -315,8 +562,19 @@ func byName(ps []Printer, name string) *Printer {
 // queue's; an empty wanted value leaves the queue's default alone.
 func differs(have, want string) bool { return want != "" && have != want }
 
-func failed(msg string) device.QueueResult {
-	return device.QueueResult{State: device.QueueError, Message: msg}
+// differsInt is differs for int kinds, where 0 means not wanted.
+func differsInt(have, want int) bool { return want != 0 && have != want }
+
+func failed(want device.QueueSpec, msg string) device.QueueResult {
+	return device.QueueResult{ID: want.ID, State: device.QueueError, Message: msg}
+}
+
+// failedErr is failed for err, flagging a refused connection: the printer
+// application is still starting.
+func failedErr(want device.QueueSpec, err error) device.QueueResult {
+	r := failed(want, err.Error())
+	r.Unreachable = errors.Is(err, syscall.ECONNREFUSED)
+	return r
 }
 
 func errText(err error) string {

@@ -1,7 +1,17 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { createElement as h, type ReactNode } from "react";
-import type { Config, ConfigResponse, Job, Status } from "../gen/api";
+import {
+  type Config,
+  type ConfigResponse,
+  ConfigResponseSchema,
+  type DetectedDevice,
+  type Job,
+  type PrinterCaps,
+  type Status,
+  type StatusPrinter,
+  StatusSchema,
+} from "../gen/api";
 import {
   API,
   api,
@@ -16,13 +26,16 @@ import {
   type EventStore,
   EventsContext,
   mergeJobs,
+  useEnabledPrinters,
+  useEnabledScanners,
   useEvent,
   useJobs,
+  useNothingFound,
   useStatus,
 } from "./events";
 
 // The Status the controller returns before any input: no config, no device, nothing reconciled.
-const initialStatus = {
+const initialStatus: Status = {
   config: {
     state: "missing",
     etag: "",
@@ -30,64 +43,144 @@ const initialStatus = {
     errors: [],
     changedAt: "0001-01-01T00:00:00Z",
   },
-  device: {
-    phase: "none",
-    mode: "none",
-    decision: null,
-    inventory: null,
+  phase: "none",
+  message: "",
+  printers: [],
+  scanners: [],
+  workloads: [],
+  devices: [],
+  reconcile: [],
+};
+
+const noCaps: PrinterCaps = {
+  media: [],
+  mediaSources: [],
+  mediaTypes: [],
+  sides: [],
+  colorModes: [],
+  qualities: [],
+  contentOptimize: [],
+  orientations: [],
+  printScalings: [],
+  outputBins: [],
+  finishings: [],
+  formats: [],
+  resolutions: [],
+  numberUp: [],
+  copiesMax: 0,
+  mediaDefault: "",
+  mediaSourceDefault: "",
+  mediaTypeDefault: "",
+  sidesDefault: "",
+  colorModeDefault: "",
+  qualityDefault: "",
+  contentOptimizeDefault: "",
+  orientationDefault: "",
+  printScalingDefault: "",
+  outputBinDefault: "",
+  finishingsDefault: "",
+  resolutionDefault: 0,
+  numberUpDefault: 0,
+};
+
+function statusPrinter(id: string, over: Partial<StatusPrinter> = {}): StatusPrinter {
+  return {
+    id,
+    name: `Printer ${id}`,
+    location: "",
+    enabled: true,
+    phase: "ready",
     message: "",
-    advertised: [],
-    blobs: [],
-  },
-  printer: {
-    available: false,
-    uri: "",
-    state: "unknown",
+    warnings: [],
+    decision: {
+      family: "sim",
+      driver: "",
+      driverDescription: "",
+      requiredEulas: [],
+      optionalEulas: [],
+      rule: "simulated",
+      device: null,
+    },
+    device: null,
+    available: true,
+    uri: "ipp://127.0.0.1:8631/ipp/print",
+    state: "idle",
     reasons: [],
     formats: [],
     convertedFormats: [],
     media: [],
     markers: [],
-  },
-  scanner: { available: false, url: "", state: "unknown" },
-  reconcile: [],
-  connect: { dnssdName: "", ippUris: [], esclUrls: [] },
-};
-
-const simulatedDecision = {
-  printer: "sim",
-  scanner: "sim",
-  saneBackends: [],
-  requiredEulas: [],
-  optionalEulas: [],
-  rule: "simulated",
-  driver: "",
-  driverDescription: "",
-  device: null,
-};
+    capabilities: noCaps,
+    connect: { dnssdName: "", ippUris: [] },
+    ...over,
+  };
+}
 
 const config: Config = {
-  apiVersion: "pagewire/v1",
-  name: "Living room printer",
-  location: "",
-  device: { mode: "simulated", driver: "auto", scanner: "auto" },
-  print: {
-    defaults: {
-      media: "iso_a4_210x297mm",
-      sides: "one-sided",
-      colorMode: "auto",
-      quality: "normal",
+  apiVersion: "pagewire/v2",
+  name: "Living room",
+  printers: [
+    {
+      id: "printer",
+      name: "Living room printer",
+      location: "",
+      enabled: true,
+      mode: "simulated",
+      driver: "auto",
+      defaults: { media: "iso_a4_210x297mm", sides: "one-sided" },
     },
-    maxUploadMiB: 50,
-  },
-  scan: {
-    defaults: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
-    retentionDays: 7,
-  },
+  ],
+  scanners: [
+    {
+      id: "scanner",
+      name: "Living room scanner",
+      location: "",
+      enabled: true,
+      mode: "simulated",
+      backend: "auto",
+      defaults: { source: "platen", resolution: 300 },
+    },
+  ],
+  ignoredDevices: [],
+  print: { maxUploadMiB: 50 },
+  scan: { retentionDays: 7 },
   licenses: { acceptedEulas: [] },
 };
 
-function readyStatus(over: { printerState?: string; available?: boolean } = {}): Status {
+function detected(over: Partial<DetectedDevice> = {}): DetectedDevice {
+  return {
+    device: {
+      vendorId: "04a9",
+      productId: "1904",
+      serial: "",
+      manufacturer: "Canon",
+      product: "CanoScan",
+      bus: 1,
+      address: 11,
+      interfaces: [],
+      deviceId: "",
+    },
+    node: "",
+    canPrint: false,
+    canScan: false,
+    printerId: "",
+    scannerId: "",
+    ignored: [],
+    suggestedPrinter: null,
+    suggestedScanner: null,
+    printerDecision: null,
+    scannerDecision: null,
+    ...over,
+  };
+}
+
+function readyStatus(
+  over: {
+    printerState?: StatusPrinter["state"];
+    available?: boolean;
+    printers?: StatusPrinter[];
+  } = {},
+): Status {
   return {
     ...initialStatus,
     config: {
@@ -97,27 +190,37 @@ function readyStatus(over: { printerState?: string; available?: boolean } = {}):
       errors: [],
       changedAt: "2026-11-24T18:00:00.5+01:00",
     },
-    device: {
-      ...initialStatus.device,
-      phase: "ready",
-      mode: "simulated",
-      decision: simulatedDecision,
-      inventory: { devices: [], probedAt: "2026-11-24T18:00:00+01:00", simulated: true },
-    },
-    printer: {
-      ...initialStatus.printer,
-      available: over.available ?? true,
-      state: over.printerState ?? "idle",
-      uri: "ipp://127.0.0.1:8631/ipp/print",
-    },
-    reconcile: [
-      { item: "device", ok: true, message: "", at: "2026-11-24T18:00:01.123456789+01:00" },
+    phase: "ready",
+    printers: over.printers ?? [
+      statusPrinter("printer", {
+        available: over.available ?? true,
+        state: over.printerState ?? "idle",
+      }),
     ],
-  } as Status;
+    reconcile: [
+      {
+        item: "workload/default",
+        ok: true,
+        message: "",
+        at: "2026-11-24T18:00:01.123456789+01:00",
+      },
+    ],
+  };
 }
 
-const job = (id: number, state: string, createdAt = "2026-11-24T18:00:00+01:00"): Job =>
-  ({ id, name: `doc-${id}.pdf`, state, reasons: [], createdAt }) as Job;
+const job = (
+  id: number,
+  state: Job["state"],
+  createdAt = "2026-11-24T18:00:00+01:00",
+  printer = "printer",
+): Job => ({
+  id,
+  printer,
+  name: `doc-${id}.pdf`,
+  state,
+  reasons: [],
+  createdAt,
+});
 
 const realFetch = globalThis.fetch;
 let calls: { url: string; init: RequestInit }[] = [];
@@ -143,12 +246,26 @@ afterEach(() => {
 });
 
 describe("response parsing", () => {
-  test("the initial Status (device.mode none, printer.state unknown, zero changedAt)", async () => {
+  test("the fixtures match the generated schemas", () => {
+    expect(StatusSchema.parse(initialStatus)).toEqual(initialStatus);
+    expect(StatusSchema.parse(readyStatus())).toEqual(readyStatus());
+    expect(
+      ConfigResponseSchema.parse({
+        etag: "e",
+        config,
+        state: "applied",
+        errors: [],
+        lastGood: null,
+      }).config,
+    ).toEqual(config);
+  });
+
+  test("the initial Status (phase none, empty lists, zero changedAt)", async () => {
     respond(200, initialStatus);
     const s = await api.getStatus();
-    expect(s.device.mode).toBe("none");
-    expect(s.device.phase).toBe("none");
-    expect(s.printer.state).toBe("unknown");
+    expect(s.phase).toBe("none");
+    expect(s.printers).toEqual([]);
+    expect(s.scanners).toEqual([]);
     expect(s.config.state).toBe("missing");
     expect(s.config.changedAt).toBe("0001-01-01T00:00:00Z");
     expect(calls[0]?.url).toBe(`${API}/status`);
@@ -157,21 +274,28 @@ describe("response parsing", () => {
   test("a simulated decision with device: null and +01:00 timestamps", async () => {
     respond(200, readyStatus());
     const s = await api.getStatus();
-    expect(s.device.decision?.device).toBeNull();
-    expect(s.device.decision?.rule).toBe("simulated");
+    expect(s.printers[0]?.decision?.device).toBeNull();
+    expect(s.printers[0]?.decision?.rule).toBe("simulated");
     expect(s.reconcile[0]?.at).toBe("2026-11-24T18:00:01.123456789+01:00");
   });
 
-  test("a config without device.usb, and config: null with lastGood: null", async () => {
-    respond(200, { etag: "abc", config, state: "applied", errors: [], lastGood: null });
+  test("a config without usb and with empty defaults, and config: null with lastGood: null", async () => {
+    const bare = {
+      ...config,
+      printers: [{ ...config.printers[0], defaults: {} }],
+      scanners: [{ ...config.scanners[0], defaults: {} }],
+    };
+    respond(200, { etag: "abc", config: bare, state: "applied", errors: [], lastGood: null });
     const ok = await api.getConfig();
-    expect(ok.config?.device.usb).toBeUndefined();
+    expect(ok.config?.printers[0]?.usb).toBeUndefined();
+    expect(ok.config?.printers[0]?.defaults).toEqual({});
+    expect(ok.config?.scanners[0]?.defaults).toEqual({});
 
     respond(200, {
       etag: "def",
       config: null,
       state: "invalid",
-      errors: [{ path: "/device/mode", line: 4, column: 9, message: "bad enum" }],
+      errors: [{ path: "/printers/0/mode", line: 4, column: 9, message: "bad enum" }],
       lastGood: null,
     });
     const bad = await api.getConfig();
@@ -182,7 +306,7 @@ describe("response parsing", () => {
 
   test("empty arrays", async () => {
     respond(200, []);
-    expect(await api.getJobs()).toEqual([]);
+    expect(await api.getJobs("printer")).toEqual([]);
   });
 
   test("a response that does not match the schema becomes a bad-response problem", async () => {
@@ -190,7 +314,7 @@ describe("response parsing", () => {
     const realError = console.error;
     console.error = err;
     try {
-      respond(200, { ...initialStatus, device: { ...initialStatus.device, mode: "" } });
+      respond(200, { ...initialStatus, phase: "" });
       const e = await api.getStatus().catch((x) => x);
       expect(e).toBeInstanceOf(ProblemError);
       expect((e as ProblemError).type).toBe("bad-response");
@@ -200,14 +324,93 @@ describe("response parsing", () => {
   });
 });
 
+describe("routes", () => {
+  test("jobs, a job and cancel are per printer, with the id escaped", async () => {
+    respond(200, [job(7, "pending")]);
+    await api.getJobs("hp office");
+    expect(calls[0]?.url).toBe(`${API}/printers/hp%20office/jobs`);
+    respond(200, job(7, "pending"));
+    expect((await api.getJob("hp", 7)).printer).toBe("printer");
+    expect(calls[1]?.url).toBe(`${API}/printers/hp/jobs/7`);
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    await api.cancelJob("hp", 7);
+    expect(calls[2]?.url).toBe(`${API}/printers/hp/jobs/7`);
+    expect(calls[2]?.init.method).toBe("DELETE");
+  });
+
+  test("scanner capabilities are per scanner", async () => {
+    respond(200, {
+      sources: ["platen"],
+      resolutions: [75, 300],
+      colorModes: ["color"],
+      adf: false,
+      duplex: false,
+      intents: ["document", "photo"],
+    });
+    const caps = await api.getScannerCaps("lide");
+    expect(caps.intents).toEqual(["document", "photo"]);
+    expect(calls[0]?.url).toBe(`${API}/scanners/lide/capabilities`);
+  });
+
+  test("detect posts to /setup/detect and takes the 202", async () => {
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(null, { status: 202 });
+    }) as unknown as typeof fetch;
+    await api.detect();
+    expect(calls[0]?.url).toBe(`${API}/setup/detect`);
+    expect(calls[0]?.init.method).toBe("POST");
+  });
+
+  test("a scan names its scanner in the body", async () => {
+    respond(202, {
+      id: "0123456789abcdef",
+      scanner: "lide",
+      state: "scanning",
+      createdAt: "2026-11-24T17:00:00+01:00",
+      pages: 0,
+      format: "pdf",
+      settings: {
+        scanner: "lide",
+        source: "platen",
+        resolution: 300,
+        colorMode: "color",
+        format: "pdf",
+      },
+      error: null,
+    });
+    const settings = {
+      scanner: "lide",
+      source: "platen",
+      resolution: 300,
+      colorMode: "color",
+      format: "pdf",
+      intent: "photo",
+    } as const;
+    expect((await api.startScan(settings)).scanner).toBe("lide");
+    expect(calls[0]?.url).toBe(`${API}/scans`);
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(settings);
+  });
+});
+
 describe("scans and licences", () => {
   const scanBody = {
     id: "0123456789abcdef",
+    scanner: "scanner",
     state: "scanning",
     createdAt: "2026-11-24T17:00:00+01:00",
     pages: 1,
     format: "pdf",
-    settings: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
+    settings: {
+      scanner: "scanner",
+      source: "platen",
+      resolution: 300,
+      colorMode: "color",
+      format: "pdf",
+    },
     error: null,
   };
 
@@ -285,13 +488,13 @@ describe("problems", () => {
 describe("config writes", () => {
   test("PATCH sends a merge patch with a quoted If-Match", async () => {
     respond(200, { etag: "new", config, state: "applied", errors: [], lastGood: config });
-    const r = await api.patchConfig({ location: "Hall" }, "abc");
+    const r = await api.patchConfig({ name: "Hall" }, "abc");
     expect(r.etag).toBe("new");
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(calls[0]?.init.method).toBe("PATCH");
     expect(headers["If-Match"]).toBe('"abc"');
     expect(headers["Content-Type"]).toBe("application/merge-patch+json");
-    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ location: "Hall" });
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ name: "Hall" });
   });
 
   test("create sends If-None-Match: *", async () => {
@@ -374,21 +577,26 @@ describe("print upload", () => {
           total: 100,
         } as ProgressEvent);
         this.status = 202;
-        this.responseText = JSON.stringify(job(7, "pending"));
+        this.responseText = JSON.stringify({
+          job: job(7, "pending"),
+          warnings: [{ option: "colorMode", value: "auto", using: "monochrome", message: "m" }],
+        });
         this.onload?.();
       },
     };
-    const j = await uploadPrint(
+    const r = await uploadPrint(
+      "hp",
       new File(["x"], "a.pdf"),
       options,
       (f) => progress.push(f),
       () => fake as unknown as XMLHttpRequest,
     );
     expect(fake.method).toBe("POST");
-    expect(fake.url).toBe(`${API}/print`);
+    expect(fake.url).toBe(`${API}/printers/hp/print`);
     expect([...(sent?.keys() ?? [])]).toEqual(["options", "file"]);
     expect(progress).toEqual([0.5]);
-    expect(j.id).toBe(7);
+    expect(r.job.id).toBe(7);
+    expect(r.warnings[0]?.option).toBe("colorMode");
   });
 });
 
@@ -434,7 +642,7 @@ function fakeStore(): EventStore {
 function Probe() {
   const status = useStatus();
   const scan = useEvent("scan");
-  return h("p", null, `${status?.device.phase ?? "no status"} / ${scan?.pages ?? "no scan"}`);
+  return h("p", null, `${status?.phase ?? "no status"} / ${scan?.pages ?? "no scan"}`);
 }
 
 describe("SSE store", () => {
@@ -450,7 +658,7 @@ describe("SSE store", () => {
     lastSource().open();
     expect(store.getSnapshot().connected).toBe(true);
     lastSource().emit("status", initialStatus);
-    expect(store.getSnapshot().status?.device.mode).toBe("none");
+    expect(store.getSnapshot().status?.phase).toBe("none");
     expect(store.getSnapshot().lastEventAt).not.toBeNull();
     lastSource().emit("config", { etag: "e2" });
     expect(store.latest("config")?.etag).toBe("e2");
@@ -464,7 +672,7 @@ describe("SSE store", () => {
     lastSource().emit("status", "{not json");
     console.error = realError;
     expect(jobs).toEqual([3]);
-    expect(store.getSnapshot().status?.device.mode).toBe("none");
+    expect(store.getSnapshot().status?.phase).toBe("none");
 
     const first = lastSource();
     first.fail();
@@ -489,11 +697,18 @@ describe("SSE store", () => {
       lastSource().emit("status", readyStatus());
       lastSource().emit("scan", {
         id: "0123456789abcdef",
+        scanner: "scanner",
         state: "scanning",
         createdAt: "2026-11-24T18:00:00+01:00",
         pages: 2,
         format: "pdf",
-        settings: { source: "adf", resolution: 300, colorMode: "color", format: "pdf" },
+        settings: {
+          scanner: "scanner",
+          source: "adf",
+          resolution: 300,
+          colorMode: "color",
+          format: "pdf",
+        },
         error: null,
       });
     });
@@ -513,6 +728,11 @@ describe("useJobs", () => {
     expect(merged[0]?.state).toBe("canceled");
   });
 
+  const wrapperFor =
+    (store: EventStore) =>
+    ({ children }: { children: ReactNode }) =>
+      h(EventsContext, { value: store }, children);
+
   test("merges pending then completed for one id and refetches when the printer state changes", async () => {
     const store = fakeStore();
     store.start();
@@ -521,20 +741,25 @@ describe("useJobs", () => {
     source.emit("status", readyStatus({ printerState: "idle" }));
 
     let fetches = 0;
-    const getJobs = mock(async () => {
+    const asked: string[] = [];
+    const getJobs = mock(async (id: string) => {
+      asked.push(id);
       fetches++;
       return fetches === 1
         ? [job(1, "completed", "2026-11-24T17:00:00+01:00")]
         : [job(9, "completed")];
     });
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      h(EventsContext, { value: store }, children);
-    const { result } = renderHook(() => useJobs(getJobs), { wrapper });
+    const { result } = renderHook(() => useJobs("printer", getJobs), {
+      wrapper: wrapperFor(store),
+    });
     await waitFor(() => expect(result.current.jobs).toHaveLength(1));
     expect(fetches).toBe(1);
+    expect(asked).toEqual(["printer"]);
 
     act(() => source.emit("job", job(2, "pending", "2026-11-24T18:00:00+01:00")));
     act(() => source.emit("job", job(2, "completed", "2026-11-24T18:00:00+01:00")));
+    // Another printer's job is not this list's.
+    act(() => source.emit("job", job(3, "pending", "2026-11-24T18:00:00+01:00", "other")));
     expect(result.current.jobs.map((j) => [j.id, j.state])).toEqual([
       [2, "completed"],
       [1, "completed"],
@@ -546,15 +771,13 @@ describe("useJobs", () => {
     store.stop();
   });
 
-  test("does not ask for jobs while no printer is available, and refetches on reconnect", async () => {
+  test("does not ask for jobs while the printer is not available, and refetches on reconnect", async () => {
     const store = fakeStore();
     store.start();
     lastSource().open();
     lastSource().emit("status", readyStatus({ available: false }));
-    const getJobs = mock(async () => [] as Job[]);
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      h(EventsContext, { value: store }, children);
-    renderHook(() => useJobs(getJobs), { wrapper });
+    const getJobs = mock(async (_id: string) => [] as Job[]);
+    renderHook(() => useJobs("printer", getJobs), { wrapper: wrapperFor(store) });
     await new Promise((r) => setTimeout(r, 10));
     expect(getJobs).toHaveBeenCalledTimes(0);
 
@@ -564,6 +787,101 @@ describe("useJobs", () => {
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(2));
     act(() => lastSource().open());
     await waitFor(() => expect(getJobs).toHaveBeenCalledTimes(2));
+    store.stop();
+  });
+
+  test("a printer switch starts from an empty list and drops a late reply for the old one", async () => {
+    const store = fakeStore();
+    store.start();
+    lastSource().open();
+    lastSource().emit(
+      "status",
+      readyStatus({ printers: [statusPrinter("a"), statusPrinter("b")] }),
+    );
+    let releaseA: (jobs: Job[]) => void = () => {};
+    const getJobs = mock((id: string) =>
+      id === "a"
+        ? new Promise<Job[]>((r) => {
+            releaseA = r;
+          })
+        : Promise.resolve([job(5, "completed", undefined, "b")]),
+    );
+    const { result, rerender } = renderHook(({ id }) => useJobs(id, getJobs), {
+      wrapper: wrapperFor(store),
+      initialProps: { id: "a" as string | undefined },
+    });
+    await waitFor(() => expect(getJobs).toHaveBeenCalledTimes(1));
+    rerender({ id: "b" });
+    await waitFor(() => expect(result.current.jobs.map((j) => j.id)).toEqual([5]));
+    await act(async () => releaseA([job(4, "completed", undefined, "a")]));
+    expect(result.current.jobs.map((j) => j.id)).toEqual([5]);
+
+    // No printer id (none enabled): nothing is asked and the list is empty.
+    rerender({ id: undefined });
+    expect(result.current.jobs).toEqual([]);
+    expect(getJobs).toHaveBeenCalledTimes(2);
+    store.stop();
+  });
+});
+
+describe("device hooks", () => {
+  test("the enabled lists follow Status and keep their identity between equal renders", () => {
+    const store = fakeStore();
+    store.start();
+    lastSource().open();
+    const { result, rerender } = renderHook(
+      () => ({ printers: useEnabledPrinters(), scanners: useEnabledScanners() }),
+      { wrapper: ({ children }) => h(EventsContext, { value: store }, children) },
+    );
+    expect(result.current.printers).toEqual([]);
+    act(() =>
+      lastSource().emit(
+        "status",
+        readyStatus({ printers: [statusPrinter("a"), statusPrinter("b", { enabled: false })] }),
+      ),
+    );
+    expect(result.current.printers.map((p) => p.id)).toEqual(["a"]);
+    expect(result.current.scanners).toEqual([]);
+    const first = result.current.printers;
+    rerender();
+    expect(result.current.printers).toBe(first);
+    store.stop();
+  });
+
+  test("useNothingFound turns true once probing lasts longer than notFoundAfterMs", async () => {
+    FakeEventSource.instances = [];
+    const store = createEventStore({
+      newEventSource: (u) => new FakeEventSource(u) as unknown as EventSource,
+      notFoundAfterMs: 20,
+    });
+    store.start();
+    lastSource().open();
+    const { result } = renderHook(() => useNothingFound(), {
+      wrapper: ({ children }) => h(EventsContext, { value: store }, children),
+    });
+    // The first-run probe: no config and the overall phase probing.
+    act(() => lastSource().emit("status", { ...initialStatus, phase: "probing" }));
+    expect(result.current).toBe(false);
+    await waitFor(() => expect(result.current).toBe(true));
+    act(() => lastSource().emit("status", readyStatus()));
+    expect(result.current).toBe(false);
+
+    // Probing goes on through the wizard; a device that can print or scan ends the search.
+    const keyboard = detected({ canPrint: false, canScan: false });
+    act(() =>
+      lastSource().emit("status", { ...initialStatus, phase: "probing", devices: [keyboard] }),
+    );
+    await waitFor(() => expect(result.current).toBe(true));
+    act(() =>
+      lastSource().emit("status", {
+        ...initialStatus,
+        phase: "probing",
+        devices: [keyboard, detected({ canScan: true })],
+      }),
+    );
+    expect(result.current).toBe(false);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(result.current).toBe(false);
     store.stop();
   });
 });

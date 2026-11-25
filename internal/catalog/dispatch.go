@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"cmp"
-	"errors"
 	"slices"
 	"strings"
 
@@ -10,102 +9,120 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
-// ErrNoPrinter means no device in the inventory can be dispatched: none has a
-// printer-class interface, or none matches the device.usb selector.
-var ErrNoPrinter = errors.New("no printer found")
-
 const (
-	classPrinter = 7
-	ippUSB       = "ipp-usb" // printer and scanner family
-	scannerSim   = "sim"
-	scannerSANE  = "airsane" // the only scanner family that loads SANE backends
+	classStillImage = 6
+	classPrinter    = 7
+	ippUSB          = "ipp-usb" // printer and scanner family
+	familySim       = "sim"     // simulated printer and scanner family
+	scannerSANE     = "airsane" // the only scanner family that loads SANE backends
 )
 
 // ippOverUSB is the USB interface triple of IPP over USB (printer class 7,
 // subclass 1, protocol 4): a protocol fact, not catalog data.
 var ippOverUSB = device.USBInterface{Class: classPrinter, SubClass: 1, Protocol: 4}
 
-// Decide picks the device from inv per sel and maps it to printer and scanner
-// families through the embedded catalog and indexes. Slices in the result are
-// never nil.
-func Decide(inv device.Inventory, sel config.Device) (device.Decision, error) {
-	return current().Decide(inv, sel)
+// Roles says whether d can be a printer and whether it can be a scanner. A
+// printer needs a class-7 interface: CUPS' usb backend and ipp-usb drive
+// nothing else, so a driver-index match alone does not make one. A scanner has
+// IPP over USB (eSCL through ipp-usb), an entry in the SANE USB index, or a
+// class-6 (still image) interface; the last also takes in PTP cameras, and the
+// user decides.
+func (c *Catalog) Roles(d device.USBDevice) (printer, scanner bool) {
+	printer = hasClass(d, classPrinter)
+	scanner = slices.Contains(d.Interfaces, ippOverUSB) || len(c.saneBackends(d)) > 0 || hasClass(d, classStillImage)
+	return printer, scanner
 }
 
 // choice is a printer family, its PAPPL driver name ("" none) and the rule.
 type choice struct{ printer, driver, rule string }
 
-// Decide is the package-level Decide against catalog c. The printer comes
-// from IPP over USB, else the device's model in the driver index, else a
-// generic driver for its command set, else none (rule none, no printer; the
-// scanner still runs). device.driver and device.driverName override it.
-func (c *Catalog) Decide(inv device.Inventory, sel config.Device) (device.Decision, error) {
-	if sel.Mode == config.ModeSimulated {
-		return device.Decision{
-			Printer: "sim", Scanner: scannerSim, Rule: device.RuleSimulated,
-			SaneBackends: []string{}, RequiredEULAs: []string{}, OptionalEULAs: []string{},
-		}, nil
+// DecidePrinter maps printer entry p, bound to d, to a printer family and
+// driver. The family comes from IPP over USB, else d's model in the driver
+// index, else a generic driver for its command set, else none (rule none, no
+// printer runs). p's driver and driverName override it. A simulated entry gets
+// family sim; a usb entry with no device (d nil) gets rule none. Slices in the
+// result are never nil, and Device is a copy of d.
+func (c *Catalog) DecidePrinter(d *device.USBDevice, p config.Printer) device.PrinterDecision {
+	switch {
+	case p.Simulated():
+		return device.PrinterDecision{Family: familySim, Rule: device.RuleSimulated, RequiredEULAs: []string{}, OptionalEULAs: []string{}}
+	case d == nil:
+		return device.PrinterDecision{Rule: device.RuleNone, RequiredEULAs: []string{}, OptionalEULAs: []string{}}
 	}
-	d, ok := pickDevice(inv.Devices, sel.USB)
-	if !ok {
-		return device.Decision{}, ErrNoPrinter
-	}
-	ipp := slices.Contains(d.Interfaces, ippOverUSB)
+	dev := clone(*d)
 	auto := choice{printer: ippUSB, rule: device.RuleIPPOverUSB}
-	if !ipp {
-		auto = c.match(d, "")
+	if !slices.Contains(dev.Interfaces, ippOverUSB) {
+		auto = c.match(dev, "")
 	}
 	eff := auto
 	switch {
-	case sel.Driver != "" && sel.Driver != config.Auto:
-		eff = choice{printer: sel.Driver, rule: device.RuleOverride}
-		if p, ok := c.Printer(sel.Driver); ok && p.App != "" {
+	case p.Driver != "" && p.Driver != config.Auto:
+		eff = choice{printer: p.Driver, rule: device.RuleOverride}
+		if f, ok := c.Printer(p.Driver); ok && f.App != "" {
 			// A name the family does not list (empty, or dropped from the index)
 			// gives way to the family's own match; the controller reports it.
-			eff.driver = sel.DriverName
-			if _, ok := c.Drivers.Lookup(sel.Driver, eff.driver); !ok {
-				eff.driver = c.match(d, sel.Driver).driver
+			eff.driver = p.DriverName
+			if _, ok := c.Drivers.Lookup(p.Driver, eff.driver); !ok {
+				eff.driver = c.match(dev, p.Driver).driver
 			}
 		}
-	case sel.DriverName != "":
+	case p.DriverName != "":
 		// A name no family lists (dropped from the index) leaves the automatic
 		// choice; the controller reports it.
 		if i := slices.IndexFunc(c.DriverPriority, func(f string) bool {
-			_, ok := c.Drivers.Lookup(f, sel.DriverName)
+			_, ok := c.Drivers.Lookup(f, p.DriverName)
 			return ok
 		}); i >= 0 {
-			eff = choice{printer: c.DriverPriority[i], driver: sel.DriverName, rule: device.RuleOverride}
+			eff = choice{printer: c.DriverPriority[i], driver: p.DriverName, rule: device.RuleOverride}
 		}
 	}
-	dec := device.Decision{
-		Printer:      eff.printer,
-		Driver:       eff.driver,
-		Scanner:      scannerSANE,
-		SaneBackends: []string{},
-		Rule:         eff.rule,
-		Device:       &d,
-	}
+	dec := device.PrinterDecision{Family: eff.printer, Driver: eff.driver, Rule: eff.rule, Device: &dev}
 	if drv, ok := c.Drivers.Lookup(eff.printer, eff.driver); ok {
 		dec.DriverDescription = drv.Description
 	}
 	dec.RequiredEULAs, dec.OptionalEULAs = c.eulas(auto, eff)
-	if ipp {
-		dec.Scanner = ippUSB
+	return dec
+}
+
+// DecideScanner maps scanner entry s, bound to d, to a scanner family: ipp-usb
+// for IPP over USB, else airsane with d's backends from the SANE index (rule
+// sane-index), else airsane with the default backends (rule still-image). The
+// last also covers a device bound without any scanner evidence, by a selector
+// or v1's rule that the scanner is the printer's device, which v1 ran the same
+// way. s's backend overrides the family; a simulated entry gets family sim. A
+// usb entry with no device (d nil) gets no family and no rule: the controller
+// shows no decision for it. Slices in the result are never nil, and Device is
+// a copy of d.
+func (c *Catalog) DecideScanner(d *device.USBDevice, s config.Scanner) device.ScannerDecision {
+	switch {
+	case s.Simulated():
+		return device.ScannerDecision{Family: familySim, Rule: device.RuleSimulated, SaneBackends: []string{}}
+	case d == nil:
+		return device.ScannerDecision{SaneBackends: []string{}}
 	}
-	switch sel.Scanner {
-	case "", config.Auto:
-	case config.ScannerNone:
-		dec.Scanner = ""
-	default:
-		dec.Scanner = sel.Scanner
+	dev := clone(*d)
+	dec := device.ScannerDecision{Family: scannerSANE, Rule: device.RuleStillImage, SaneBackends: []string{}, Device: &dev}
+	switch {
+	case slices.Contains(dev.Interfaces, ippOverUSB):
+		dec.Family, dec.Rule = ippUSB, device.RuleIPPOverUSB
+	case len(c.saneBackends(dev)) > 0:
+		dec.Rule = device.RuleSANEIndex
 	}
-	if dec.Scanner == scannerSANE {
-		dec.SaneBackends = append(dec.SaneBackends, c.Sane[strings.ToLower(d.VendorID+":"+d.ProductID)]...)
+	if s.Backend != "" && s.Backend != config.BackendAuto {
+		dec.Family, dec.Rule = s.Backend, device.RuleOverride
+	}
+	if dec.Family == scannerSANE {
+		dec.SaneBackends = append(dec.SaneBackends, c.saneBackends(dev)...)
 		if len(dec.SaneBackends) == 0 {
 			dec.SaneBackends = append(dec.SaneBackends, c.DefaultSaneBackends...)
 		}
 	}
-	return dec, nil
+	return dec
+}
+
+// saneBackends lists d's backends in the SANE USB index, nil when it has none.
+func (c *Catalog) saneBackends(d device.USBDevice) []string {
+	return c.Sane[strings.ToLower(d.VendorID+":"+d.ProductID)]
 }
 
 // match finds d's driver in the index, restricted to family unless it is "":
@@ -170,23 +187,13 @@ func uniq(s []string) []string {
 	return out
 }
 
-// pickDevice returns the device matching sel, or without sel the first device
-// with a printer-class interface. The result is a copy with its own slices.
-func pickDevice(devs []device.USBDevice, sel *config.USB) (device.USBDevice, bool) {
-	for _, d := range devs {
-		ok := hasPrinterClass(d)
-		if sel != nil {
-			ok = strings.EqualFold(d.VendorID, sel.VendorID) && strings.EqualFold(d.ProductID, sel.ProductID) &&
-				(sel.Serial == "" || d.Serial == sel.Serial)
-		}
-		if ok {
-			d.Interfaces = slices.Clone(d.Interfaces)
-			return d, true
-		}
-	}
-	return device.USBDevice{}, false
+// clone copies d with its own Interfaces, so a decision never aliases the
+// caller's device.
+func clone(d device.USBDevice) device.USBDevice {
+	d.Interfaces = slices.Clone(d.Interfaces)
+	return d
 }
 
-func hasPrinterClass(d device.USBDevice) bool {
-	return slices.ContainsFunc(d.Interfaces, func(i device.USBInterface) bool { return i.Class == classPrinter })
+func hasClass(d device.USBDevice, class uint8) bool {
+	return slices.ContainsFunc(d.Interfaces, func(i device.USBInterface) bool { return i.Class == class })
 }
