@@ -714,6 +714,91 @@ describe("Setup wizard", () => {
     expect(await screen.findByText("HP LaserJet Professional M1132 MFP (simulated)")).toBeTruthy();
   });
 
+  test("Detect lists the printer and folds hubs and HID devices into a disclosure", async () => {
+    const other = (product: string, address: number, cls: number) => ({
+      ...hpDevice,
+      vendorId: cls === 9 ? "1d6b" : "0627",
+      productId: "0001",
+      serial: "",
+      manufacturer: "",
+      product,
+      address,
+      interfaces: [{ class: cls, subClass: 0, protocol: 0 }],
+      deviceId: "",
+    });
+    const scx = {
+      ...hpDevice,
+      vendorId: "04e8",
+      productId: "342e",
+      manufacturer: "Samsung Electronics Co., Ltd.",
+      product: "SCX-4300 Series",
+      address: 9,
+      interfaces: [
+        { class: 255, subClass: 255, protocol: 255 },
+        { class: 7, subClass: 1, protocol: 2 },
+      ],
+    };
+    const devices = [
+      other("EHCI Host Controller", 1, 9),
+      other("QEMU USB Tablet", 2, 3),
+      scx,
+      other("xHCI Host Controller", 3, 9),
+    ];
+    mockServer(() => ({
+      ...hpSetup,
+      inventory: { ...hpInventory, devices },
+      decision: { ...hpDecision, device: scx },
+    }));
+    mount();
+    await heading("Find the printer");
+    await screen.findByText("SCX-4300 Series");
+    const lists = document.querySelectorAll(".setup-devices");
+    expect(lists[0]?.querySelectorAll("li").length).toBe(1);
+    expect(lists[0]?.textContent).toContain("SCX-4300 Series");
+    const toggle = screen.getByRole("button", { name: /Show 3 other USB devices/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("QEMU USB Tablet").closest("[hidden]")).toBeTruthy();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("QEMU USB Tablet").closest("[hidden]")).toBeNull());
+    expect(screen.getByText("EHCI Host Controller")).toBeTruthy();
+  });
+
+  test("Detect keeps the matched device visible and offers the others when none look like printers", async () => {
+    const hub = {
+      ...hpDevice,
+      product: "Odd printer behind a hub interface",
+      interfaces: [{ class: 9, subClass: 0, protocol: 0 }],
+    };
+    const tablet = {
+      ...hpDevice,
+      product: "QEMU USB Tablet",
+      address: 2,
+      interfaces: [{ class: 3, subClass: 0, protocol: 0 }],
+    };
+    mockServer(() => ({
+      ...hpSetup,
+      inventory: { ...hpInventory, devices: [tablet, hub] },
+      decision: { ...hpDecision, device: hub },
+    }));
+    mount();
+    await heading("Find the printer");
+    await screen.findByText("Odd printer behind a hub interface");
+    expect(screen.getByText("Odd printer behind a hub interface").closest("[hidden]")).toBeNull();
+    expect(screen.getByRole("button", { name: /Show 1 other USB device\b/ })).toBeTruthy();
+
+    cleanup();
+    mockServer(() => ({
+      ...hpSetup,
+      inventory: { ...hpInventory, devices: [tablet] },
+      decision: null,
+    }));
+    mount();
+    await heading("Find the printer");
+    expect(await screen.findByText(/None of these devices is a printer/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Show 1 other USB device\b/ })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("No USB devices found yet.");
+  });
+
   test("a reload on a later step starts again at Detect", async () => {
     window.history.replaceState(null, "", "/setup#review");
     mockServer(() => hpSetup);

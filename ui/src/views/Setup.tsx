@@ -26,6 +26,7 @@ import {
 } from "../gen/api";
 import { navigate, onNextFrameUnlessUserActs } from "../router";
 import { strings } from "../strings";
+import { hasPrinterInterface, isNeverPrinterOrScanner } from "../usb";
 import { setupStrings as s } from "./Setup.strings";
 import "./Setup.css";
 
@@ -423,32 +424,42 @@ function Detect({
   }
 
   const d = setup.decision;
+  const matched = d?.device;
+  const isMatched = (dev: USBDevice) =>
+    matched?.bus === dev.bus && matched?.address === dev.address;
+  const others = inventory.devices.filter((dev) => isNeverPrinterOrScanner(dev) && !isMatched(dev));
+  const shown = inventory.devices
+    .filter((dev) => !others.includes(dev))
+    .sort((a, b) => Number(hasPrinterInterface(b)) - Number(hasPrinterInterface(a)));
+  const deviceList = (devices: USBDevice[]) => (
+    <ul className="setup-devices">
+      {devices.map((dev) => (
+        <li key={`${dev.bus}-${dev.address}`}>
+          <span className="setup-device-name">
+            {inventory.simulated
+              ? s.detect.simulatedName(dev.product || s.detect.unnamedDevice)
+              : dev.product || s.detect.unnamedDevice}
+          </span>
+          <span className="setup-device-meta">
+            {[
+              dev.manufacturer,
+              s.detect.usbIds(dev.vendorId, dev.productId),
+              dev.serial && s.detect.serial(dev.serial),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
   return (
     <>
       <Card title={s.detect.devicesTitle}>
-        {inventory.devices.length === 0 ? (
-          <p>{s.detect.noDevices}</p>
-        ) : (
-          <ul className="setup-devices">
-            {inventory.devices.map((dev) => (
-              <li key={`${dev.bus}-${dev.address}`}>
-                <span className="setup-device-name">
-                  {inventory.simulated
-                    ? s.detect.simulatedName(dev.product || s.detect.unnamedDevice)
-                    : dev.product || s.detect.unnamedDevice}
-                </span>
-                <span className="setup-device-meta">
-                  {[
-                    dev.manufacturer,
-                    s.detect.usbIds(dev.vendorId, dev.productId),
-                    dev.serial && s.detect.serial(dev.serial),
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              </li>
-            ))}
-          </ul>
+        {inventory.devices.length === 0 && <p>{s.detect.noDevices}</p>}
+        {shown.length > 0 && deviceList(shown)}
+        {others.length > 0 && (
+          <Disclosure title={s.detect.otherDevices(others.length)}>{deviceList(others)}</Disclosure>
         )}
       </Card>
       {d ? (

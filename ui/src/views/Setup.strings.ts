@@ -59,6 +59,9 @@ export const setupStrings = {
     noPrinter:
       "None of these devices is a printer pagewire can use. Check the cable and that the printer is switched on.",
     unnamedDevice: "Unnamed USB device",
+    /** Disclosure over the devices that cannot be a printer or scanner (hubs, keyboards, ...). */
+    otherDevices: (n: number) =>
+      `Show ${n} other USB ${n === 1 ? "device" : "devices"} (hubs, keyboards, cameras…)`,
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
     simulatedName: (name: string) => `${name} (simulated)`,
