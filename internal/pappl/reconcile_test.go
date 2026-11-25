@@ -109,6 +109,52 @@ func TestSecondRunIsNoOp(t *testing.T) {
 	}
 }
 
+// On real hardware every Find-Devices forks each CUPS backend and claims the
+// printer's USB interface, so a queue that is already right must not ask again.
+func TestExistingQueueSkipsDiscovery(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	w := want("P")
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	before := onlyPrinter(t, fake)
+	for range 3 {
+		r := pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID))
+		mustOK(t, r)
+		if r.DeviceURI != before.DeviceURI {
+			t.Errorf("DeviceURI = %q, want %q", r.DeviceURI, before.DeviceURI)
+		}
+	}
+	if n := fake.FindDevicesCalls(); n != 1 {
+		t.Errorf("Find-Devices calls = %d, want 1 (the one that created the queue)", n)
+	}
+	if after := onlyPrinter(t, fake); after.ID != before.ID {
+		t.Errorf("printer recreated: id %d -> %d", before.ID, after.ID)
+	}
+}
+
+// A queue on a less preferred scheme still moves once the preferred one is listed.
+func TestQueueOnLesserSchemeRediscovers(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	mustOK(t, pappl.Reconcile(ctx(t), c, want("P"), inv("ABC123", hpID))) // Schemes: [usb]
+	w := want("P")
+	w.Schemes = []string{"hp", "usb"}
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	if p := onlyPrinter(t, fake); p.DeviceURI != "cups:hp:/usb/HP_LaserJet_1020?serial=ABC123" {
+		t.Errorf("device uri = %q", p.DeviceURI)
+	}
+}
+
+// PAPPL lists its own usb:// entry for the same printer beside the CUPS
+// backend's. The retrofit apps print through the CUPS backends only, and a
+// second matching entry made the queue flip between the two URIs.
+func TestPAPPLOwnSchemesNotListed(t *testing.T) {
+	devs := append([]papplfake.Device{{URI: "usb://HP/LaserJet%201020?serial=ABC123", Info: "HP LaserJet 1020 (USB)", DeviceID: hpID}}, hpDevices()...)
+	fake, c := newSystem(t, papplfake.Options{Devices: devs, Drivers: hpDrivers})
+	mustOK(t, pappl.Reconcile(ctx(t), c, want("P"), inv("ABC123", hpID)))
+	if p := onlyPrinter(t, fake); p.DeviceURI != hpDevices()[0].URI {
+		t.Errorf("device uri = %q, want %q", p.DeviceURI, hpDevices()[0].URI)
+	}
+}
+
 func TestRenameDeletesAndCreates(t *testing.T) {
 	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
 	mustOK(t, pappl.Reconcile(ctx(t), c, want("Old"), inv("ABC123", hpID)))

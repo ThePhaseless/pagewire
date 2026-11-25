@@ -24,6 +24,9 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 
 	dev := Device{URI: want.DeviceURI}
 	if dev.URI == "" {
+		dev.URI = settledURI(printers, want, inv)
+	}
+	if dev.URI == "" {
 		devs, err := c.FindDevices(ctx)
 		if err != nil {
 			return failed(err.Error())
@@ -171,6 +174,22 @@ func create(ctx context.Context, c *Client, want device.QueueSpec, dev Device, u
 	}
 	_, err = c.CreatePrinter(ctx, want.Name, dev.URI, drivers[0].Name, dev.DeviceID)
 	return errText(err)
+}
+
+// settledURI returns the device URI of the queue named want.Name when it is on
+// the preferred scheme and, where the inventory knows a serial, on that serial.
+// Reconcile then leaves Find-Devices unasked: each call makes the application
+// run every CUPS backend and claim the printer's USB interface, so asking on
+// every cycle competes with the job that is printing.
+func settledURI(printers []Printer, want device.QueueSpec, inv device.Inventory) string {
+	p := byName(printers, want.Name)
+	if p == nil || len(want.Schemes) == 0 || scheme(p.DeviceURI) != want.Schemes[0] {
+		return ""
+	}
+	if u := printerDevice(inv); u != nil && u.Serial != "" && !strings.EqualFold(serialOf(p.DeviceURI), u.Serial) {
+		return ""
+	}
+	return p.DeviceURI
 }
 
 // pickDevice chooses the Find-Devices entry for the inventory's printer. The

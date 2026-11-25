@@ -76,6 +76,7 @@ type System struct {
 	queues  []*queue
 	nextID  int
 	nextJob int
+	finds   int
 }
 
 // New returns a fake system with no queues.
@@ -84,6 +85,13 @@ func New(o Options) *System {
 		o.Schemes = []string{"cups"}
 	}
 	return &System{opts: o, nextID: 1, nextJob: 1}
+}
+
+// FindDevicesCalls returns how many Find-Devices requests the system has served.
+func (s *System) FindDevicesCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finds
 }
 
 // Printers returns a snapshot of the queues in creation order.
@@ -160,11 +168,18 @@ func (s *System) systemOp(op goipp.Op, req, rsp *goipp.Message, host string, fai
 			rsp.Groups.Add(goipp.Group{Tag: goipp.TagPrinterGroup, Attrs: s.printerAttrs(q, host)})
 		}
 	case pappl.OpFindDevices:
-		if len(s.opts.Devices) == 0 {
+		s.finds++
+		// PAPPL lists its own schemes (usb, dnssd, snmp) beside the custom "cups"
+		// one unless the request asks for custom local schemes only.
+		devs := s.opts.Devices
+		if pappl.First(req.Operation, pappl.AttrDeviceType) == pappl.DeviceTypeCustomLocal {
+			devs = slices.DeleteFunc(slices.Clone(devs), func(d Device) bool { return !strings.HasPrefix(d.URI, "cups:") })
+		}
+		if len(devs) == 0 {
 			return fail(goipp.StatusErrorNotFound, "No devices found.")
 		}
 		a := goipp.Attribute{Name: pappl.AttrDeviceCol}
-		for _, d := range s.opts.Devices {
+		for _, d := range devs {
 			a.Values.Add(goipp.TagBeginCollection, goipp.Collection{
 				goipp.MakeAttribute(pappl.AttrDeviceID, goipp.TagText, goipp.String(d.DeviceID)),
 				goipp.MakeAttribute(pappl.AttrDeviceInfo, goipp.TagText, goipp.String(d.Info)),

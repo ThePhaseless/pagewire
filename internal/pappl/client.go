@@ -32,10 +32,16 @@ const (
 	AttrDeviceID   = "smi55357-device-id"
 	AttrDeviceInfo = "smi55357-device-info"
 	AttrDeviceCol  = "smi55357-device-col"
+	AttrDeviceType = "smi55357-device-type"
 	AttrDriver     = "smi55357-driver"
 	AttrDriverInfo = "smi55357-driver-info"
 	AttrDriverCol  = "smi55357-driver-col"
 )
+
+// DeviceTypeCustomLocal is the smi55357-device-type keyword for
+// PAPPL_DEVTYPE_CUSTOM_LOCAL: only schemes the application added itself, which
+// for the retrofit apps is "cups" (the CUPS backends).
+const DeviceTypeCustomLocal = "other-local"
 
 // Qualities maps print-quality keywords to their IPP enum values.
 var Qualities = map[string]goipp.Integer{"draft": 3, "normal": 4, "high": 5}
@@ -177,9 +183,14 @@ func (c *Client) Printers(ctx context.Context) ([]Printer, error) {
 	return out, nil
 }
 
-// FindDevices lists the devices the application can see (PAPPL Find-Devices).
+// FindDevices lists the devices the application's CUPS backends can see (PAPPL
+// Find-Devices). PAPPL's own usb, dnssd and snmp schemes stay out: the
+// retrofit apps print through the CUPS backends only, and a second entry for
+// the same printer would compete with the "cups:" one.
 func (c *Client) FindDevices(ctx context.Context) ([]Device, error) {
-	rsp, err := do(ctx, c.uri, c.system(OpFindDevices))
+	m := c.system(OpFindDevices)
+	m.Operation.Add(goipp.MakeAttribute(AttrDeviceType, goipp.TagKeyword, goipp.String(DeviceTypeCustomLocal)))
+	rsp, err := do(ctx, c.uri, m)
 	if notFound(err) { // PAPPL answers not-found when it sees no device
 		return nil, nil
 	}
