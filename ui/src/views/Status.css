@@ -8,8 +8,9 @@
   }
 
   /* One column on phones and tablets; from 1024 px the device cards take the wide track and the
-     jobs, scans and system cards the narrow one. Cards are full width in their track, so rows are
-     never ragged. */
+     jobs, scans and system cards the narrow one. From 1440 px the page may grow wider and the
+     device cards split into two stacks. Every track is its own stack of natural-height cards, so a
+     card never waits for a taller neighbour. */
   .status-view .status-layout {
     display: grid;
     gap: var(--space-4);
@@ -23,11 +24,21 @@
   }
 
   .status-view .status-main,
+  .status-view .status-stack,
   .status-view .status-side {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     min-inline-size: 0;
+  }
+
+  @media (min-width: 1440px) {
+    .status-view .status-main {
+      display: grid;
+      grid-auto-columns: minmax(0, 1fr);
+      grid-auto-flow: column;
+      align-items: start;
+    }
   }
 
   .status-view .status-device-title {
@@ -144,6 +155,11 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-1) var(--space-3);
+  }
+
+  /* "All jobs" and "All scans": the quiet button's label lines up with the text above it. */
+  .status-view .status-more {
+    margin-inline-start: calc(-1 * var(--space-4));
   }
 
   .status-view .status-job-name {

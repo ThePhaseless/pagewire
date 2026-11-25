@@ -1,6 +1,6 @@
 // The Status dashboard: one card per enabled printer and scanner, with recent jobs, recent scans
 // and the system state beside them.
-import { useContext, useEffect, useState } from "react";
+import { type ReactElement, useContext, useEffect, useState } from "react";
 import { api, problemMessage } from "../api/client";
 import { EventsContext, useJobs, useStatus } from "../api/events";
 import {
@@ -129,7 +129,10 @@ function DeviceBadge({
   return <StatusBadge tone={endpointTone[device.state]}>{words[device.state]}</StatusBadge>;
 }
 
-/** Location, the phase message (an alert in phase error) and the option warnings. */
+/**
+ * Location, the device's one action (Print or Scan) so it sits at the same place in every card,
+ * the phase message (an alert in phase error), why the action is missing, and the option warnings.
+ */
 function DeviceIntro({
   device,
   kind,
@@ -137,15 +140,26 @@ function DeviceIntro({
   device: StatusPrinter | StatusScanner;
   kind: DeviceRole;
 }) {
+  const words = kind === "printer" ? t.printer : t.scanner;
+  const href =
+    kind === "printer"
+      ? `/print?printer=${encodeURIComponent(device.id)}`
+      : `/scan?scanner=${encodeURIComponent(device.id)}`;
   return (
     <>
       {device.location && <p className="status-subtle">{device.location}</p>}
+      {device.available && (
+        <div>
+          <LinkButton href={href}>{words.open}</LinkButton>
+        </div>
+      )}
       {device.message &&
         (device.phase === "error" ? (
           <InlineError>{device.message}</InlineError>
         ) : (
           <p className="status-message">{device.message}</p>
         ))}
+      {!device.available && <p className="status-subtle">{words.unavailable}</p>}
       <Warnings warnings={device.warnings} kind={kind} />
     </>
   );
@@ -275,15 +289,6 @@ function PrinterCard({ printer, status }: { printer: StatusPrinter; status: Stat
           </ul>
         </section>
       )}
-      {printer.available ? (
-        <div>
-          <LinkButton href={`/print?printer=${encodeURIComponent(printer.id)}`}>
-            {t.printer.open}
-          </LinkButton>
-        </div>
-      ) : (
-        <p className="status-subtle">{t.printer.unavailable}</p>
-      )}
       {printer.markers.length > 0 && (
         <section className="status-section">
           <h3>{t.printer.suppliesLabel}</h3>
@@ -368,15 +373,6 @@ function ScannerCard({ scanner, status }: { scanner: StatusScanner; status: Stat
       actions={<DeviceBadge device={scanner} kind="scanner" />}
     >
       <DeviceIntro device={scanner} kind="scanner" />
-      {scanner.available ? (
-        <div>
-          <LinkButton href={`/scan?scanner=${encodeURIComponent(scanner.id)}`}>
-            {t.scanner.open}
-          </LinkButton>
-        </div>
-      ) : (
-        <p className="status-subtle">{t.scanner.unavailable}</p>
-      )}
       <Connect kind="scanner" connect={scanner.connect} />
       <Disclosure title={strings.technicalDetails}>
         <dl className="status-facts">
@@ -533,7 +529,7 @@ function PrinterJobs({ printer, named }: { printer: StatusPrinter; named: boolea
         </EmptyState>
       )}
       {jobs.length > 0 && (
-        <div>
+        <div className="status-more">
           <LinkButton
             variant="quiet"
             href={`/print?printer=${encodeURIComponent(printer.id)}`}
@@ -623,7 +619,7 @@ function ScansCard({ scanners }: { scanners: StatusScanner[] }) {
               </li>
             ))}
           </ul>
-          <div>
+          <div className="status-more">
             <LinkButton variant="quiet" href="/scan">
               {t.scans.seeAll}
             </LinkButton>
@@ -711,6 +707,52 @@ function workloadProblems(
   return lines;
 }
 
+/** A rough height of a device card in lines: what it shows above its two disclosures. */
+function cardLines(d: StatusPrinter | StatusScanner): number {
+  const section = (rows: number) => (rows > 0 ? rows + 1 : 0); // a heading and its rows
+  const printer = "markers" in d ? d : undefined;
+  return (
+    4 +
+    (d.location ? 1 : 0) +
+    (d.message ? 2 : 0) +
+    section(d.warnings.length) +
+    section(printer?.reasons.filter((r) => r !== "none").length ?? 0) +
+    section(printer?.markers.length ?? 0)
+  );
+}
+
+/** Where to cut a list of heights into two runs whose totals differ least; the length for one item. */
+export function balancedCut(lines: number[]): number {
+  const total = lines.reduce((sum, n) => sum + n, 0);
+  let cut = lines.length;
+  let best = total;
+  let above = 0;
+  lines.slice(0, -1).forEach((n, i) => {
+    above += n;
+    const diff = Math.abs(total - 2 * above);
+    if (diff < best) [best, cut] = [diff, i + 1];
+  });
+  return cut;
+}
+
+/**
+ * The device cards in two stacks, cut where their estimated heights balance best. The cut keeps
+ * the card order, so the stacks read the same one above the other (below 1440 px) and side by
+ * side. It depends on what the devices report, never on an open disclosure, so opening one never
+ * moves a card to the other stack.
+ */
+function DeviceStacks({ cards }: { cards: { lines: number; card: ReactElement }[] }) {
+  const cut = balancedCut(cards.map((c) => c.lines));
+  return (
+    <>
+      <div className="status-stack">{cards.slice(0, cut).map((c) => c.card)}</div>
+      {cut < cards.length && (
+        <div className="status-stack">{cards.slice(cut).map((c) => c.card)}</div>
+      )}
+    </>
+  );
+}
+
 export function Status() {
   const status = useStatus();
   if (!status) {
@@ -760,14 +802,18 @@ export function Status() {
               </EmptyState>
             </Card>
           ) : (
-            <>
-              {printers.map((p) => (
-                <PrinterCard key={p.id} printer={p} status={status} />
-              ))}
-              {scanners.map((s) => (
-                <ScannerCard key={s.id} scanner={s} status={status} />
-              ))}
-            </>
+            <DeviceStacks
+              cards={[
+                ...printers.map((p) => ({
+                  lines: cardLines(p),
+                  card: <PrinterCard key={p.id} printer={p} status={status} />,
+                })),
+                ...scanners.map((s) => ({
+                  lines: cardLines(s),
+                  card: <ScannerCard key={s.id} scanner={s} status={status} />,
+                })),
+              ]}
+            />
           )}
         </div>
         <div className="status-side">

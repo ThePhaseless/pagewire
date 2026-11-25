@@ -475,49 +475,51 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
           )}
         </Card>
 
-        <Card title={t.options.title} className="print-options">
-          {copiesMax > 0 && (
-            <NumberField
-              label={t.options.copies}
-              minValue={1}
-              maxValue={copiesMax}
-              step={1}
-              value={copies}
-              onChange={(v) => set({ copies: v })}
-              errorMessage={copiesValid ? undefined : t.options.copiesError(copiesMax)}
-            />
-          )}
-          {open.map((g) => (
-            <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
-          ))}
-          {more.some((g) => shows(g, caps)) && (
-            <Disclosure title={t.options.more}>
-              {more.map((g) => (
-                <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
-              ))}
-            </Disclosure>
-          )}
-          {status !== null && !caps && <p className="print-subtle">{t.options.unknown}</p>}
-          {caps && copiesMax === 0 && !printerGroups.some((g) => shows(g, caps)) && (
-            <p className="print-subtle">{t.options.none}</p>
-          )}
-        </Card>
-      </div>
+        <div className="print-side">
+          <Card title={t.options.title} className="print-options">
+            {copiesMax > 0 && (
+              <NumberField
+                label={t.options.copies}
+                minValue={1}
+                maxValue={copiesMax}
+                step={1}
+                value={copies}
+                onChange={(v) => set({ copies: v })}
+                errorMessage={copiesValid ? undefined : t.options.copiesError(copiesMax)}
+              />
+            )}
+            {open.map((g) => (
+              <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
+            ))}
+            {more.some((g) => shows(g, caps)) && (
+              <Disclosure title={t.options.more}>
+                {more.map((g) => (
+                  <Group key={g.id} group={g} caps={caps} chosen={chosen} set={set} />
+                ))}
+              </Disclosure>
+            )}
+            {status !== null && !caps && <p className="print-subtle">{t.options.unknown}</p>}
+            {caps && copiesMax === 0 && !printerGroups.some((g) => shows(g, caps)) && (
+              <p className="print-subtle">{t.options.none}</p>
+            )}
+          </Card>
 
-      <div className="print-submit">
-        <p className="print-subtle">{t.summary(sentCopies, summary)}</p>
-        <Button
-          variant="primary"
-          isDisabled={!canPrint && !sending}
-          isPending={sending}
-          onPress={() => void printAll()}
-        >
-          <Icon name="print" size={18} />
-          {t.submit(printable.length, items.length, sentCopies)}
-        </Button>
-      </div>
+          <div className="print-submit">
+            <p className="print-subtle">{t.summary(sentCopies, summary)}</p>
+            <Button
+              variant="primary"
+              isDisabled={!canPrint && !sending}
+              isPending={sending}
+              onPress={() => void printAll()}
+            >
+              <Icon name="print" size={18} />
+              {t.submit(printable.length, items.length, sentCopies)}
+            </Button>
+          </div>
+        </div>
 
-      <JobList printerId={id} available={available} />
+        <JobList printerId={id} available={available} />
+      </div>
     </div>
   );
 }

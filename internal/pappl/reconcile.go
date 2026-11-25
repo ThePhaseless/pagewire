@@ -224,10 +224,10 @@ func setDefaults(ctx context.Context, c *Client, keep *Printer, want device.Queu
 	for _, name := range slices.Sorted(maps.Keys(refused)) {
 		if name == "printer-location" {
 			warnings = append(warnings, "The printer refused the location “"+want.Location+"”: it keeps its own.")
-		} else if d := refusedKinds(name, ch, keep.Caps); len(d) > 0 {
-			refusedOpts = append(refusedOpts, d...)
 		} else {
-			warnings = append(warnings, "The printer refused the default "+name+" "+refused[name]+": it keeps its own.")
+			// By option kind only, so the UI words it with its labels; an attribute
+			// that maps to no differing kind leaves the queue as wanted, so nothing to report.
+			refusedOpts = append(refusedOpts, refusedKinds(name, ch, keep.Caps)...)
 		}
 	}
 	return warnings, refusedOpts

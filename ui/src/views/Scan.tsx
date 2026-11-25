@@ -439,63 +439,65 @@ export function Scan() {
         </Card>
 
         <Result scan={shown} onCancel={(id) => void cancel(id)} />
-      </div>
 
-      <Card title={t.history.title} className="scan-history">
-        {config && <p className="scan-subtle">{t.history.retention(config.scan.retentionDays)}</p>}
-        {listError ? (
-          <InlineError action={<Button onPress={retryList}>{strings.buttons.retry}</Button>}>
-            {t.history.loadFailed}
-          </InlineError>
-        ) : (
-          scans.length === 0 && (
-            <EmptyState icon="scan" title={t.history.empty}>
-              {t.history.emptyBody}
-            </EmptyState>
-          )
-        )}
-        {scans.length > 0 && (
-          <ul className="scan-list" aria-label={t.history.title}>
-            {scans.map((s) => {
-              const when = formatTime(s.createdAt);
-              return (
-                <li key={s.id} className="scan-row" data-current={s === shown || undefined}>
-                  <span className="scan-row-main">
-                    <span className="tabular">{when}</span>
-                    <span className="scan-subtle">
-                      {t.history.from(
-                        names.get(s.scanner),
-                        s.state === "scanning"
-                          ? t.scanning(s.pages)
-                          : t.history.summary(s.pages, formatLabel(s.format)),
-                      )}
+        <Card title={t.history.title} className="scan-history">
+          {config && (
+            <p className="scan-subtle">{t.history.retention(config.scan.retentionDays)}</p>
+          )}
+          {listError ? (
+            <InlineError action={<Button onPress={retryList}>{strings.buttons.retry}</Button>}>
+              {t.history.loadFailed}
+            </InlineError>
+          ) : (
+            scans.length === 0 && (
+              <EmptyState icon="scan" title={t.history.empty}>
+                {t.history.emptyBody}
+              </EmptyState>
+            )
+          )}
+          {scans.length > 0 && (
+            <ul className="scan-list" aria-label={t.history.title}>
+              {scans.map((s) => {
+                const when = formatTime(s.createdAt);
+                return (
+                  <li key={s.id} className="scan-row" data-current={s === shown || undefined}>
+                    <span className="scan-row-main">
+                      <span className="tabular">{when}</span>
+                      <span className="scan-subtle">
+                        {t.history.from(
+                          names.get(s.scanner),
+                          s.state === "scanning"
+                            ? t.scanning(s.pages)
+                            : t.history.summary(s.pages, formatLabel(s.format)),
+                        )}
+                      </span>
                     </span>
-                  </span>
-                  <StatusBadge tone={stateTone[s.state]} pulse={s.state === "scanning"}>
-                    {t.history.state[s.state]}
-                  </StatusBadge>
-                  <Button
-                    variant="quiet"
-                    aria-label={t.history.showScan(when)}
-                    onPress={() => setSelectedId(s.id)}
-                  >
-                    {t.history.show}
-                  </Button>
-                  {s.state !== "scanning" && (
+                    <StatusBadge tone={stateTone[s.state]} pulse={s.state === "scanning"}>
+                      {t.history.state[s.state]}
+                    </StatusBadge>
                     <Button
                       variant="quiet"
-                      aria-label={t.history.deleteScan(when)}
-                      onPress={() => setConfirmId(s.id)}
+                      aria-label={t.history.showScan(when)}
+                      onPress={() => setSelectedId(s.id)}
                     >
-                      {strings.buttons.delete}
+                      {t.history.show}
                     </Button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Card>
+                    {s.state !== "scanning" && (
+                      <Button
+                        variant="quiet"
+                        aria-label={t.history.deleteScan(when)}
+                        onPress={() => setConfirmId(s.id)}
+                      >
+                        {strings.buttons.delete}
+                      </Button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Card>
+      </div>
 
       <Dialog
         role="alertdialog"

@@ -11,7 +11,7 @@ import {
   type StatusWorkload,
   type USBDevice,
 } from "../gen/api";
-import { Status } from "./Status";
+import { balancedCut, Status } from "./Status";
 
 const realFetch = globalThis.fetch;
 const json = (body: unknown) =>
@@ -230,6 +230,16 @@ const emit = (type: string, data: unknown) => act(() => FakeEventSource.last?.em
 /** The device card whose heading is `name`. */
 const card = (name: string) =>
   screen.getByRole("heading", { level: 2, name }).closest("section") as HTMLElement;
+
+describe("balancedCut", () => {
+  test("cuts where the two stacks' heights differ least, keeping the order", () => {
+    expect(balancedCut([7, 18, 6, 5, 6, 6])).toBe(2); // 25 above, 23 below
+    expect(balancedCut([7, 18, 6])).toBe(1);
+    expect(balancedCut([5, 5])).toBe(1);
+    expect(balancedCut([9])).toBe(1); // one card: one stack
+    expect(balancedCut([])).toBe(0);
+  });
+});
 
 describe("Status view", () => {
   test("renders before the first Status arrives", async () => {

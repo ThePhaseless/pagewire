@@ -75,6 +75,7 @@
     --rail-width-wide: 15rem;
     --tabbar-height: 4rem;
     --content-max: 72rem;
+    --content-max-wide: 100rem;
     /* Extra bottom space while a toast is showing; base.css sets it. */
     --toast-reserve: 0px;
     /* Height of a sticky action bar while one is shown (Settings with unsaved edits). */

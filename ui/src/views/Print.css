@@ -7,16 +7,33 @@
     overflow-wrap: anywhere;
   }
 
+  /* One column below 1024 px. From 1024 px, Documents and then Print jobs stack in the wide track,
+     and Options with the print bar span both rows of the narrow one. The second row is 1fr, so
+     a taller side column grows only that row: any spare space lands below the last card, never
+     between cards. */
   .print-view .print-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     align-items: start;
+  }
+
+  .print-view .print-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-inline-size: 0;
   }
 
   @media (min-width: 1024px) {
     .print-view .print-grid {
       grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+      grid-template-rows: auto 1fr;
+    }
+
+    .print-view .print-side {
+      grid-column: 2;
+      grid-row: 1 / span 2;
     }
   }
 
@@ -35,7 +52,9 @@
     gap: var(--space-4);
   }
 
+  /* A group title sits closer to its first control than to the group above. */
   .print-view .print-group-title {
+    margin-block-end: calc(-1 * var(--space-2));
     color: var(--ink-muted);
     font-size: var(--text-sm);
     font-weight: var(--weight-medium);
@@ -84,6 +103,31 @@
   .print-view .print-files .print-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  /* In wide cards, job rows share one set of columns (subgrid), so badges and Cancel line up from
+     row to row. Narrow cards keep the wrapping row above. */
+  @container (min-width: 30rem) {
+    .print-view .print-jobs .print-list {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      column-gap: var(--space-3);
+    }
+
+    .print-view .print-jobs .print-row {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: subgrid;
+    }
+
+    .print-view .print-jobs .print-row > :nth-child(2) {
+      grid-column: 2;
+      justify-self: end;
+    }
+
+    .print-view .print-jobs .print-row > :nth-child(3) {
+      grid-column: 3;
+    }
   }
 
   .print-view .print-row:last-child {

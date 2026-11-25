@@ -19,6 +19,7 @@ import (
 	"github.com/OpenPrinting/goipp"
 
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippcaps"
 	"github.com/ThePhaseless/pagewire/internal/pappl"
 	"github.com/ThePhaseless/pagewire/internal/pappl/papplfake"
 	"github.com/ThePhaseless/pagewire/internal/printing"
@@ -936,6 +937,47 @@ func TestRefusedDefaultRetriedWithout(t *testing.T) {
 	w.Defaults.Quality = "normal" // the queue's own: nothing to send, nothing to warn about
 	if r := reconcile(t, c, w, dev("ABC123", hpID)); fake.SetCalls() != 3 || len(r.Warnings) != 0 || len(r.Refused) != 0 {
 		t.Errorf("quality normal: Set-Printer-Attributes calls = %d, warnings %q, refused %+v; want 3 and none", fake.SetCalls(), r.Warnings, r.Refused)
+	}
+}
+
+// Every default PAPPL can refuse comes back by option kind, with the wanted
+// value and the queue's own, so the UI words it with its labels; no warning
+// ever names a raw IPP attribute or enum ("print-quality-default 5").
+func TestEveryRefusedDefaultIsStructured(t *testing.T) {
+	caps := monoCaps()
+	caps.MediaSources, caps.MediaSourceDefault = []string{"auto", "manual"}, "auto"
+	caps.MediaTypes, caps.MediaTypeDefault = []string{"stationery", "photographic"}, "stationery"
+	caps.Sides = append(caps.Sides, "two-sided-long-edge")
+	caps.ColorModes = append(caps.ColorModes, "color")
+	caps.ContentOptimize, caps.ContentOptimizeDefault = []string{"auto", "photo"}, "auto"
+	caps.Orientations, caps.OrientationDefault = []string{"portrait", "landscape"}, "portrait"
+	caps.OutputBins, caps.OutputBinDefault = []string{"face-down", "face-up"}, "face-up"
+	refuse := slices.DeleteFunc(slices.Clone(ippcaps.PAPPLSettable), func(n string) bool { return n == "media-default" })
+	_, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers, Caps: caps, Refuse: refuse})
+	w := want("P")
+	w.Defaults = device.PrintSettings{
+		Media: "iso_a4_210x297mm", MediaSource: "manual", MediaType: "photographic", Sides: "two-sided-long-edge",
+		ColorMode: "color", Quality: "high", Resolution: 300, ContentOptimize: "photo", Orientation: "landscape", OutputBin: "face-down",
+	}
+	r := reconcile(t, c, w, dev("ABC123", hpID))
+	mustOK(t, r)
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings = %q, want none: every refusal is structured", r.Warnings)
+	}
+	wantRefused := []device.Dropped{
+		{Option: device.OptionMedia, Value: "iso_a4_210x297mm", Using: "na_letter_8.5x11in"},
+		{Option: device.OptionMediaSource, Value: "manual", Using: "auto"},
+		{Option: device.OptionMediaType, Value: "photographic", Using: "stationery"},
+		{Option: device.OptionOrientation, Value: "landscape", Using: "portrait"},
+		{Option: device.OptionOutputBin, Value: "face-down", Using: "face-up"},
+		{Option: device.OptionColorMode, Value: "color", Using: "monochrome"},
+		{Option: device.OptionContentOptimize, Value: "photo", Using: "auto"},
+		{Option: device.OptionQuality, Value: "high", Using: "normal"},
+		{Option: device.OptionResolution, Value: "300", Using: "600"},
+		{Option: device.OptionSides, Value: "two-sided-long-edge", Using: "one-sided"},
+	}
+	if !slices.Equal(r.Refused, wantRefused) {
+		t.Errorf("refused = %+v\nwant %+v", r.Refused, wantRefused)
 	}
 }
 

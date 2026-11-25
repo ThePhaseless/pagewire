@@ -257,6 +257,13 @@
     outline: none;
   }
 
+  /* From 1440 px the Status dashboard uses the width for a second stack of device cards. */
+  @media (min-width: 1440px) {
+    .app-main:has(.status-view) {
+      max-inline-size: var(--content-max-wide);
+    }
+  }
+
   .app[data-nav] .app-main {
     padding-block-end: calc(
       var(--tabbar-height) +

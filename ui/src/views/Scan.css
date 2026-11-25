@@ -5,9 +5,12 @@
     gap: var(--space-5);
   }
 
+  /* One column below 1024 px. From 1024 px, Scan settings span both rows of the narrow track and
+     Result then Recent scans stack in the wide one. The second row is 1fr, so spare space lands
+     below the last card, never between cards (the Print page's grid works the same way). */
   .scan-view .scan-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     align-items: start;
   }
@@ -15,6 +18,12 @@
   @media (min-width: 1024px) {
     .scan-view .scan-grid {
       grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+      grid-template-rows: auto 1fr;
+    }
+
+    .scan-view .scan-options {
+      grid-column: 1;
+      grid-row: 1 / span 2;
     }
   }
 
@@ -109,13 +118,40 @@
     border-block-end: 1px solid var(--rule);
   }
 
+  /* Narrow cards: the date and summary take the first line, then the badge at the start and Show
+     and Delete at the end of the second, so every row has the same shape. */
+  .scan-view .scan-row > :nth-child(2) {
+    margin-inline-end: auto;
+  }
+
+  /* In wide cards, rows share one set of columns (subgrid), so the badge, Show and Delete line up
+     from row to row even when a row has no Delete. Narrow cards keep the wrapping row above. */
+  @container (min-width: 31rem) {
+    .scan-view .scan-list {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+      column-gap: var(--space-3);
+    }
+
+    .scan-view .scan-row {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: subgrid;
+    }
+
+    .scan-view .scan-row > :nth-child(2) {
+      justify-self: end;
+      margin-inline-end: 0;
+    }
+  }
+
   .scan-view .scan-row:last-child {
     border-block-end: 0;
   }
 
   .scan-view .scan-row-main {
     display: flex;
-    flex: 1 1 12rem;
+    flex: 1 1 100%;
     flex-direction: column;
     gap: var(--space-1);
     min-inline-size: 0;

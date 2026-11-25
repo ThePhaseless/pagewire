@@ -526,6 +526,12 @@
     transition: inline-size var(--dur-slow) var(--ease-out);
   }
 
+  /* A marker's own colour can match the track (black toner on dark paper); the ring keeps the
+     fill's edge visible. */
+  .ui-meter .ui-progress-fill {
+    box-shadow: inset 0 0 0 1px var(--rule-strong);
+  }
+
   .ui-progress-fill[data-indeterminate] {
     inline-size: 35%;
     animation: ui-indeterminate 1.4s var(--ease-out) infinite;

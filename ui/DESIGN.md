@@ -56,7 +56,7 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 - Space comes in 4 px steps, `--space-1` to `--space-8` (4, 8, 12, 16, 24, 32, 48, 64 px). Keep tight groups inside a card (8 to 12 px) and wider gaps between cards (16 to 24 px). Leave more room above a heading than below it.
 - Radii: `--radius-control` 10 px for buttons, inputs and options; `--radius-sheet` 14 px for cards, dialogs and the drop zone; `--radius-pill` for dots, switches and the active tab-bar icon.
 - Every interactive target is at least `--touch` (44 px) in both directions.
-- Shell metrics: `--tabbar-height` 64 px, `--rail-width` 88 px, `--rail-width-wide` 240 px, `--content-max` 72 rem.
+- Shell metrics: `--tabbar-height` 64 px, `--rail-width` 88 px, `--rail-width-wide` 240 px, `--content-max` 72 rem, and `--content-max-wide` 100 rem for Status from 1440 px.
 - Safe-area insets (`--safe-*`) pad the header, the tab bar, overlays and toasts (`viewport-fit=cover`).
 - `scroll-padding-block` keeps a focused control clear of the sticky header, the phone tab bar and a visible toast. While a toast shows, `--toast-reserve` adds about one toast's height to the page's bottom padding. While a sticky action bar shows (Settings with unsaved edits), `--bar-reserve` adds its height there and lifts the toast region above it.
 - Button labels wrap rather than overflow, and the installation name in the header keeps room for about ten characters; at large text sizes the status badge moves to a second line.
@@ -104,7 +104,7 @@ They are styled wrappers over react-aria-components 1.22. They take their copy f
 | `Dialog`                                           | A modal with a title and a Close button. `role="alertdialog"` drops outside-click dismissal. Use it only when the task needs protected focus: confirmations and conflicts. Prefer inline UI everywhere else. `children` may be `(close) => …`.                                          |
 | `Tabs`, `TabList`, `Tab`, `TabPanel`               | Underline tabs.                                                                                                                                                                                                                                                                         |
 | `ProgressBar`                                      | Determinate when given `value`, indeterminate otherwise.                                                                                                                                                                                                                                |
-| `Meter`                                            | `color` takes the marker's own colour.                                                                                                                                                                                                                                                  |
+| `Meter`                                            | `color` takes the marker's own colour; a hairline ring keeps a fill that matches the track (black toner in the dark theme) visible.                                                                                                                                                     |
 | `toast()`, `ToastRegion`                           | Tones are neutral, ok and problem. Problems leave after 10 s or when the route changes; others leave after 5 s. Timers pause while a toast is hovered or focused. The region sits above the tab bar on phones and bottom-right from 768 px.                                             |
 | `DropZone`, `FileTrigger`                          | Drop target (tinted while dragging) and file picker.                                                                                                                                                                                                                                    |
 | `Disclosure`                                       | A heading-level-3 trigger with a chevron. "Technical details" disclosures hold jargon (USB IDs, matched rule, mode) on Status and in setup.                                                                                                                                             |
@@ -121,18 +121,28 @@ They are styled wrappers over react-aria-components 1.22. They take their copy f
 
 ### Status dashboard (`src/views/Status.tsx`)
 
-Below 1024 px the page is one column. From 1024 px it has two tracks, `minmax(0, 2fr) minmax(18rem, 1fr)`. The wide track stacks one full-width card per enabled printer, then one per enabled scanner. The narrow track holds Recent print jobs, Recent scans and System (the settings file and open reconcile problems). Cards never sit in a multi-column grid, so rows are never ragged, and the content keeps the shell's maximum width.
+Below 1024 px the page is one column. From 1024 px it has two tracks, `minmax(0, 2fr) minmax(18rem, 1fr)`. The wide track stacks one full-width card per enabled printer, then one per enabled scanner. The narrow track holds Recent print jobs, Recent scans and System (the settings file and open reconcile problems). From 1440 px the page widens to `--content-max-wide` and the device cards split into two stacks side by side, so the page has three columns of about equal width. The split keeps the card order and cuts it where the estimated card heights (title, location, message, warnings, reasons and supplies, counted in lines) balance best. It never depends on an open disclosure, so opening one never moves a card. Below 1440 px the two stacks sit one above the other in the same order. Each track is its own column of cards, so a card never waits for a taller neighbour and spare space only ever appears below the shorter track (see Card layout).
 
 A device card reads top to bottom:
 
 - The heading has the kind icon, the entry's name and a badge. The badge shows the device's phase, and once the device answers it shows what the device is doing (Ready, Printing, Stopped).
-- Below it come the location, the phase message (an `InlineError` when the phase is error) and the option warnings. Warnings are sentences built from labels (`warningText`), never raw keywords.
-- Then the device's one action, Print or Scan, which links to its page with `?printer=<id>` or `?scanner=<id>`, and for printers the printer's reasons and supply meters.
+- Below it come the location and the device's one action, Print or Scan, which links to its page with `?printer=<id>` or `?scanner=<id>`. The action sits at the same place in every card, whatever the card reports below it.
+- Then the phase message (an `InlineError` when the phase is error), the reason the action is missing while the device is not available, and the option warnings. Warnings are sentences built from labels (`warningText`), never raw keywords.
+- Then, for printers, the printer's reasons and supply meters.
 - Last come two collapsed disclosures: "Connect a device" (that device's own addresses and DNS-SD name, with the steps per system) and "Technical details" (USB IDs, node, driver family, driver, how it was chosen, SANE backends, the device's own advertised services and vendor files).
 
 A disclosure draws only its bottom rule. The first disclosure in a card gets a top rule, and a section that follows a disclosure drops its own, so one line separates each part.
 
 Problems that belong to no single card, such as a failed workload or an apply error, appear once above the cards. With no enabled device the wide track shows an empty state that links to "Detect and add devices".
+
+### Card layout
+
+Cards always keep their content height: never stretch a card to fill a row, and never leave a hole between two cards because a card beside them is taller. Spare space may only appear below the last card of a column.
+
+- When cards sit side by side, each track is its own stack (`display: flex; flex-direction: column`), as on Status, so a card's height never depends on the card beside it.
+- Print and Scan use a two-track grid from 1024 px with `grid-template-rows: auto 1fr`. The lone card of one track spans both rows (Print: Options with the print bar; Scan: Scan settings), and the other track stacks its first card and its list (Print: Documents, then Print jobs; Scan: Result, then Recent scans). The `1fr` row takes whatever the spanning column needs beyond the first card, so the extra space lands under the last card. The DOM order stays the reading and tab order. Below 1024 px every card is one column.
+- In wide cards, lists of rows with a badge and actions (Print jobs, Recent scans) share their columns through `subgrid`, so badges and buttons line up from row to row even when a row has fewer actions. In narrow cards the rows wrap instead, so names keep their width; a Recent scans row puts its badge and buttons on a second line.
+- On Status, "All jobs" and "All scans" (quiet buttons on a line of their own under a list) pull back by their own padding, so the label lines up with the text above.
 
 ### Option controls (`src/components/OptionField.tsx`)
 
