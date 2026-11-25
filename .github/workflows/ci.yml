@@ -202,6 +202,7 @@ jobs:
           sudo systemctl start podman.socket
           docker save localhost/pagewire:dev localhost/pagewire-device:dev | sudo podman load
           # Ephemeral runner: compose and the test reach the root socket without sudo.
+          sudo chmod 0755 /run/podman
           sudo chmod 0666 /run/podman/podman.sock
           echo "DOCKER_HOST=unix:///run/podman/podman.sock" >> "$GITHUB_ENV"
           echo "DOCKER_SOCKET=/run/podman/podman.sock" >> "$GITHUB_ENV"
