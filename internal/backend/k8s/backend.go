@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ThePhaseless/printscan/internal/device"
@@ -25,7 +27,17 @@ type Backend struct {
 
 	mu       sync.Mutex
 	resolved bool // p.Owner.UID and p.SelfImage come from the owner Deployment
+
+	tokMu  sync.Mutex // separate from mu: agent auth must not wait for an Apply
+	tok    string
+	tokErr error
+	tokAt  time.Time
+	now    func() time.Time
 }
+
+// tokenTTL bounds how often AgentToken reads the Secret, so unauthenticated
+// requests to the internal listener cannot drive API server load.
+const tokenTTL = 5 * time.Second
 
 var (
 	_ device.Backend          = (*Backend)(nil)
@@ -36,7 +48,7 @@ var (
 // New returns a Backend. It makes no API call; the owner Deployment is read on
 // the first Apply with a spec.
 func New(client kubernetes.Interface, p Params) *Backend {
-	return &Backend{client: client, p: p}
+	return &Backend{client: client, p: p, now: time.Now}
 }
 
 var selector = metav1.ListOptions{LabelSelector: NameLabel + "=" + DeviceName}
@@ -102,38 +114,35 @@ func (b *Backend) resolveOwner(ctx context.Context) error {
 	return nil
 }
 
-// ensureToken creates the agent token Secret when it is missing and never
-// changes an existing one.
+// ensureToken gives the agent token Secret a token when it is missing or empty
+// and never changes an existing token. It server-side applies the Secret by
+// name, so RBAC can scope create and patch to that one Secret.
 func (b *Backend) ensureToken(ctx context.Context) error {
-	secrets := b.client.CoreV1().Secrets(b.p.Namespace)
-	_, err := secrets.Get(ctx, TokenSecretName, metav1.GetOptions{})
-	if !apierrors.IsNotFound(err) {
-		if err != nil {
-			return fmt.Errorf("secret %s/%s: %w", b.p.Namespace, TokenSecretName, err)
-		}
+	ns := b.p.Namespace
+	secrets := b.client.CoreV1().Secrets(ns)
+	s, err := secrets.Get(ctx, TokenSecretName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("secret %s/%s: %w", ns, TokenSecretName, err)
+	}
+	if err == nil && len(s.Data[TokenSecretKey]) > 0 {
 		return nil
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return err
 	}
-	controller := true
-	s := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      TokenSecretName,
-			Namespace: b.p.Namespace,
-			Labels:    map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "apps/v1", Kind: "Deployment", Name: b.p.Owner.Name, UID: b.p.Owner.UID,
-				Controller: &controller, BlockOwnerDeletion: &controller,
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{TokenSecretKey: []byte(hex.EncodeToString(raw))},
+	tok := hex.EncodeToString(raw)
+	ac := corev1ac.Secret(TokenSecretName, ns).
+		WithLabels(map[string]string{NameLabel: DeviceName, ManagedByLabel: FieldManager}).
+		WithOwnerReferences(ownerRef(b.p.Owner)).
+		WithType(corev1.SecretTypeOpaque).
+		WithData(map[string][]byte{TokenSecretKey: []byte(tok)})
+	if _, err := secrets.Apply(ctx, ac, metav1.ApplyOptions{FieldManager: FieldManager, Force: true}); err != nil {
+		return fmt.Errorf("apply secret %s/%s: %w", ns, TokenSecretName, err)
 	}
-	if _, err := secrets.Create(ctx, s, metav1.CreateOptions{FieldManager: FieldManager}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create secret %s/%s: %w", b.p.Namespace, TokenSecretName, err)
-	}
+	b.tokMu.Lock()
+	b.tok, b.tokErr, b.tokAt = tok, nil, b.now()
+	b.tokMu.Unlock()
 	return nil
 }
 
@@ -194,17 +203,29 @@ func (b *Backend) RestartPod(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// AgentToken returns the agent's bearer token from its Secret.
+// AgentToken returns the agent's bearer token from its Secret. It reads the
+// Secret at most once per tokenTTL and returns the cached token or error between
+// reads; an empty token is an error.
 func (b *Backend) AgentToken(ctx context.Context) (string, error) {
+	b.tokMu.Lock()
+	defer b.tokMu.Unlock()
+	if !b.tokAt.IsZero() && b.now().Sub(b.tokAt) < tokenTTL {
+		return b.tok, b.tokErr
+	}
+	b.tok, b.tokErr = "", nil
 	s, err := b.client.CoreV1().Secrets(b.p.Namespace).Get(ctx, TokenSecretName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("secret %s/%s: %w", b.p.Namespace, TokenSecretName, err)
+	switch {
+	case err != nil:
+		b.tokErr = fmt.Errorf("secret %s/%s: %w", b.p.Namespace, TokenSecretName, err)
+	case len(s.Data[TokenSecretKey]) == 0:
+		b.tokErr = fmt.Errorf("secret %s/%s has no %q key", b.p.Namespace, TokenSecretName, TokenSecretKey)
+	default:
+		b.tok = string(s.Data[TokenSecretKey])
 	}
-	tok := string(s.Data[TokenSecretKey])
-	if tok == "" {
-		return "", fmt.Errorf("secret %s/%s has no %q key", b.p.Namespace, TokenSecretName, TokenSecretKey)
+	if ctx.Err() == nil { // a cancelled request must not lock agents out for tokenTTL
+		b.tokAt = b.now()
 	}
-	return tok, nil
+	return b.tok, b.tokErr
 }
 
 func ignoreNotFound(err error) error {

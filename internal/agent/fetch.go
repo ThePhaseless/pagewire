@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ import (
 type FetchConfig struct {
 	Dir       string       // --dir: the blob volume
 	Blobs     []string     // --blob <id>@<version>, repeated
-	Accept    []string     // --accept <id>@<version>, repeated
+	Accept    []string     // --accept <eula id>@<version>@<text sha256>, repeated
 	Optional  []string     // --optional <id>, repeated: sets Optional on the --blob ref with that id
 	StatusOut string       // --status-out; "" means device.BlobStatusFile
 	Client    *http.Client // nil: a client with a 10 min timeout, so a stalled vendor cannot hang the init container
@@ -40,7 +41,7 @@ func Fetch(ctx context.Context, cfg FetchConfig) error {
 	if err != nil {
 		return err
 	}
-	accepted, err := parseRefs(cfg.Accept)
+	accepted, err := parseAccepted(cfg.Accept)
 	if err != nil {
 		return err
 	}
@@ -85,7 +86,7 @@ func Fetch(ctx context.Context, cfg FetchConfig) error {
 	return nil
 }
 
-func fetchOne(ctx context.Context, ref device.BlobRef, accepted []device.BlobRef, cfg FetchConfig,
+func fetchOne(ctx context.Context, ref device.BlobRef, accepted []device.EULARef, cfg FetchConfig,
 	blob func(string) (catalog.Blob, bool), key func(string) (openpgp.EntityList, error),
 ) device.BlobStatus {
 	b, ok := blob(ref.ID)
@@ -111,6 +112,21 @@ func parseRefs(ss []string) ([]device.BlobRef, error) {
 			return nil, fmt.Errorf("blob ref %q: want <id>@<version>", s)
 		}
 		refs = append(refs, device.BlobRef{ID: id, Version: version})
+	}
+	return refs, nil
+}
+
+var textSHARe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// parseAccepted reads --accept values: <eula id>@<version>@<64 lowercase hex>.
+func parseAccepted(ss []string) ([]device.EULARef, error) {
+	refs := make([]device.EULARef, 0, len(ss))
+	for _, s := range ss {
+		parts := strings.Split(s, "@")
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || !textSHARe.MatchString(parts[2]) {
+			return nil, fmt.Errorf("--accept %q: want <id>@<version>@<sha256 of the licence text, 64 lowercase hex>", s)
+		}
+		refs = append(refs, device.EULARef{ID: parts[0], Version: parts[1], TextSHA256: parts[2]})
 	}
 	return refs, nil
 }

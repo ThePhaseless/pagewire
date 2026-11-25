@@ -1,13 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Extends ThePhaseless/renovate-config, a public repository (checked 2026-11-25). It groups minor, patch and digest updates and automerges them; the rules below turn automerge off for what ends up in the images or CI.",
   "extends": ["local>ThePhaseless/renovate-config"],
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Upstream tags in Dockerfiles: ARG X=<version> # renovate: datasource=<ds> depName=<name>",
+      "description": "Upstream releases in Dockerfiles, built by the tag's commit: ARG X=<sha> # renovate: datasource=github-tags depName=<owner/repo> currentValue=<tag>",
       "managerFilePatterns": ["/(^|/)Dockerfile$/"],
       "matchStrings": [
-        "ARG [A-Z0-9_]+=(?<currentValue>[^\\s#]+)[ \\t]+# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)[ \\t]*\\n"
+        "ARG [A-Z0-9_]+=(?<currentDigest>[0-9a-f]{40})[ \\t]+# renovate: datasource=(?<datasource>github-tags) depName=(?<depName>\\S+) currentValue=(?<currentValue>\\S+)"
       ]
     },
     {
@@ -20,6 +21,13 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "Actions, Dockerfile base images and upstream pins change what CI runs and what the images contain: review every update. Their own group, so the preset's automerged group keeps automerging dev tooling.",
+      "matchManagers": ["github-actions", "dockerfile", "custom.regex"],
+      "groupName": "CI actions, base images and upstreams",
+      "groupSlug": "ci-images-upstreams",
+      "automerge": false
+    },
     {
       "description": "Go toolchain: mise.toml and the golang images move together",
       "matchDepNames": ["go", "golang"],
@@ -44,7 +52,7 @@
       "matchPackageNames": ["hplip"],
       "automerge": false,
       "prBodyNotes": [
-        "Bumping hplip in images/driver/Dockerfile also requires bumping the hplip-plugin EULA version, the blob version and the blob URL in internal/catalog/catalog.yaml."
+        "Bumping hplip in images/driver/Dockerfile also requires bumping the hplip-plugin EULA version, the blob version and the blob URL in internal/catalog/catalog.yaml, and replacing the blob's verify sha256 there with the new plug-in's (check the download against its .asc signature first)."
       ]
     }
   ]

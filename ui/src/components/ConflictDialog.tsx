@@ -1,6 +1,6 @@
 // The 412 dialog for config saves. Two variants: the file on disk is valid (compare and choose),
 // or it is now invalid (show its errors, then replace it with a full PUT or cancel).
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { ConfigResponse } from "../gen/api";
 import { strings } from "../strings";
 import { settingsStrings } from "../views/Settings.strings";
@@ -15,6 +15,8 @@ export type ConflictDialogProps = {
   current: ConfigResponse;
   /** The fields you changed, with both values already formatted. */
   changes: ConflictChange[];
+  /** Fields only the file changed; `file` holds their new value. */
+  alsoChanged: ConflictChange[];
   busy: boolean;
   onKeepMine: () => void;
   onUseFile: () => void;
@@ -26,6 +28,7 @@ export type ConflictDialogProps = {
 
 export function ConflictDialog(p: ConflictDialogProps) {
   const [confirming, setConfirming] = useState(false);
+  const alsoId = useId();
   const valid = p.current.state === "applied";
   return (
     <Dialog
@@ -51,6 +54,24 @@ export function ConflictDialog(p: ConflictDialogProps) {
               </li>
             ))}
           </ul>
+          {p.alsoChanged.length > 0 && (
+            <>
+              <h3 id={alsoId} className="conflict-also">
+                {t.alsoChanged}
+              </h3>
+              <ul className="conflict-changes" aria-labelledby={alsoId}>
+                {p.alsoChanged.map((c) => (
+                  <li key={c.path}>
+                    <span className="conflict-field">{c.label}</span>
+                    <dl>
+                      <dt>{t.inFile}</dt>
+                      <dd>{c.file}</dd>
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <div className="conflict-actions">
             <Button onPress={p.onReview} isDisabled={p.busy}>
               {t.review}

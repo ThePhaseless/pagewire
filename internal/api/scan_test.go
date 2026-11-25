@@ -44,9 +44,13 @@ func TestPostScan(t *testing.T) {
 		scanning.ErrBusy: {409, "scanner-busy"},
 		&scanning.StorageError{Err: os.ErrPermission}: {500, "storage-error"},
 		scanning.ErrNoScanner:                         {503, "scanner-unavailable"},
+		scanning.ErrStorageFull:                       {507, "storage-full"},
 	} {
 		e.scans.startErr = err
-		wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(scanBody)), want.code, want.typ)
+		p := wantProblem(t, e.do("POST", "/api/v1/scans", strings.NewReader(scanBody)), want.code, want.typ)
+		if strings.Contains(p.Detail, "permission") {
+			t.Errorf("storage error detail %q leaks the raw error", p.Detail)
+		}
 	}
 }
 
@@ -67,7 +71,8 @@ func TestScanReads(t *testing.T) {
 	wantProblem(t, e.do("GET", "/api/v1/scans/00000000000000ff", nil), 404, "not-found")
 
 	rec := e.do("GET", "/api/v1/scans/"+id+"/pages/1", nil)
-	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/jpeg" || rec.Body.String() != "\xff\xd8\xffjpeg" {
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/jpeg" || rec.Body.String() != "\xff\xd8\xffjpeg" ||
+		rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("page: %d %v", rec.Code, rec.Header())
 	}
 	wantProblem(t, e.do("GET", "/api/v1/scans/"+id+"/pages/2", nil), 404, "not-found")
@@ -75,7 +80,8 @@ func TestScanReads(t *testing.T) {
 
 	rec = e.do("GET", "/api/v1/scans/"+id+"/download", nil)
 	if rec.Code != 200 || rec.Header().Get("Content-Type") != "application/pdf" ||
-		!strings.Contains(rec.Header().Get("Content-Disposition"), `filename="scan.pdf"`) || !strings.HasPrefix(rec.Body.String(), "%PDF-") {
+		!strings.Contains(rec.Header().Get("Content-Disposition"), `filename="scan.pdf"`) || !strings.HasPrefix(rec.Body.String(), "%PDF-") ||
+		rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("download: %d %v", rec.Code, rec.Header())
 	}
 	e.scans.dlErr = scanning.ErrNotFinished
@@ -92,6 +98,31 @@ func TestDeleteScan(t *testing.T) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	wantProblem(t, e.do("DELETE", "/api/v1/scans/00000000000000ff", nil), 404, "not-found")
-	e.scans.delErr = scanning.ErrRunning
-	wantProblem(t, e.do("DELETE", "/api/v1/scans/"+id, nil), 409, "scan-running")
+}
+
+func TestDeleteRunningScanCancels(t *testing.T) {
+	e := newEnv(t)
+	id := "00000000000000aa"
+	e.scans.scans = []apitypes.Scan{{
+		ID: id, State: "scanning", Format: "pdf", CreatedAt: time.Now(),
+		Settings: apitypes.ScanSettings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"},
+	}}
+	e.scans.running = id
+	rec := e.do("DELETE", "/api/v1/scans/"+id, nil)
+	if rec.Code != 202 {
+		t.Fatalf("DELETE running: %d %s", rec.Code, rec.Body)
+	}
+	validateDef(t, "Scan", rec.Body.Bytes())
+	if sc := decode[apitypes.Scan](t, rec.Body.Bytes()); sc.ID != id || sc.State != "scanning" {
+		t.Fatalf("202 body %+v, want the scan as it is now", sc)
+	}
+	if e.scans.canceled != 1 {
+		t.Fatalf("Cancel called %d times", e.scans.canceled)
+	}
+	// Once it has ended (canceled), a second DELETE removes it.
+	e.scans.running = ""
+	if rec := e.do("DELETE", "/api/v1/scans/"+id, nil); rec.Code != 204 {
+		t.Fatalf("DELETE after cancel: %d %s", rec.Code, rec.Body)
+	}
+	wantProblem(t, e.do("DELETE", "/api/v1/scans/00000000000000ff", nil), 404, "not-found")
 }

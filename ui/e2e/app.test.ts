@@ -1,6 +1,8 @@
 // Browser end-to-end scenarios against the real binary in sim mode, at three viewports.
 // Every scenario runs under the harness's console and API status rules.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
 import { eulaStrings } from "../src/components/EulaAccept.strings";
@@ -27,6 +29,19 @@ const viewports: Viewport[] = [
 ];
 
 const samplePdf = join(repoRoot, "internal/printing/testdata/sample.pdf");
+// A 1×1 PNG, which the simulated printer (PDF and JPEG, no PNG) gets converted to JPEG.
+const tmp = mkdtempSync(join(tmpdir(), "printscan-e2e-files-"));
+const samplePng = join(tmp, "dot.png");
+await Bun.write(
+  samplePng,
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "base64",
+  ),
+);
+// Not a real .docx, but the same ZIP signature: refused, with the Word help.
+const sampleDocx = join(tmp, "letter.docx");
+await Bun.write(sampleDocx, Buffer.from("PK\x03\x04\x14\x00\x06\x00", "binary"));
 const fixtureProduct = async (name: string): Promise<string> => {
   const f = await Bun.file(join(repoRoot, `internal/catalog/fixtures/${name}.json`)).json();
   return f.devices[0].product;
@@ -198,7 +213,7 @@ for (const vp of viewports) {
         );
         await page.locator("input[type=file]").setInputFiles(samplePdf);
         await page.getByText(printStrings.files.ready).waitFor();
-        await page.getByRole("button", { name: printStrings.submit(1, 1), exact: true }).click();
+        await page.getByRole("button", { name: printStrings.submit(1, 1, 1), exact: true }).click();
         await page
           .getByRole("listitem")
           .filter({ hasText: "sample.pdf" })
@@ -214,6 +229,36 @@ for (const vp of viewports) {
           () => (window as unknown as { e2eMarker?: boolean }).e2eMarker === true,
         );
         expect(kept).toBe(true);
+      });
+    });
+
+    test(`12. print: a PNG is converted, a .docx gets help, the button counts files (${vp.name})`, async () => {
+      await scenario(main, vp, async (s) => {
+        const { page } = s;
+        await s.goto("/print");
+        await heading(page, strings.nav.print).waitFor();
+        await page.getByText(/This printer accepts .*PNG/).waitFor();
+        await page.locator("input[type=file]").setInputFiles([samplePng, sampleDocx]);
+        const docx = page.getByRole("listitem").filter({ hasText: "letter.docx" });
+        await docx.getByText(printStrings.help.document).waitFor();
+        await page
+          .getByRole("listitem")
+          .filter({ hasText: "dot.png" })
+          .getByText(printStrings.files.ready)
+          .waitFor();
+        const submit = page.getByRole("button", {
+          name: printStrings.submit(1, 2, 1),
+          exact: true,
+        });
+        await submit.waitFor();
+        await s.inspect("print-files");
+        await submit.click();
+        await page
+          .getByRole("listitem")
+          .filter({ hasText: "dot.png" })
+          .filter({ hasText: printStrings.jobs.state.completed })
+          .first()
+          .waitFor({ timeout: 60_000 });
       });
     });
 
@@ -258,6 +303,24 @@ for (const vp of viewports) {
         await s.goto("/settings");
         const field = page.getByRole("textbox", { name: settingsStrings.fields.location });
         await field.fill(location);
+
+        // Unsaved edits: Save is in view without scrolling, above the phone tab bar.
+        await page.getByText(settingsStrings.unsaved).waitFor();
+        const save = await page
+          .getByRole("button", { name: strings.buttons.save, exact: true })
+          .boundingBox();
+        const tabBar = vp.width < 768 ? 64 : 0;
+        expect(save).not.toBeNull();
+        expect((save?.y ?? 0) + (save?.height ?? 0)).toBeLessThanOrEqual(vp.height - tabBar);
+        // Leaving asks first; Keep editing keeps the edit.
+        await nav(page, strings.nav.print).click();
+        const leave = page.getByRole("alertdialog", { name: settingsStrings.leave.title });
+        await leave.waitFor();
+        await s.inspect("settings-leave");
+        await leave.getByRole("button", { name: settingsStrings.leave.stay }).click();
+        await leave.waitFor({ state: "hidden" });
+        expect(new URL(page.url()).pathname).toBe("/settings");
+        expect(await field.inputValue()).toBe(location);
 
         const before = await Bun.file(main.configPath).text();
         const edited = `${comment}\n${before.replace(/retentionDays: \d+/, "retentionDays: 14")}`;
@@ -362,7 +425,7 @@ for (const vp of viewports) {
       try {
         await seedConfig(server);
         const setup = (await (await fetch(`${server.url}/api/v1/setup`)).json()) as {
-          eulas: { id: string; title: string }[];
+          eulas: { id: string; title: string; version: string; textSha256: string | null }[];
         };
         const eula = setup.eulas.find((e) => e.id === "hplip-plugin");
         if (!eula) throw new Error(`setup lists no hplip-plugin EULA: ${JSON.stringify(setup)}`);
@@ -371,9 +434,18 @@ for (const vp of viewports) {
           // Accepting adds the blob, which rolls the device; jobs are 503 until the printer is back.
           s.expectApiStatus("GET", "/api/v1/jobs", 503);
           await s.goto("/settings");
-          await page.getByText(eulaStrings.accept(eula.title)).click();
+          // The licence text from inside the verified archive, in a named, focusable region.
+          const text = page.getByRole("region", { name: eulaStrings.textLabel(eula.title) });
+          await text.waitFor();
+          expect((await text.textContent())?.length).toBeGreaterThan(0);
+          expect(await text.getAttribute("tabindex")).toBe("0");
+          await page.getByText(eulaStrings.accept(eula.title, eula.version)).click();
+          await page.getByText(settingsStrings.unsaved).waitFor();
+          await s.inspect("settings-eula-unsaved");
           await page.getByRole("button", { name: strings.buttons.save, exact: true }).click();
           await page.getByText(settingsStrings.saved).first().waitFor();
+          const cfg = await Bun.file(server.configPath).text();
+          expect(cfg).toMatch(new RegExp(`textSha256: "?${eula.textSha256}"?\n`));
           await nav(page, strings.nav.status).click();
           await heading(page, strings.nav.status).waitFor();
           await page.getByText(statusStrings.device.blobsTitle).waitFor({ timeout: 90_000 });
@@ -402,6 +474,7 @@ for (const vp of viewports) {
           await page.getByRole("link", { name: setupStrings.done.goToStatus }).click();
           await heading(page, strings.nav.status).waitFor();
           await page.getByText(statusStrings.device.simulatedDevice).waitFor();
+          await page.getByRole("button", { name: strings.technicalDetails }).click();
           await page
             .getByText(statusStrings.device.mode.simulated, { exact: true })
             .first()
@@ -418,6 +491,71 @@ for (const vp of viewports) {
     });
   });
 }
+
+test("13. touch screens see no Drop files here", async () => {
+  const server = await startServer("touch");
+  try {
+    await seedConfig(server);
+    await scenario(
+      server,
+      viewports[0] as Viewport,
+      async (s) => {
+        await s.goto("/print");
+        await heading(s.page, strings.nav.print).waitFor();
+        await s.page.getByRole("button", { name: printStrings.files.choose }).waitFor();
+        expect(await s.page.getByText(printStrings.files.drop).isVisible()).toBe(false);
+        await s.inspect("print-touch");
+      },
+      { hasTouch: true, isMobile: true },
+    );
+  } finally {
+    await server.stop();
+  }
+});
+
+test("14. scan: Cancel stops a running scan", async () => {
+  // Each page takes a minute, so the scan is still running when Cancel is pressed.
+  const server = await startServer("scan-cancel", "ippusb-mfp", ["--sim-scan-delay=60s"]);
+  try {
+    await seedConfig(server);
+    await scenario(server, viewports[1] as Viewport, async (s) => {
+      const { page } = s;
+      await s.goto("/scan");
+      await heading(page, strings.nav.scan).waitFor();
+      await page.getByRole("button", { name: scanStrings.submit, exact: true }).click();
+
+      const cancel = page.getByRole("button", { name: scanStrings.cancel });
+      await cancel.waitFor();
+      await page.getByRole("progressbar", { name: scanStrings.scanning(0) }).waitFor();
+      expect(await page.getByText(scanStrings.history.summary(0, "PDF")).count()).toBe(0);
+      await s.inspect("scan-running");
+
+      const deleted = page.waitForResponse(
+        (r) => r.request().method() === "DELETE" && /\/api\/v1\/scans\/\w+$/.test(r.url()),
+      );
+      await cancel.click();
+      expect((await deleted).status()).toBe(202);
+      await page.getByText(scanStrings.result.canceled).waitFor({ timeout: 15_000 });
+      await cancel.waitFor({ state: "hidden" });
+      expect(await page.getByRole("link", { name: scanStrings.download.pdf }).count()).toBe(0);
+      await s.inspect("scan-canceled");
+
+      // The scanner is free again: a new scan starts and can be canceled too.
+      await page.getByRole("button", { name: scanStrings.submit, exact: true }).click();
+      await cancel.waitFor();
+      const again = page.waitForResponse((r) => r.request().method() === "DELETE");
+      await cancel.click();
+      expect((await again).status()).toBe(202);
+      await cancel.waitFor({ state: "hidden", timeout: 15_000 });
+    });
+    const scans = (await (await fetch(`${server.url}/api/v1/scans`)).json()) as {
+      state: string;
+    }[];
+    expect(scans.map((x) => x.state)).toEqual(["canceled", "canceled"]);
+  } finally {
+    await server.stop();
+  }
+});
 
 test("11. self-test: the console and API status rules report failures", async () => {
   const server = await startServer("self-test");
@@ -444,7 +582,7 @@ test("11. self-test: the console and API status rules report failures", async ()
       expect(s.failures()).toEqual([expect.stringContaining("probe-throw")]);
       s.clear();
 
-      // An API 404 makes Chromium log "Failed to load resource" (A15). That line is excluded from
+      // An API 404 makes Chromium log "Failed to load resource". That line is excluded from
       // the console rule; the API status rule reports the response instead.
       const missing = page.waitForResponse((r) =>
         r.url().endsWith("/api/v1/scans/0000000000000000"),

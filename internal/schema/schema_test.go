@@ -1,11 +1,11 @@
 package schema
 
-// Recorded from the generated files (assumptions A3 and A11 of the plan):
-//   - A3: invopop/jsonschema v0.14.0 writes a jsonschema:"nullable" field as
+// Recorded from the generated files:
+//   - invopop/jsonschema v0.14.0 writes a jsonschema:"nullable" field as
 //     {"oneOf": [<the field's schema, e.g. {"$ref": "#/$defs/Config"}>, {"type": "null"}]}.
 //     It never emits anyOf or type: [x, "null"] for these DTOs.
-//   - A11: it reflects time.Time as {"type": "string", "format": "date-time"}.
-//   - A5 holds: the default Reflector requires every field without omitempty;
+//   - It reflects time.Time as {"type": "string", "format": "date-time"}.
+//   - The default Reflector requires every field without omitempty;
 //     RequiredFromJSONSchemaTags requires only fields tagged jsonschema:"required".
 
 import (
@@ -75,7 +75,7 @@ func strs(v any) []string {
 	return out
 }
 
-// nullable reports whether a property schema is the A3 nullable form.
+// nullable reports whether a property schema is the oneOf-with-null form above.
 func nullable(p obj) bool {
 	one, ok := p["oneOf"].([]any)
 	if !ok || len(one) != 2 {
@@ -196,6 +196,9 @@ func TestRejectsInvalid(t *testing.T) {
 		`{"apiVersion": "printscan/v2", "name": "x"}`,
 		`{"apiVersion": "printscan/v1", "name": ""}`,
 		`{"apiVersion": "printscan/v1", "name": "tab\there"}`,
+		`{"apiVersion": "printscan/v1", "name": "-h"}`,
+		`{"apiVersion": "printscan/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "a\u0007b"}}}`,
+		`{"apiVersion": "printscan/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "` + strings.Repeat("9", 127) + `"}}}`,
 		`{"apiVersion": "printscan/v1"}`,
 		`{"apiVersion": "printscan/v1", "name": "x", "licenses": {"acceptedEulas": [{"id": "a", "version": "1"}, {"id": "a", "version": "1"}]}}`,
 	} {
@@ -269,7 +272,33 @@ func TestRequired(t *testing.T) {
 		t.Errorf("Decision.device must be required and nullable: %v", dec)
 	}
 	if got := prop(t, def(t, as, "Job"), "createdAt"); !reflect.DeepEqual(got, obj{"type": "string", "format": "date-time"}) {
-		t.Errorf("time.Time reflected as %v (A11)", got)
+		t.Errorf("time.Time reflected as %v, want a date-time string", got)
+	}
+}
+
+// TestEULADef checks the licence text DTO of GET /eulas/{id}: every field
+// required, text and textSha256 nullable strings, state an enum.
+func TestEULADef(t *testing.T) {
+	defs := decode(t, API())["$defs"].(obj)
+	d, ok := defs["EULA"].(obj)
+	if !ok {
+		t.Fatal("api schema has no EULA def")
+	}
+	want := []string{"id", "version", "title", "vendor", "summary", "state", "message", "textSha256", "text"}
+	if got := strs(d["required"]); !reflect.DeepEqual(got, want) {
+		t.Errorf("EULA required %v, want %v", got, want)
+	}
+	for _, p := range []string{"text", "textSha256"} {
+		if s := prop(t, d, p); !nullable(s) || !reflect.DeepEqual(s["oneOf"].([]any)[0], obj{"type": "string"}) {
+			t.Errorf("EULA.%s is not a nullable string: %v", p, s)
+		}
+	}
+	if got := strs(prop(t, d, "state")["enum"]); !reflect.DeepEqual(got, []string{"pending", "available", "failed"}) {
+		t.Errorf("EULA.state enum %v", got)
+	}
+	setup := defs["SetupEULA"].(obj)
+	if _, ok := setup["properties"].(obj)["url"]; ok {
+		t.Error("SetupEULA still has url")
 	}
 }
 
@@ -290,8 +319,10 @@ func TestNullableSet(t *testing.T) {
 	want := []string{
 		"ConfigResponse.config", "ConfigResponse.lastGood",
 		"Decision.device",
+		"EULA.text", "EULA.textSha256",
 		"Scan.error",
 		"Setup.decision", "Setup.inventory",
+		"SetupEULA.textSha256",
 		"StatusDevice.decision", "StatusDevice.inventory",
 	}
 	if !reflect.DeepEqual(got, want) {

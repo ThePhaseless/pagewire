@@ -103,6 +103,11 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 	if usbMode && p.USBResource == "" {
 		return nil, nil, fmt.Errorf("spec mode %s %w", spec.Mode, ErrNoUSBResource)
 	}
+	// ippeveprinter takes the name as its last argument: one starting with -
+	// would be read as an option. Config validation refuses it too.
+	if spec.Mode == device.ModeSimulated && strings.HasPrefix(spec.Name, "-") {
+		return nil, nil, fmt.Errorf("render: printer name %q must not start with -", spec.Name)
+	}
 	cat := catalog.Default()
 	deviceImage := ImageRef(p.Registry, p.Tag, "printscan-device", p.Overrides)
 
@@ -155,6 +160,13 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 		res: [4]string{"10m", "32Mi", "200m", "128Mi"},
 	}
 
+	// The agent stages EULA texts on the blob volume, so the wizard and
+	// Settings can show a licence before it is accepted.
+	if usbMode && p.BlobPVC != "" {
+		agent.args = append(agent.args, "--blob-dir", "/blobs")
+		agent.mounts = append(agent.mounts, mount{"blobs", "/blobs", false})
+	}
+
 	var printer catalog.Printer
 	if spec.Printer != "" {
 		var ok bool
@@ -174,7 +186,7 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 	case device.ModeUSB:
 		inits = append(inits, agent)
 		if len(spec.Blobs) > 0 {
-			inits = append(inits, fetchBlobs(spec.Blobs, p.SelfImage))
+			inits = append(inits, fetchBlobs(spec, p.SelfImage))
 		}
 		if spec.Printer == "ipp-usb" || spec.Scanner == "ipp-usb" {
 			mains = append(mains, ctr{
@@ -281,14 +293,16 @@ func Render(spec *device.Spec, p Params) (*appsv1ac.DeploymentApplyConfiguration
 	return deploy, cm, nil
 }
 
-func fetchBlobs(blobs []device.BlobRef, image string) ctr {
+func fetchBlobs(spec *device.Spec, image string) ctr {
 	args := []string{"agent", "fetch", "--dir", "/blobs", "--status-out", device.BlobStatusFile}
-	for _, b := range blobs {
-		ref := b.ID + "@" + b.Version
-		args = append(args, "--blob", ref, "--accept", ref)
+	for _, b := range spec.Blobs {
+		args = append(args, "--blob", b.ID+"@"+b.Version)
 		if b.Optional {
 			args = append(args, "--optional", b.ID)
 		}
+	}
+	for _, e := range spec.AcceptedEULAs {
+		args = append(args, "--accept", e.ID+"@"+e.Version+"@"+e.TextSHA256)
 	}
 	return ctr{
 		name: "fetch-blobs", image: image, uid: uidNonroot,
@@ -397,9 +411,9 @@ func volume(name, blobPVC string) *corev1ac.VolumeApplyConfiguration {
 	}
 }
 
-const ippUSBConf = `[network]
-  http-min-port = 60000
-  http-max-port = 60009
+var ippUSBConf = `[network]
+  http-min-port = ` + strconv.Itoa(device.IPPUSBMinPort) + `
+  http-max-port = ` + strconv.Itoa(device.IPPUSBMaxPort) + `
   dns-sd = enable
   interface = all
   ipv6 = enable

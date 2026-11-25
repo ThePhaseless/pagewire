@@ -37,6 +37,33 @@ type BlobRef struct {
 	Optional bool `json:"optional"`
 }
 
+// EULAText states.
+const (
+	EULAPending   = "pending"
+	EULAAvailable = "available"
+	EULAFailed    = "failed"
+)
+
+// EULARef names one EULA version. TextSHA256 is the lowercase hex sha256 of
+// the accepted licence text, or "" where no acceptance is meant (staging).
+type EULARef struct {
+	ID         string `json:"id"`
+	Version    string `json:"version"`
+	TextSHA256 string `json:"textSha256"`
+}
+
+// EULAText is the agent's staging result for one EULA: the licence text read
+// from the verified vendor archive. Text and TextSHA256 are set only when
+// State is EULAAvailable.
+type EULAText struct {
+	ID         string `json:"id"`
+	Version    string `json:"version"`
+	TextSHA256 string `json:"textSha256"`
+	Text       string `json:"text"`
+	State      string `json:"state"` // EULAPending | EULAAvailable | EULAFailed
+	Message    string `json:"message"`
+}
+
 // QueueSpec is the PAPPL queue the agent reconciles on every cycle.
 type QueueSpec struct {
 	Name     string `json:"name"`
@@ -82,6 +109,7 @@ type AgentReport struct {
 	Services      []DNSSDService `json:"services"`
 	Queue         *QueueResult   `json:"queue"`
 	Blobs         []BlobStatus   `json:"blobs"` // in k8s read from --blob-status
+	EULAs         []EULAText     `json:"eulas"` // one per DesiredState.StageEULAs ref
 }
 
 // DesiredState is the 200 response to an AgentReport (401 bad token, 400 malformed).
@@ -92,6 +120,9 @@ type DesiredState struct {
 	// queue changes need no pod roll.
 	Queue  *QueueSpec `json:"queue"`
 	Browse []string   `json:"browse"` // service types to browse; the controller always sends BrowseTypes
+	// StageEULAs are the EULAs whose text the agent stages and reports, sorted
+	// by id so an unchanged list compares equal. TextSHA256 is always "".
+	StageEULAs []EULARef `json:"stageEulas"`
 }
 
 // ReportFunc is the controller's agent-report handler, which the sim backend

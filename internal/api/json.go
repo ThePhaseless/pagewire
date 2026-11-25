@@ -12,7 +12,7 @@ import (
 )
 
 // encodeJSON is the one JSON encoder of every response and SSE payload: it
-// marshals normalize(v), so arrays are never null (decision 27).
+// marshals normalize(v), so arrays are never null.
 func encodeJSON(v any) ([]byte, error) {
 	return json.Marshal(normalize(v))
 }
@@ -121,6 +121,7 @@ func writeEncoded(w http.ResponseWriter, status int, contentType string, v any) 
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(b) //nolint:gosec // JSON body with a JSON content type and nosniff, not HTML
 }

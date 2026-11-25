@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,12 +39,16 @@ func withHash(s *device.Spec) *device.Spec {
 	return s
 }
 
+// goldenTextSHA is a synthetic accepted licence text sha256.
+const goldenTextSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 var goldenSpecs = map[string]*device.Spec{
 	"probe":  withHash(&device.Spec{Mode: device.ModeProbe}),
 	"ippusb": withHash(&device.Spec{Mode: device.ModeUSB, Printer: "ipp-usb", Scanner: "ipp-usb"}),
 	"hplip-airsane-blob": withHash(&device.Spec{
 		Mode: device.ModeUSB, Printer: "hplip", Scanner: "airsane", SaneBackends: []string{"hpaio"},
-		Blobs: []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}},
+		Blobs:         []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}},
+		AcceptedEULAs: []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: goldenTextSHA}},
 	}),
 	"simulated": withHash(&device.Spec{
 		Mode: device.ModeSimulated, Printer: "sim", Scanner: "sim",
@@ -217,6 +222,49 @@ func TestSecurityAndUSB(t *testing.T) {
 	}
 }
 
+// TestNoBlobPVC: without a blob PVC the agent stages nothing and mounts no
+// blob volume.
+func TestNoBlobPVC(t *testing.T) {
+	p := goldenParams()
+	p.BlobPVC = ""
+	for _, name := range []string{"probe", "ippusb", "simulated"} {
+		d, _ := render(t, goldenSpecs[name], p)
+		a := find(t, d, "agent")
+		if slices.Contains(a.Args, "--blob-dir") {
+			t.Errorf("%s agent args %v", name, a.Args)
+		}
+		for _, v := range d.Spec.Template.Spec.Volumes {
+			if v.Name == "blobs" {
+				t.Errorf("%s: blobs volume without a PVC", name)
+			}
+		}
+	}
+}
+
+func TestSimulatedNameIsNotAnOption(t *testing.T) {
+	spec := *goldenSpecs["simulated"]
+	spec.Name = "-h"
+	if _, _, err := Render(&spec, goldenParams()); err == nil || !strings.Contains(err.Error(), "name") {
+		t.Fatalf("Render with name %q: %v, want an error naming the name", spec.Name, err)
+	}
+}
+
+func TestIPPUSBPortRange(t *testing.T) {
+	_, cm := render(t, goldenSpecs["ippusb"], goldenParams())
+	conf := cm.Data["ipp-usb.conf"]
+	for _, want := range []string{
+		"http-min-port = " + strconv.Itoa(device.IPPUSBMinPort),
+		"http-max-port = " + strconv.Itoa(device.IPPUSBMaxPort),
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("ipp-usb.conf lacks %q:\n%s", want, conf)
+		}
+	}
+	if device.IPPUSBMinPort != 60000 || device.IPPUSBMaxPort != 60009 {
+		t.Errorf("ipp-usb ports %d-%d, want 60000-60009", device.IPPUSBMinPort, device.IPPUSBMaxPort)
+	}
+}
+
 func TestNoUSBResource(t *testing.T) {
 	p := goldenParams()
 	p.USBResource = ""
@@ -244,6 +292,14 @@ func TestArgs(t *testing.T) {
 		d, _ := render(t, s, goldenParams())
 		a := find(t, d, "agent")
 		want := append([]string{"agent", "run"}, fixed...)
+		if name != "simulated" {
+			want = append(want, "--blob-dir", "/blobs")
+			if !slices.ContainsFunc(a.VolumeMounts, func(m corev1.VolumeMount) bool {
+				return m.Name == "blobs" && m.MountPath == "/blobs" && !m.ReadOnly
+			}) {
+				t.Errorf("%s agent: no writable /blobs: %+v", name, a.VolumeMounts)
+			}
+		}
 		if name == "hplip-airsane-blob" {
 			want = append(want, "--pappl-url", "ipp://127.0.0.1:8002/ipp/system")
 		}
@@ -281,7 +337,8 @@ func TestArgs(t *testing.T) {
 	fb := find(t, d, "fetch-blobs")
 	wantFB := []string{
 		"agent", "fetch", "--dir", "/blobs", "--status-out", "/run/printscan/blobs.json",
-		"--blob", "hplip-plugin@3.24.4", "--accept", "hplip-plugin@3.24.4", "--optional", "hplip-plugin",
+		"--blob", "hplip-plugin@3.24.4", "--optional", "hplip-plugin",
+		"--accept", "hplip-plugin@3.24.4@" + goldenTextSHA,
 	}
 	if !slices.Equal(fb.Args, wantFB) {
 		t.Errorf("fetch-blobs args %v", fb.Args)

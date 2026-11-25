@@ -11,6 +11,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path"
 	"slices"
 	"strconv"
@@ -61,6 +62,7 @@ func tooLarge(w http.ResponseWriter, limitMiB int) {
 
 // print accepts one document: an options part, then a file part.
 func (s *server) print(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w, s.d.printReadTimeout)
 	limitMiB := s.d.Config().Print.MaxUploadMiB
 	body := &limitedBody{r: http.MaxBytesReader(w, r.Body, int64(limitMiB)<<20)}
 
@@ -122,15 +124,46 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		printerError(w, err)
 		return
 	}
-	if err := printing.Negotiate(format, formats); err != nil {
+	target, err := printing.Negotiate(format, formats)
+	if err != nil {
 		printerError(w, err)
 		return
 	}
 
+	// A slot for the job's watcher, taken before any work and given back
+	// unless the watcher starts.
+	select {
+	case s.watchers <- struct{}{}:
+	default:
+		writeProblem(w, http.StatusTooManyRequests, "too-many-jobs",
+			fmt.Sprintf("printscan is already following %d print jobs; try again when one finishes", maxJobWatchers))
+		return
+	}
+	watching := false
+	defer func() {
+		if !watching {
+			<-s.watchers
+		}
+	}()
+
 	// shortcut: parts after file are never read (the job is already streaming by then);
 	// reject them only if a client ever relies on sending more.
+	doc := io.MultiReader(bytes.NewReader(head), file)
+	if target != format {
+		converted, cleanup, err := convertUpload(doc, format, target)
+		defer cleanup()
+		if err != nil {
+			if body.tooLarge(err) {
+				tooLarge(w, limitMiB)
+				return
+			}
+			conversionError(w, err)
+			return
+		}
+		doc = converted
+	}
 	name := jobName(file.FileName())
-	id, err := s.d.Printer.Submit(r.Context(), name, userName(r), format, io.MultiReader(bytes.NewReader(head), file), opts)
+	id, err := s.d.Printer.Submit(r.Context(), name, userName(r), target, doc, opts)
 	if err != nil {
 		if body.tooLarge(err) {
 			tooLarge(w, limitMiB)
@@ -144,8 +177,87 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		job = apitypes.Job{ID: id, Name: name, State: "pending", Reasons: []string{}, CreatedAt: time.Now()}
 	}
 	s.hub.Publish(apitypes.EventJob, job)
-	go s.watchJob(job)
+	watching = true
+	go func() {
+		defer func() { <-s.watchers }()
+		s.watchJob(job)
+	}()
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+// convertUpload spools the upload to a temp file (disk, never memory),
+// converts it into a second one and returns that, rewound. cleanup removes
+// both; call it even on error.
+func convertUpload(doc io.Reader, from, to string) (io.Reader, func(), error) {
+	var files []*os.File
+	cleanup := func() {
+		for _, f := range files {
+			_ = f.Close()
+			if err := os.Remove(f.Name()); err != nil {
+				slog.Warn("cannot remove print spool file", "path", f.Name(), "err", err)
+			}
+		}
+	}
+	temp := func() (*os.File, error) {
+		f, err := os.CreateTemp("", "printscan-print-*")
+		if err == nil {
+			files = append(files, f)
+		}
+		return f, err
+	}
+	in, err := temp()
+	if err != nil {
+		return nil, cleanup, err
+	}
+	if _, err := io.Copy(in, doc); err != nil {
+		return nil, cleanup, &uploadError{err}
+	}
+	out, err := temp()
+	if err != nil {
+		return nil, cleanup, err
+	}
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
+		return nil, cleanup, err
+	}
+	if err := printing.Convert(out, in, from, to); err != nil {
+		return nil, cleanup, err
+	}
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
+		return nil, cleanup, err
+	}
+	return out, cleanup, nil
+}
+
+// uploadError is a failure reading the upload while spooling it.
+type uploadError struct{ err error }
+
+func (e *uploadError) Error() string { return "read upload: " + e.err.Error() }
+func (e *uploadError) Unwrap() error { return e.err }
+
+// unsupportedJPEGDetail is the 415 detail for a JPEG the PDF writer cannot embed.
+const unsupportedJPEGDetail = "This JPEG uses a colour format the printer path cannot embed. Save it as an RGB JPEG or a PDF."
+
+// conversionError maps a convertUpload error to its response.
+func conversionError(w http.ResponseWriter, err error) {
+	var invalid *printing.InvalidImageError
+	var large *printing.ImageTooLargeError
+	var upload *uploadError
+	switch {
+	case errors.As(err, &upload):
+		writeProblem(w, http.StatusBadRequest, "bad-request", "the upload could not be read")
+	case errors.Is(err, printing.ErrUnsupportedJPEG):
+		writeProblem(w, http.StatusUnsupportedMediaType, "unsupported-format", unsupportedJPEGDetail)
+	case errors.As(err, &invalid):
+		writeProblem(w, http.StatusBadRequest, "invalid-image", "the file is damaged or not the image it claims to be")
+	case errors.As(err, &large):
+		writeProblem(w, http.StatusRequestEntityTooLarge, "image-too-large",
+			fmt.Sprintf("the image is %d x %d pixels, too large to convert; scale it down, or save it as a JPEG or a PDF", large.Width, large.Height))
+	case errors.Is(err, printing.ErrBusy):
+		writeProblem(w, http.StatusTooManyRequests, "too-many-jobs", "another image is being converted; try again in a moment")
+	default:
+		slog.Error("print conversion", "err", err)
+		writeProblem(w, http.StatusInternalServerError, "internal-error", "the file could not be converted; the server log has the details")
+	}
 }
 
 func validateOptions(o apitypes.PrintOptions) []config.FieldError {
@@ -258,7 +370,7 @@ func printerError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusServiceUnavailable, "printer-unavailable", "no printer is available")
 	default:
 		slog.Warn("printer request failed", "err", err)
-		writeProblem(w, http.StatusServiceUnavailable, "printer-unavailable", err.Error())
+		writeProblem(w, http.StatusServiceUnavailable, "printer-unavailable", "the printer did not answer; the server log has the details")
 	}
 }
 

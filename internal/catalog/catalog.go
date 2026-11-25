@@ -49,12 +49,19 @@ type Scanner struct {
 
 // EULAInfo is the metadata of one vendor licence.
 type EULAInfo struct {
-	ID      string `yaml:"id"`
-	Version string `yaml:"version"`
-	Vendor  string `yaml:"vendor"`
-	Title   string `yaml:"title"`
-	URL     string `yaml:"url"`
-	Summary string `yaml:"summary"`
+	ID      string   `yaml:"id"`
+	Version string   `yaml:"version"`
+	Vendor  string   `yaml:"vendor"`
+	Title   string   `yaml:"title"`
+	Text    TextFile `yaml:"text"`
+	Summary string   `yaml:"summary"`
+}
+
+// TextFile locates a EULA's text: the file Path inside the payload of the
+// blob Blob, which the agent downloads and verifies before acceptance.
+type TextFile struct {
+	Blob string `yaml:"blob"`
+	Path string `yaml:"path"`
 }
 
 // Blob is a proprietary vendor download, fetched only by agent fetch.

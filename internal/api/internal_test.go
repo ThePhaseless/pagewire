@@ -13,9 +13,15 @@ import (
 type tokenSource struct {
 	token string
 	err   error
+	calls *int
 }
 
-func (s tokenSource) AgentToken(context.Context) (string, error) { return s.token, s.err }
+func (s tokenSource) AgentToken(context.Context) (string, error) {
+	if s.calls != nil {
+		*s.calls++
+	}
+	return s.token, s.err
+}
 
 func agentEnv(t *testing.T, tokens device.AgentTokenSource) (*testEnv, *[]device.AgentReport) {
 	t.Helper()
@@ -62,6 +68,21 @@ func TestAgentReportAuth(t *testing.T) {
 				t.Fatal("report reached the controller")
 			}
 		})
+	}
+}
+
+func TestAgentHeaderCheckedBeforeToken(t *testing.T) {
+	calls := 0
+	e, _ := agentEnv(t, tokenSource{token: "secret", calls: &calls})
+	for _, auth := range []string{"", "Bearer", "Basic secret", "Bearer "} {
+		wantProblem(t, report(e, auth, `{}`), 401, "unauthorized")
+	}
+	if calls != 0 {
+		t.Fatalf("token fetched %d times for requests without a bearer token", calls)
+	}
+	wantProblem(t, report(e, "Bearer wrong", `{}`), 401, "unauthorized")
+	if calls != 1 {
+		t.Fatalf("token fetched %d times, want 1", calls)
 	}
 }
 

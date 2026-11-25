@@ -79,7 +79,7 @@ func (s *server) writeStoreError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusUnprocessableEntity, "unsupported-yaml", err.Error())
 	default:
 		slog.Error("config storage", "err", err)
-		writeProblem(w, http.StatusInternalServerError, "storage-error", err.Error())
+		writeProblem(w, http.StatusInternalServerError, "storage-error", "the config file could not be read or written; the server log has the details")
 	}
 }
 
@@ -108,6 +108,7 @@ func (s *server) getConfigRaw(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
 	h.Set("Content-Type", "text/yaml; charset=utf-8")
 	h.Set("Content-Disposition", `attachment; filename="printscan.yaml"`)
+	h.Set("Cache-Control", "no-store")
 	h.Set("ETag", quote(etag))
 	_, _ = w.Write(raw)
 }
@@ -115,6 +116,7 @@ func (s *server) getConfigRaw(w http.ResponseWriter, _ *http.Request) {
 // putConfig creates the file (If-None-Match: *) or replaces it (If-Match).
 // The body is a config object as JSON; the file is written as YAML.
 func (s *server) putConfig(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w, s.d.readTimeout)
 	inm, im := r.Header.Get("If-None-Match"), r.Header.Get("If-Match")
 	if inm == "" && im == "" {
 		writeProblem(w, http.StatusPreconditionRequired, "precondition-required", "send If-None-Match: * to create or If-Match to replace")
@@ -169,6 +171,7 @@ func jsonToYAML(body []byte) ([]byte, error) {
 
 // patchConfig applies an RFC 7396 merge patch to the file's YAML.
 func (s *server) patchConfig(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w, s.d.readTimeout)
 	im := r.Header.Get("If-Match")
 	if im == "" {
 		writeProblem(w, http.StatusPreconditionRequired, "precondition-required", "send If-Match with the file's ETag")

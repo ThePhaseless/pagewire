@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createEventStore, type EventStore, EventsContext } from "../api/events";
 import { EulaAccept } from "../components/EulaAccept";
-import type { Config, Setup as SetupDTO, SetupEULA, Status } from "../gen/api";
+import type { Config, EULA, Setup as SetupDTO, SetupEULA, Status } from "../gen/api";
 import { mediaForLanguage, Setup } from "./Setup";
 
-// The Status the controller returns before any input (plan: controller rules, "Initial Status").
+// The Status the controller returns before any input: no config, no device, nothing reconciled.
 const initialStatus: Status = {
   config: {
     state: "missing",
@@ -29,6 +29,7 @@ const initialStatus: Status = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -40,7 +41,7 @@ const initialStatus: Status = {
 const hpDevice = {
   vendorId: "03f0",
   productId: "042a",
-  serial: "000000000QH7B4KQPR1a",
+  serial: "FAKE0001",
   manufacturer: "Hewlett-Packard",
   product: "HP LaserJet Professional M1132 MFP",
   bus: 1,
@@ -74,14 +75,32 @@ const simulatedDecision = {
   rule: "simulated",
   device: null,
 };
+const SHA_A = "a".repeat(64);
+const SHA_B = "b".repeat(64);
+const LICENCE = "HP PLUG-IN LICENSE AGREEMENT\nRead this carefully.";
+// What GET /eulas/hplip-plugin answers; tests replace it to walk pending, failed and changed texts.
+let eulaResponses: (EULA | Promise<EULA>)[] = [];
+const eulaOf = (over: Partial<EULA> = {}): EULA => ({
+  id: "hplip-plugin",
+  version: "3.24.4",
+  title: "HP Linux Imaging and Printing proprietary plug-in",
+  vendor: "HP",
+  summary: "Needed by some HP lasers for firmware upload and by some HP scanners.",
+  state: "available",
+  message: "",
+  textSha256: SHA_A,
+  text: LICENCE,
+  ...over,
+});
 const hplipEula: SetupEULA = {
   id: "hplip-plugin",
   version: "3.24.4",
   title: "HP Linux Imaging and Printing proprietary plug-in",
   vendor: "HP",
-  url: "https://developers.hp.com/hp-linux-imaging-and-printing/plugins",
   summary: "Needed by some HP lasers for firmware upload and by some HP scanners.",
   required: false,
+  state: "available",
+  textSha256: SHA_A,
 };
 
 function suggested(name: string, mode: "usb" | "simulated"): Config {
@@ -171,6 +190,10 @@ function mockServer(setup: () => SetupDTO) {
       body: init.body ? JSON.parse(String(init.body)) : undefined,
     });
     if (url.endsWith("/api/v1/setup")) return json(setup());
+    if (url.endsWith("/api/v1/eulas/hplip-plugin"))
+      return json(
+        await (eulaResponses.length > 1 ? eulaResponses.shift() : (eulaResponses[0] ?? eulaOf())),
+      );
     if (url.endsWith("/api/v1/config") && method === "PUT") return putResponse();
     return json(
       { type: "about:blank", title: "Not found", status: 404, detail: "", errors: [] },
@@ -200,6 +223,7 @@ const press = (name: string | RegExp) => {
 const heading = (name: string | RegExp) => screen.findByRole("heading", { level: 1, name });
 
 beforeEach(() => {
+  eulaResponses = [];
   window.history.replaceState(null, "", "/setup");
   putResponse = () =>
     json(
@@ -230,36 +254,103 @@ describe("mediaForLanguage", () => {
 });
 
 describe("EulaAccept", () => {
-  test("starts unchecked, names the licence, and links to it in a new tab", () => {
-    const onChange = mock((_: boolean) => {});
-    render(<EulaAccept eula={hplipEula} isAccepted={false} onChange={onChange} />);
+  const renderEula = (accepted: string | undefined, onChange = mock((_: string | null) => {})) => {
+    mockServer(() => hpSetup);
+    render(<EulaAccept eula={hplipEula} accepted={accepted} onChange={onChange} pollMs={5} />);
+    return onChange;
+  };
+
+  test("shows the exact text in a focusable region and accepts it with its sha256", async () => {
+    const onChange = renderEula(undefined);
+    const region = await screen.findByRole("region", {
+      name: "HP Linux Imaging and Printing proprietary plug-in licence text",
+    });
+    expect(region.textContent).toBe(LICENCE);
+    expect(region.getAttribute("tabindex")).toBe("0");
     const box = screen.getByRole("checkbox", {
-      name: "I have read and accept the HP Linux Imaging and Printing proprietary plug-in licence",
+      name: "I accept the HP Linux Imaging and Printing proprietary plug-in licence shown above, version 3.24.4",
     }) as HTMLInputElement;
     expect(box.checked).toBe(false);
-    const link = screen.getByRole("link", { name: /opens in a new tab/ });
-    expect(link.getAttribute("href")).toBe(hplipEula.url);
-    expect(link.getAttribute("target")).toBe("_blank");
-    expect(document.body.textContent).toContain("Nothing is downloaded otherwise");
     expect(document.body.textContent).toContain("HP, version 3.24.4");
+    expect(document.body.textContent).toContain("only after you accept");
     fireEvent.click(box);
-    expect(onChange).toHaveBeenCalledWith(true);
+    expect(onChange).toHaveBeenCalledWith(SHA_A);
   });
 
-  test("an accepted licence can be revoked", () => {
-    const onChange = mock((_: boolean) => {});
+  test("pending shows progress and asks again until the text is available", async () => {
+    // The second answer waits until the pending state has been checked.
+    let release!: () => void;
+    const second = new Promise<EULA>((r) => {
+      release = () => r(eulaOf());
+    });
+    eulaResponses = [eulaOf({ state: "pending", text: null, textSha256: null }), second];
+    renderEula(undefined);
+    expect(await screen.findByRole("progressbar")).toBeTruthy();
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    release();
+    await screen.findByRole("region", { name: /licence text/ });
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(false);
+    expect(calls.filter((c) => c.url.endsWith("/eulas/hplip-plugin")).length).toBe(2);
+  });
+
+  test("failed shows the agent's message and cannot be accepted", async () => {
+    eulaResponses = [
+      eulaOf({
+        state: "failed",
+        message: "download: no route to host",
+        text: null,
+        textSha256: null,
+      }),
+    ];
+    renderEula(undefined);
+    await screen.findByText("download: no route to host");
+    expect(document.body.textContent).toContain("cannot install HP Linux Imaging");
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    // Try again asks once more; this time the agent has the text.
+    eulaResponses = [eulaOf()];
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("region", { name: /licence text/ });
+  });
+
+  test("after a failure it asks again on its own and shows the text once the agent has it", async () => {
+    let release!: () => void;
+    const second = new Promise<EULA>((r) => {
+      release = () => r(eulaOf());
+    });
+    eulaResponses = [
+      eulaOf({ state: "failed", message: "download: timeout", text: null, textSha256: null }),
+      second,
+    ];
+    mockServer(() => hpSetup);
     render(
-      <EulaAccept
-        eula={{ ...hplipEula, url: "javascript:alert(1)" }}
-        isAccepted
-        onChange={onChange}
-      />,
+      <EulaAccept eula={hplipEula} accepted={undefined} onChange={() => {}} failedPollMs={20} />,
     );
+    await screen.findByText("download: timeout");
+    release();
+    await screen.findByRole("region", { name: /licence text/ });
+    expect(calls.filter((c) => c.url.endsWith("/eulas/hplip-plugin")).length).toBe(2);
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(false);
+  });
+
+  test("a changed text asks for acceptance again and records the new sha256", async () => {
+    eulaResponses = [eulaOf({ textSha256: SHA_B, text: "Version two." })];
+    const onChange = renderEula(SHA_A);
+    await screen.findByText(/licence text has changed since you accepted it/);
+    const box = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    expect(onChange).toHaveBeenCalledWith(SHA_B);
+  });
+
+  test("an accepted licence stays accepted while the text is pending, and can be revoked", async () => {
+    eulaResponses = [eulaOf({ state: "pending", text: null, textSha256: null })];
+    const onChange = renderEula(SHA_A);
+    await screen.findByRole("progressbar");
     const box = screen.getByRole("checkbox") as HTMLInputElement;
     expect(box.checked).toBe(true);
-    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.queryByText(/has changed/)).toBeNull();
     fireEvent.click(box);
-    expect(onChange).toHaveBeenCalledWith(false);
+    expect(onChange).toHaveBeenCalledWith(null);
   });
 });
 
@@ -271,6 +362,11 @@ describe("Setup wizard", () => {
     expect(await screen.findByText("HP LaserJet Professional M1132 MFP")).toBeTruthy();
     expect(document.body.textContent).toContain("USB 03f0:042a");
     expect(document.body.textContent).toContain("HP (HPLIP)");
+    // The matched rule is jargon: it sits in a closed disclosure.
+    expect(
+      screen.getByRole("button", { name: "Technical details" }).getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeTruthy();
     expect(screen.getByRole("list", { name: "Setup steps" })).toBeTruthy();
     expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(
       "Find the printer",
@@ -279,11 +375,20 @@ describe("Setup wizard", () => {
     press("Next");
     await heading("Name and location");
     expect(window.location.hash).toBe("#name");
+    expect(screen.getByRole("heading", { level: 1 }).getAttribute("data-document-title")).toBe(
+      "Step 2 of 5: Name and location",
+    );
     const name = screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement;
     expect(name.value).toBe("HP LaserJet Professional M1132 MFP");
+    // A visible marker says the field is required.
+    expect(name.closest(".ui-field")?.querySelector(".ui-required")?.textContent).toContain(
+      "required",
+    );
     fireEvent.change(name, { target: { value: "" } });
     press("Next");
     expect(await screen.findByText(/Enter 1 to 63 characters/)).toBeTruthy();
+    // Next moves focus to the first field with an error.
+    await waitFor(() => expect(document.activeElement).toBe(name));
     expect(window.location.hash).toBe("#name");
     fireEvent.change(name, { target: { value: "Hall printer" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Location" }), {
@@ -292,7 +397,12 @@ describe("Setup wizard", () => {
     press("Next");
 
     await heading("Driver and licences");
-    expect(document.body.textContent).toContain("“hp”");
+    expect(screen.getByRole("button", { name: /Printer driver/ }).textContent).toContain(
+      "Automatic: HP (HPLIP)",
+    );
+    expect((await screen.findByRole("region", { name: /licence text/ })).textContent).toContain(
+      "HP PLUG-IN LICENSE AGREEMENT",
+    );
     const box = screen.getByRole("checkbox", {
       name: /accept the HP Linux Imaging/,
     }) as HTMLInputElement;
@@ -324,6 +434,10 @@ describe("Setup wizard", () => {
     await heading("Review and finish");
     expect(document.body.textContent).toContain("Hall printer");
     press("Finish setup");
+    // No pending state on a button that unmounts: its announcement would outlive it.
+    expect(
+      screen.queryByRole("button", { name: "Finish setup" })?.hasAttribute("data-pending"),
+    ).not.toBe(true);
 
     await heading("Starting the printer");
     const put = calls.find((c) => c.method === "PUT");
@@ -334,7 +448,9 @@ describe("Setup wizard", () => {
     expect(body.device).toEqual({ mode: "usb", driver: "auto", scanner: "auto" });
     expect(body.print.defaults.media).toBe("iso_a4_210x297mm");
     expect(body.scan.defaults.resolution).toBe(600);
-    expect(body.licenses.acceptedEulas).toEqual([{ id: "hplip-plugin", version: "3.24.4" }]);
+    expect(body.licenses.acceptedEulas).toEqual([
+      { id: "hplip-plugin", version: "3.24.4", textSha256: SHA_A },
+    ]);
 
     FakeEventSource.last.status({
       ...initialStatus,
@@ -516,6 +632,13 @@ describe("Setup wizard", () => {
     press("Finish setup");
     expect((await screen.findByRole("alert")).textContent).toContain("/name: too long");
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Review and finish");
+  });
+
+  test("a simulated inventory is labelled simulated", async () => {
+    mockServer(() => ({ ...hpSetup, inventory: { ...hpInventory, simulated: true } }));
+    mount();
+    await heading("Find the printer");
+    expect(await screen.findByText("HP LaserJet Professional M1132 MFP (simulated)")).toBeTruthy();
   });
 
   test("a reload on a later step starts again at Detect", async () => {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
+	"github.com/ThePhaseless/printscan/internal/blobs"
 	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
 	"github.com/ThePhaseless/printscan/internal/catalog"
 	"github.com/ThePhaseless/printscan/internal/config"
@@ -95,6 +96,12 @@ type fetchEnv struct {
 	version string
 }
 
+// licenseSHA is the text sha256 of the synthetic archive's licence.
+var licenseSHA = blobs.TextSHA256([]byte(blobtest.License))
+
+// accept is the --accept value for the catalog EULA the env's blobs use.
+func (e fetchEnv) accept() string { return "hplip-plugin@" + e.version + "@" + licenseSHA }
+
 // newFetchEnv serves two synthetic blobs that both use the catalog's HPLIP EULA
 // and format: "good" verifies and installs, "bad" 404s at the vendor.
 func newFetchEnv(t *testing.T) fetchEnv {
@@ -149,7 +156,7 @@ func TestFetch(t *testing.T) {
 	t.Run("optional blob fails: exit 0, every status written", func(t *testing.T) {
 		e := newFetchEnv(t)
 		e.cfg.Blobs = []string{"good@" + e.version, "bad@" + e.version}
-		e.cfg.Accept = e.cfg.Blobs
+		e.cfg.Accept = []string{e.accept()}
 		e.cfg.Optional = []string{"bad"}
 		if err := Fetch(context.Background(), e.cfg); err != nil {
 			t.Fatalf("Fetch = %v, want nil", err)
@@ -165,7 +172,7 @@ func TestFetch(t *testing.T) {
 	t.Run("required blob fails: exit 1, every status written", func(t *testing.T) {
 		e := newFetchEnv(t)
 		e.cfg.Blobs = []string{"good@" + e.version, "bad@" + e.version}
-		e.cfg.Accept = e.cfg.Blobs
+		e.cfg.Accept = []string{e.accept()}
 		if err := Fetch(context.Background(), e.cfg); err == nil || !strings.Contains(err.Error(), "bad") {
 			t.Fatalf("Fetch = %v, want an error naming bad", err)
 		}
@@ -177,7 +184,7 @@ func TestFetch(t *testing.T) {
 	t.Run("not accepted is missing, not a failure", func(t *testing.T) {
 		e := newFetchEnv(t)
 		e.cfg.Blobs = []string{"good@" + e.version}
-		e.cfg.Accept = []string{"good@0.0.1"}
+		e.cfg.Accept = []string{"hplip-plugin@0.0.1@" + licenseSHA}
 		if err := Fetch(context.Background(), e.cfg); err != nil {
 			t.Fatalf("Fetch = %v", err)
 		}
@@ -208,6 +215,10 @@ func TestFetch(t *testing.T) {
 		for _, cfg := range []FetchConfig{
 			{Blobs: []string{"no-version"}},
 			{Accept: []string{"@1"}},
+			{Accept: []string{"hplip-plugin@3.24.4"}},
+			{Accept: []string{"hplip-plugin@3.24.4@" + strings.ToUpper(licenseSHA)}},
+			{Accept: []string{"hplip-plugin@3.24.4@abc"}},
+			{Accept: []string{"hplip-plugin@3.24.4@" + licenseSHA + "@x"}},
 			{Blobs: []string{"good@1"}, Optional: []string{"other"}},
 		} {
 			e := newFetchEnv(t)
@@ -245,7 +256,7 @@ func TestFetch(t *testing.T) {
 		}
 		e.cfg.Client = &http.Client{Transport: failTransport(t)}
 		e.cfg.Blobs = []string{"good@" + e.version}
-		e.cfg.Accept = e.cfg.Blobs
+		e.cfg.Accept = []string{e.accept()}
 		if err := Fetch(context.Background(), e.cfg); err != nil {
 			t.Fatalf("Fetch = %v", err)
 		}
@@ -408,7 +419,7 @@ func TestReportJSONShape(t *testing.T) {
 	start(t, NewCore("pod", device.Inventory{}), p.report)
 	r := waitReport(t, p.reports, "any", func(device.AgentReport) bool { return true })
 	raw, _ := json.Marshal(r)
-	for _, want := range []string{`"devices":[]`, `"services":[]`, `"blobs":[]`, `"devicePresent":true`, `"queue":null`} {
+	for _, want := range []string{`"devices":[]`, `"services":[]`, `"blobs":[]`, `"eulas":[]`, `"devicePresent":true`, `"queue":null`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("report JSON lacks %s: %s", want, raw)
 		}

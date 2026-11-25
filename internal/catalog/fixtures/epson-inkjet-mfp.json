@@ -3,7 +3,7 @@
     {
       "vendorId": "04b8",
       "productId": "1129",
-      "serial": "583848493131313530",
+      "serial": "FAKE0003",
       "manufacturer": "EPSON",
       "product": "ET-2720 Series",
       "bus": 1,
@@ -13,7 +13,7 @@
         {"class": 7, "subClass": 1, "protocol": 2},
         {"class": 8, "subClass": 6, "protocol": 80}
       ],
-      "deviceId": "MFG:EPSON;CMD:ESCPL2,BDC,D4,D4PX,ESCPR7,END4,GENEP,URF;MDL:ET-2720 Series;CLS:PRINTER;DES:EPSON ET-2720 Series;CID:EpsonRGB;FID:FXN,DPA,WFA,ETN,AFN,DAN,WRA;RID:20;DDS:022500;ELG:1000;SN:583848493131313530;URF:CP1,PQ4-5,OB9,OFU0,RS360,SRGB24,W8,DM3,IS1-7-6,V1.4,MT1-3-7-8-10-11-12;"
+      "deviceId": "MFG:EPSON;CMD:ESCPL2,BDC,D4,D4PX,ESCPR7,END4,GENEP,URF;MDL:ET-2720 Series;CLS:PRINTER;DES:EPSON ET-2720 Series;CID:EpsonRGB;FID:FXN,DPA,WFA,ETN,AFN,DAN,WRA;RID:20;DDS:022500;ELG:1000;SN:FAKE0003;URF:CP1,PQ4-5,OB9,OFU0,RS360,SRGB24,W8,DM3,IS1-7-6,V1.4,MT1-3-7-8-10-11-12;"
     }
   ],
   "probedAt": "2026-11-24T12:00:00Z",

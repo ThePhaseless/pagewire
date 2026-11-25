@@ -16,13 +16,14 @@ export const strings = {
     ready: "Ready",
     working: "Starting",
     problem: "Needs attention",
+    notFound: "Printer not found",
     idle: "Not set up",
     offline: "Offline",
   },
   banners: {
     offline: "Lost connection to printscan. Reconnecting…",
     invalidConfig:
-      "The config file has an error, so printscan keeps using the last working settings.",
+      "The settings file has an error, so printscan keeps using the last working settings.",
     invalidConfigLine: (line: number, message: string) => `Line ${line}: ${message}`,
     openSettings: "Open Settings",
   },
@@ -39,16 +40,25 @@ export const strings = {
     copied: "Copied",
   },
   loading: "Loading…",
+  technicalDetails: "Technical details",
+  /** After the label of a field that must be filled in. */
+  required: "(required)",
+  /** Shown wherever the device is probing and finds no printer it can use. */
+  plugInHint: "Plug the printer in with USB, switch it on and wait. This page updates by itself.",
   notFound: {
     title: "Page not found",
     body: "This address is not part of printscan.",
     home: "Go to Status",
   },
   problems: {
-    "config-missing": "There is no config file yet. Finish setup to create it.",
+    "config-missing": "There is no settings file yet. Finish setup to create it.",
     "storage-error":
       "printscan could not write to its data directory. Check that the volume is mounted and writable.",
     "multipart-order": "The upload was malformed. Reload the page and try again.",
+    "storage-full":
+      "Stored scans have reached the 1 GiB limit. Delete old scans under Recent scans to scan again.",
+    "invalid-image":
+      "This image is damaged, or its contents do not match its type. Open it and save it again, or save it as a PDF.",
     "network-error": "Could not reach printscan. Check your connection and try again.",
     "bad-response":
       "printscan sent a response this page does not understand. Reload the page; if it persists, the UI and server versions differ.",

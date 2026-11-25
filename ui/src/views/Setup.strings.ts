@@ -1,9 +1,14 @@
 // Copy for the setup wizard. Shared words (Back, Next, Loading) come from ../strings.
+import { strings } from "../strings";
+
+const stepOf = (n: number, total: number) => `Step ${n} of ${total}`;
 
 export const setupStrings = {
   title: "Set up printscan",
   progressLabel: "Setup steps",
-  stepOf: (n: number, total: number) => `Step ${n} of ${total}`,
+  stepOf,
+  /** The document title for a step: "Step 2 of 5: Name and location". */
+  stepTitle: (n: number, total: number, label: string) => `${stepOf(n, total)}: ${label}`,
   steps: {
     detect: "Find the printer",
     name: "Name and location",
@@ -31,7 +36,7 @@ export const setupStrings = {
     description: "printscan looks for a printer on USB and picks a driver for it.",
     searchingTitle: "Looking for the printer",
     waiting: "Waiting for the device to report.",
-    plugInHint: "Plug the printer in with USB, switch it on and wait. This page updates by itself.",
+    plugInHint: strings.plugInHint,
     devicesTitle: "USB devices",
     noDevices: "No USB devices found yet.",
     noPrinter:
@@ -39,6 +44,7 @@ export const setupStrings = {
     unnamedDevice: "Unnamed USB device",
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
+    simulatedName: (name: string) => `${name} (simulated)`,
     choiceTitle: "printscan will use",
     ruleLabel: "Matched rule",
     printerLabel: "Printer driver",
@@ -63,7 +69,7 @@ export const setupStrings = {
     description: "How this printer appears in printscan and to computers on your network.",
     nameLabel: "Name",
     nameHint:
-      "Shown at the top of every page. Printers driven by printscan, and the simulated printer, use it as their network name. Driverless (IPP over USB) printers and the scanner announce the device's own name.",
+      "Shown at the top of every page. Computers and phones may show the printer's own name instead.",
     nameInvalid: "Enter 1 to 63 characters, without line breaks or tabs.",
     locationLabel: "Location",
     locationHint: "Optional, for example Living room. Computers show it when you add the printer.",
@@ -71,12 +77,12 @@ export const setupStrings = {
   },
   driver: {
     description: "printscan picked a driver from the printer's USB details. You can override it.",
-    explained: (rule: string, printer: string, scanner: string) =>
-      `The rule “${rule}” matched this printer: printer driver ${printer}, scanner driver ${scanner}.`,
+    explained: (printer: string, scanner: string) =>
+      `printscan picked printer driver ${printer} and scanner driver ${scanner} for this printer.`,
     simulated: "The simulated printer and scanner need no driver.",
     driverLabel: "Printer driver",
     scannerLabel: "Scanner driver",
-    automatic: (family: string) => `Automatic (${family})`,
+    automatic: (family: string) => `Automatic: ${family}`,
     automaticUnknown: "Automatic",
     licencesTitle: "Vendor licences",
     noLicences: "This printer needs no vendor files.",
@@ -117,7 +123,7 @@ export const setupStrings = {
     formatOptions: { pdf: "PDF", jpeg: "JPEG" } as Record<string, string>,
   },
   review: {
-    description: "Check the settings, then finish. printscan saves them to its config file.",
+    description: "Check the settings, then finish. printscan saves them to its settings file.",
     name: "Name",
     location: "Location",
     noLocation: "Not set",
@@ -131,6 +137,7 @@ export const setupStrings = {
     printDefaults: "Print defaults",
     scanDefaults: "Scan defaults",
     finish: "Finish setup",
+    finishing: "Saving…",
     invalid: "The server rejected some settings:",
     conflict: "Another session finished setup. Reloading…",
     reloadNow: "Reload now",

@@ -21,6 +21,7 @@ import (
 
 	"github.com/ThePhaseless/printscan/internal/apitypes"
 	"github.com/ThePhaseless/printscan/internal/config"
+	"github.com/ThePhaseless/printscan/internal/controller"
 	"github.com/ThePhaseless/printscan/internal/device"
 	"github.com/ThePhaseless/printscan/internal/schema"
 )
@@ -393,7 +394,7 @@ func TestEndToEnd(t *testing.T) {
 		})
 
 		// 9. An unknown EULA: valid YAML, invalid config, printer still ready.
-		in.writeConfig("apiVersion: printscan/v1\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n")
+		in.writeConfig("apiVersion: printscan/v1\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n      textSha256: " + strings.Repeat("a", 64) + "\n")
 		waitStatus(in, ch, "unknown EULA rejected", func(s apitypes.Status) bool {
 			return s.Config.State == apitypes.ConfigInvalid && ready(s) && slices.ContainsFunc(s.Config.Errors, func(e config.FieldError) bool {
 				return e.Path == "/licenses/acceptedEulas/0"
@@ -403,13 +404,20 @@ func TestEndToEnd(t *testing.T) {
 
 	t.Run("pappl", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
-		cfg := "apiVersion: printscan/v1\nname: HP test\ndevice:\n  mode: usb\nlicenses:\n  acceptedEulas:\n    - id: hplip-plugin\n      version: \"3.24.4\"\n"
-		if err := os.WriteFile(filepath.Join(dir, "printscan.yaml"), []byte(cfg), 0o600); err != nil {
-			t.Fatal(err)
+		// The wizard flow: the licence text is staged before any config exists,
+		// and acceptance records its sha256.
+		in := startServe(t, ctx, t.TempDir(), "--sim-device=hp-legacy-mfp")
+		setup := in.pollSetup("the HP licence text", func(s apitypes.Setup) bool {
+			return len(s.EULAs) == 1 && s.EULAs[0].State == apitypes.EULAAvailable
+		})
+		var eula apitypes.EULA
+		in.expect(http.MethodGet, "/api/v1/eulas/hplip-plugin", nil, http.StatusOK, &eula)
+		if eula.Text == nil || eula.TextSHA256 == nil || *eula.TextSHA256 != *setup.EULAs[0].TextSHA256 {
+			t.Fatalf("eula %+v", eula)
 		}
-		in := startServe(t, ctx, dir, "--sim-device=hp-legacy-mfp")
 		ch := in.events()
+		in.writeConfig("apiVersion: printscan/v1\nname: HP test\ndevice:\n  mode: usb\nlicenses:\n  acceptedEulas:\n" +
+			"    - id: hplip-plugin\n      version: \"3.24.4\"\n      textSha256: " + *eula.TextSHA256 + "\n")
 		st := waitStatus(in, ch, "PAPPL printer ready with the blob installed", func(s apitypes.Status) bool {
 			return ready(s) && strings.HasPrefix(s.Printer.URI, "ipp://127.0.0.1:") &&
 				slices.ContainsFunc(s.Device.Blobs, func(b device.BlobStatus) bool { return b.ID == "hplip-plugin" && b.State == "installed" })
@@ -530,5 +538,164 @@ func TestRunDispatch(t *testing.T) {
 	}
 	if code := run(t.Context(), []string{"agent", "fetch", "--blob", "x@1"}, &out, &errOut); code != 1 {
 		t.Fatalf("agent fetch without --dir: exit %d", code)
+	}
+	dir := t.TempDir()
+	err := agentCmd(t.Context(), []string{"agent", "fetch", "--dir", dir, "--status-out", filepath.Join(dir, "s.json"), "--accept", "hplip-plugin@3.24.4"}[1:])
+	if err == nil || !strings.Contains(err.Error(), "<id>@<version>@<sha256") {
+		t.Fatalf("agent fetch with a two-part --accept: %v", err)
+	}
+	if err := agentCmd(t.Context(), []string{"run", "--blob-dir", dir}); err == nil || !strings.Contains(err.Error(), "--control-plane-url") {
+		t.Fatalf("agent run --blob-dir: %v, want the missing --control-plane-url error", err)
+	}
+}
+
+func TestAllowedHostsFor(t *testing.T) {
+	simDefault := []string{"localhost", "127.0.0.1", "[::1]"}
+	for _, tc := range []struct {
+		backend, value string
+		want           []string
+	}{
+		{controller.BackendSim, "", simDefault},
+		{controller.BackendSim, " , ", simDefault},
+		{controller.BackendSim, "*", nil},
+		{controller.BackendK8s, "", nil},
+		{controller.BackendK8s, "*", nil},
+		{controller.BackendK8s, "print.example.org, 192.0.2.10 ,", []string{"print.example.org", "192.0.2.10"}},
+		{controller.BackendSim, "printer.lan", []string{"printer.lan"}},
+	} {
+		if got := allowedHostsFor(tc.backend, tc.value); !slices.Equal(got, tc.want) {
+			t.Errorf("allowedHostsFor(%s, %q) = %q, want %q", tc.backend, tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestServeFlagsProxySecret(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "secret")
+	empty := filepath.Join(dir, "empty")
+	_ = os.WriteFile(file, []byte("from-file\n"), 0o600)
+	_ = os.WriteFile(empty, []byte("\n"), 0o600)
+	for _, tc := range []struct {
+		name, env, file, want, err string
+	}{
+		{name: "none"},
+		{name: "env", env: "from-env", want: "from-env"},
+		{name: "file", file: file, want: "from-file"},
+		{name: "both", env: "x", file: file, err: "not both"},
+		{name: "empty file", file: empty, err: "empty"},
+		{name: "missing file", file: filepath.Join(dir, "nope"), err: "nope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PRINTSCAN_PROXY_SECRET", tc.env)
+			args := []string{"--backend=sim"}
+			if tc.file != "" {
+				args = append(args, "--proxy-secret-file="+tc.file)
+			}
+			f, err := parseServeFlags(args)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err %v, want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil || f.proxySecret != tc.want || f.proxySecretHeader != "X-Printscan-Proxy-Secret" {
+				t.Fatalf("secret %q header %q err %v, want %q", f.proxySecret, f.proxySecretHeader, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeUsage(t *testing.T) {
+	var b bytes.Buffer
+	serveFlagSet(&serveFlags{}, &b).Usage()
+	usage := b.String()
+	for _, want := range []string{"--allowed-hosts", "--proxy-secret-header", "--proxy-secret-file", "PRINTSCAN_PROXY_SECRET", "PRINTSCAN_IMAGE_OVERRIDES"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("serve usage lacks %s:\n%s", want, usage)
+		}
+	}
+	if strings.Contains(usage, `(default "")`) || strings.Contains(usage, "ui-dir") || strings.Contains(usage, "sim-scan-delay") {
+		t.Errorf("serve usage shows an empty default or a hidden flag:\n%s", usage)
+	}
+}
+
+func TestSubcommandHelp(t *testing.T) {
+	for _, args := range [][]string{{"validate", "--help"}, {"validate", "-h"}, {"agent", "--help"}, {"agent", "-h"}, {"agent", "help"}} {
+		var out, errOut bytes.Buffer
+		code := run(t.Context(), args, &out, &errOut)
+		all := out.String() + errOut.String()
+		if code != 2 || !strings.Contains(all, "usage: printscan "+args[0]) || strings.Contains(all, "no such file") || strings.Contains(all, "unknown agent command") {
+			t.Errorf("%v: exit %d, output %q", args, code, all)
+		}
+	}
+}
+
+func TestServeSimHasNoInternalListener(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().String()
+	_ = ln.Close()
+
+	t.Setenv("PRINTSCAN_PROXY_SECRET", "s3cret")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	type addrs struct{ public, internal net.Addr }
+	got := make(chan addrs, 1)
+	done := make(chan error, 1)
+	go func() {
+		dir := t.TempDir()
+		done <- serve(ctx, []string{"--backend=sim", "--listen=127.0.0.1:0", "--internal-listen=" + port, "--data-dir=" + dir, "--config=" + filepath.Join(dir, "printscan.yaml")},
+			func(p, i net.Addr) { got <- addrs{p, i} })
+	}()
+	var a addrs
+	select {
+	case a = <-got:
+	case err := <-done:
+		t.Fatalf("serve exited: %v", err)
+	case <-ctx.Done():
+		t.Fatal("serve did not start")
+	}
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	}()
+	if a.internal != nil {
+		t.Fatalf("sim serve opened an internal listener on %v", a.internal)
+	}
+	// The port is still free: nothing listens there.
+	if l, err := lc.Listen(ctx, "tcp", port); err != nil {
+		t.Fatalf("internal port %s is taken: %v", port, err)
+	} else {
+		_ = l.Close()
+	}
+
+	get := func(host string, hdr ...string) int {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+a.public.String()+"/api/v1/status", nil)
+		if host != "" {
+			req.Host = host
+		}
+		for i := 0; i+1 < len(hdr); i += 2 {
+			req.Header.Set(hdr[i], hdr[i+1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get(""); code != http.StatusUnauthorized {
+		t.Errorf("without the proxy secret: %d, want 401", code)
+	}
+	if code := get("", "X-Printscan-Proxy-Secret", "s3cret"); code != http.StatusOK {
+		t.Errorf("with the proxy secret: %d, want 200", code)
+	}
+	if code := get("evil.example", "X-Printscan-Proxy-Secret", "s3cret"); code != http.StatusMisdirectedRequest {
+		t.Errorf("Host evil.example: %d, want 421", code)
 	}
 }

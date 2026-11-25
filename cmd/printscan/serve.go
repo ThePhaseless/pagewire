@@ -51,39 +51,19 @@ type serveFlags struct {
 	backend, simDevice, esclClient, logLevel    string
 	namespace, owner, usbResource, blobPVC      string
 	agentURL, registry, tag, uiDir              string
+	allowedHosts, proxySecretHeader             string
+	proxySecretFile, simScanDelay               string
+	proxySecret                                 string // from PRINTSCAN_PROXY_SECRET or the file; never a flag
+	internalListenSet                           bool
+	scanDelay                                   time.Duration // parsed --sim-scan-delay
 }
+
+// simAllowedHosts is the sim backend's default Host allowlist.
+var simAllowedHosts = []string{"localhost", "127.0.0.1", "[::1]"}
 
 func parseServeFlags(args []string) (serveFlags, error) {
 	var f serveFlags
-	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
-	defBackend := controller.BackendSim
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		defBackend = controller.BackendK8s
-	}
-	fl.StringVar(&f.listen, "listen", env("PRINTSCAN_LISTEN", ":8080"), "public listen address (env PRINTSCAN_LISTEN)")
-	fl.StringVar(&f.internalListen, "internal-listen", env("PRINTSCAN_INTERNAL_LISTEN", ":8081"), "agent listen address (env PRINTSCAN_INTERNAL_LISTEN)")
-	fl.StringVar(&f.configPath, "config", env("PRINTSCAN_CONFIG", "/data/printscan.yaml"), "config file (env PRINTSCAN_CONFIG)")
-	fl.StringVar(&f.dataDir, "data-dir", env("PRINTSCAN_DATA_DIR", "/data"), "data directory (env PRINTSCAN_DATA_DIR)")
-	fl.StringVar(&f.backend, "backend", env("PRINTSCAN_BACKEND", defBackend), "k8s or sim (env PRINTSCAN_BACKEND)")
-	fl.StringVar(&f.simDevice, "sim-device", env("PRINTSCAN_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PRINTSCAN_SIM_DEVICE)")
-	fl.StringVar(&f.esclClient, "escl-client", env("PRINTSCAN_ESCL_CLIENT", "mfp"), "mfp or xml (env PRINTSCAN_ESCL_CLIENT)")
-	fl.StringVar(&f.logLevel, "log-level", env("PRINTSCAN_LOG_LEVEL", "info"), "debug, info, warn or error (env PRINTSCAN_LOG_LEVEL)")
-	fl.StringVar(&f.namespace, "k8s-namespace", env("PRINTSCAN_K8S_NAMESPACE", ""), "namespace (env PRINTSCAN_K8S_NAMESPACE; default: the service account's)")
-	fl.StringVar(&f.owner, "k8s-owner", env("PRINTSCAN_K8S_OWNER", "printscan"), "owner Deployment (env PRINTSCAN_K8S_OWNER)")
-	fl.StringVar(&f.usbResource, "usb-resource", env("PRINTSCAN_USB_RESOURCE", ""), "USB extended resource, e.g. devic.es/printer (env PRINTSCAN_USB_RESOURCE)")
-	fl.StringVar(&f.blobPVC, "blob-pvc", env("PRINTSCAN_BLOB_PVC", "printscan-blobs"), "blob PVC (env PRINTSCAN_BLOB_PVC)")
-	fl.StringVar(&f.agentURL, "agent-url", env("PRINTSCAN_AGENT_URL", ""), "control-plane URL for the agent (env PRINTSCAN_AGENT_URL; default http://printscan.<ns>.svc:8081)")
-	fl.StringVar(&f.registry, "image-registry", env("PRINTSCAN_IMAGE_REGISTRY", "ghcr.io/thephaseless"), "image registry (env PRINTSCAN_IMAGE_REGISTRY)")
-	fl.StringVar(&f.tag, "image-tag", env("PRINTSCAN_IMAGE_TAG", k8s.ImageTag(version)), "device and driver image tag (env PRINTSCAN_IMAGE_TAG)")
-	fl.StringVar(&f.uiDir, "ui-dir", "", "") // hidden: serve a directory instead of the embedded UI (bun run dev)
-	fl.Usage = func() {
-		_, _ = fmt.Fprintln(fl.Output(), "usage: printscan serve [flags]")
-		fl.VisitAll(func(fg *flag.Flag) {
-			if fg.Name != "ui-dir" {
-				_, _ = fmt.Fprintf(fl.Output(), "  --%s\t%s (default %q)\n", fg.Name, fg.Usage, fg.DefValue)
-			}
-		})
-	}
+	fl := serveFlagSet(&f, os.Stderr)
 	if err := fl.Parse(args); err != nil {
 		return f, err
 	}
@@ -99,11 +79,115 @@ func parseServeFlags(args []string) (serveFlags, error) {
 	if f.backend == controller.BackendSim && f.simDevice != "none" && len(catalog.Fixture(f.simDevice).Devices) == 0 {
 		return f, fmt.Errorf("--sim-device: unknown fixture %q", f.simDevice)
 	}
+	if f.backend == controller.BackendSim {
+		d, err := time.ParseDuration(f.simScanDelay)
+		if err != nil || d < 0 {
+			return f, fmt.Errorf("--sim-scan-delay must be a duration such as 30s, got %q", f.simScanDelay)
+		}
+		f.scanDelay = d
+	}
+	fl.Visit(func(fg *flag.Flag) { f.internalListenSet = f.internalListenSet || fg.Name == "internal-listen" })
+	f.internalListenSet = f.internalListenSet || os.Getenv("PRINTSCAN_INTERNAL_LISTEN") != ""
+	secret, err := readProxySecret(os.Getenv("PRINTSCAN_PROXY_SECRET"), f.proxySecretFile)
+	if err != nil {
+		return f, err
+	}
+	f.proxySecret = secret
 	return f, setLogLevel(f.logLevel)
 }
 
+// readProxySecret takes the proxy secret from the environment or a file,
+// never both. An empty file is an error; an unset secret is "".
+func readProxySecret(fromEnv, file string) (string, error) {
+	if file == "" {
+		return fromEnv, nil
+	}
+	if fromEnv != "" {
+		return "", errors.New("set PRINTSCAN_PROXY_SECRET or --proxy-secret-file, not both")
+	}
+	b, err := os.ReadFile(file) //nolint:gosec // the operator names the secret file
+	if err != nil {
+		return "", fmt.Errorf("--proxy-secret-file: %w", err)
+	}
+	secret := strings.TrimSpace(string(b))
+	if secret == "" {
+		return "", fmt.Errorf("--proxy-secret-file %s is empty", file)
+	}
+	return secret, nil
+}
+
+// allowedHostsFor is the Host allowlist for --allowed-hosts: the backend's
+// default when empty (sim: loopback names; k8s: no check), none for "*",
+// else the comma-separated names.
+func allowedHostsFor(backend, value string) []string {
+	if strings.TrimSpace(value) == "*" {
+		return nil
+	}
+	var hosts []string
+	for h := range strings.SplitSeq(value, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	if len(hosts) == 0 && backend == controller.BackendSim {
+		return simAllowedHosts
+	}
+	return hosts
+}
+
+// serveFlagSet defines serve's flags into f, with usage written to out.
+func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
+	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fl.SetOutput(out)
+	defBackend := controller.BackendSim
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		defBackend = controller.BackendK8s
+	}
+	fl.StringVar(&f.listen, "listen", env("PRINTSCAN_LISTEN", ":8080"), "public listen address (env PRINTSCAN_LISTEN)")
+	fl.StringVar(&f.internalListen, "internal-listen", env("PRINTSCAN_INTERNAL_LISTEN", ":8081"), "agent listen address (env PRINTSCAN_INTERNAL_LISTEN)")
+	fl.StringVar(&f.configPath, "config", env("PRINTSCAN_CONFIG", "/data/printscan.yaml"), "config file (env PRINTSCAN_CONFIG)")
+	fl.StringVar(&f.dataDir, "data-dir", env("PRINTSCAN_DATA_DIR", "/data"), "data directory (env PRINTSCAN_DATA_DIR)")
+	fl.StringVar(&f.backend, "backend", env("PRINTSCAN_BACKEND", defBackend), "k8s or sim (env PRINTSCAN_BACKEND)")
+	fl.StringVar(&f.simDevice, "sim-device", env("PRINTSCAN_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PRINTSCAN_SIM_DEVICE)")
+	// hidden test seam (e2e scan cancel): sim backend only, holds each scanned page this long
+	fl.StringVar(&f.simScanDelay, "sim-scan-delay", env("PRINTSCAN_SIM_SCAN_DELAY", "0s"), "")
+	fl.StringVar(&f.esclClient, "escl-client", env("PRINTSCAN_ESCL_CLIENT", "mfp"), "mfp or xml (env PRINTSCAN_ESCL_CLIENT)")
+	fl.StringVar(&f.logLevel, "log-level", env("PRINTSCAN_LOG_LEVEL", "info"), "debug, info, warn or error (env PRINTSCAN_LOG_LEVEL)")
+	fl.StringVar(&f.namespace, "k8s-namespace", env("PRINTSCAN_K8S_NAMESPACE", ""), "namespace (env PRINTSCAN_K8S_NAMESPACE; default: the service account's)")
+	fl.StringVar(&f.owner, "k8s-owner", env("PRINTSCAN_K8S_OWNER", "printscan"), "owner Deployment (env PRINTSCAN_K8S_OWNER)")
+	fl.StringVar(&f.usbResource, "usb-resource", env("PRINTSCAN_USB_RESOURCE", ""), "USB extended resource, e.g. devic.es/printer (env PRINTSCAN_USB_RESOURCE)")
+	fl.StringVar(&f.blobPVC, "blob-pvc", env("PRINTSCAN_BLOB_PVC", "printscan-blobs"), "blob PVC (env PRINTSCAN_BLOB_PVC)")
+	fl.StringVar(&f.agentURL, "agent-url", env("PRINTSCAN_AGENT_URL", ""), "control-plane URL for the agent (env PRINTSCAN_AGENT_URL; default http://printscan.<ns>.svc:8081)")
+	fl.StringVar(&f.registry, "image-registry", env("PRINTSCAN_IMAGE_REGISTRY", "ghcr.io/thephaseless"), "image registry (env PRINTSCAN_IMAGE_REGISTRY)")
+	fl.StringVar(&f.tag, "image-tag", env("PRINTSCAN_IMAGE_TAG", k8s.ImageTag(version)), "device and driver image tag (env PRINTSCAN_IMAGE_TAG)")
+	fl.StringVar(&f.allowedHosts, "allowed-hosts", env("PRINTSCAN_ALLOWED_HOSTS", ""),
+		"comma-separated host names the UI and API answer; others get 421. * turns the check off (env PRINTSCAN_ALLOWED_HOSTS; default: localhost,127.0.0.1,[::1] with the sim backend, no check with k8s)")
+	fl.StringVar(&f.proxySecretHeader, "proxy-secret-header", env("PRINTSCAN_PROXY_SECRET_HEADER", api.DefaultProxySecretHeader),
+		"header that must carry the proxy secret on /api/ requests (env PRINTSCAN_PROXY_SECRET_HEADER)")
+	fl.StringVar(&f.proxySecretFile, "proxy-secret-file", env("PRINTSCAN_PROXY_SECRET_FILE", ""),
+		"file holding the proxy secret; or set env PRINTSCAN_PROXY_SECRET, not both (env PRINTSCAN_PROXY_SECRET_FILE)")
+	fl.StringVar(&f.uiDir, "ui-dir", "", "") // hidden: serve a directory instead of the embedded UI (bun run dev)
+	fl.Usage = func() {
+		_, _ = fmt.Fprintln(fl.Output(), "usage: printscan serve [flags]")
+		fl.VisitAll(func(fg *flag.Flag) {
+			switch {
+			case fg.Name == "ui-dir", fg.Name == "sim-scan-delay":
+			case fg.DefValue == "":
+				_, _ = fmt.Fprintf(fl.Output(), "  --%s\t%s\n", fg.Name, fg.Usage)
+			default:
+				_, _ = fmt.Fprintf(fl.Output(), "  --%s\t%s (default %q)\n", fg.Name, fg.Usage, fg.DefValue)
+			}
+		})
+		_, _ = fmt.Fprintln(fl.Output(), "environment only:\n"+
+			"  PRINTSCAN_PROXY_SECRET\tproxy secret (see --proxy-secret-file)\n"+
+			"  PRINTSCAN_IMAGE_OVERRIDES\tper-image references, e.g. device=<ref>,driver-ps=<ref>; keys: printscan, device, driver-ps, driver-hplip, driver-gutenprint, driver-ghostscript")
+	}
+	return fl
+}
+
 // serve runs the control plane until ctx is done. onListen, when set, gets the
-// bound public and internal addresses once both listeners are up.
+// bound public and internal addresses once the listeners are up; internal is
+// nil with the sim backend, which opens no internal listener.
 func serve(ctx context.Context, args []string, onListen func(public, internal net.Addr)) error {
 	f, err := parseServeFlags(args)
 	if err != nil {
@@ -141,7 +225,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 			usbUnavailable = noUSBResource
 		}
 	default:
-		simBackend = sim.New(sim.Options{Fixture: f.simDevice, DataDir: f.dataDir})
+		simBackend = sim.New(sim.Options{Fixture: f.simDevice, DataDir: f.dataDir, ScanDelay: f.scanDelay})
 		backend = simBackend
 		usbAvailable = f.simDevice != "none"
 	}
@@ -246,6 +330,10 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		Hub:         hub,
 		Ready:       ready.Load,
 		BaseContext: ctx,
+
+		AllowedHosts:      allowedHostsFor(f.backend, f.allowedHosts),
+		ProxySecret:       f.proxySecret,
+		ProxySecretHeader: f.proxySecretHeader,
 	})
 
 	// The first Status a client sees already reflects the file.
@@ -271,23 +359,34 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", f.listen, err)
 	}
-	intLn, err := lc.Listen(ctx, "tcp", f.internalListen)
-	if err != nil {
-		_ = pubLn.Close()
-		return fmt.Errorf("listen %s: %w", f.internalListen, err)
-	}
 	base := func(net.Listener) context.Context { return ctx }
 	servers := []*http.Server{
 		{Handler: public, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: publicWriteTimeout, IdleTimeout: 2 * time.Minute, BaseContext: base},
-		{Handler: internal, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, BaseContext: base},
 	}
-	errc := make(chan error, 2)
-	for i, ln := range []net.Listener{pubLn, intLn} {
+	listeners := []net.Listener{pubLn}
+	var intAddr net.Addr
+	intDesc := "none (sim)"
+	if simBackend == nil {
+		intLn, err := lc.Listen(ctx, "tcp", f.internalListen)
+		if err != nil {
+			_ = pubLn.Close()
+			return fmt.Errorf("listen %s: %w", f.internalListen, err)
+		}
+		intAddr = intLn.Addr()
+		intDesc = intAddr.String()
+		listeners = append(listeners, intLn)
+		servers = append(servers, &http.Server{Handler: internal, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, BaseContext: base})
+	} else if f.internalListenSet {
+		// The sim agent reports in-process; the flag stays accepted for scripts that pass it.
+		slog.Info("--internal-listen is ignored with the sim backend: its agent reports in-process", "internal-listen", f.internalListen)
+	}
+	errc := make(chan error, len(servers))
+	for i, ln := range listeners {
 		go func() { errc <- servers[i].Serve(ln) }()
 	}
-	slog.Info("printscan serving", "version", version, "listen", pubLn.Addr().String(), "internal", intLn.Addr().String(), "backend", f.backend)
+	slog.Info("printscan serving", "version", version, "listen", pubLn.Addr().String(), "internal", intDesc, "backend", f.backend)
 	if onListen != nil {
-		onListen(pubLn.Addr(), intLn.Addr())
+		onListen(pubLn.Addr(), intAddr)
 	}
 
 	var serveErr error

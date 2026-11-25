@@ -21,7 +21,7 @@ const (
 	BackendSim = "sim"
 )
 
-// Status messages from the controller rules.
+// Status messages the controller shows.
 const (
 	msgWaitingAgent  = "Waiting for the device agent"
 	msgUnschedulable = "Printer not plugged in or not visible to the device plugin"
@@ -34,7 +34,8 @@ const (
 
 const defaultName = "Printer"
 
-// initialStatus is Current() before any input (controller rules, "Initial Status").
+// initialStatus is Current() before any input: config missing, phase and mode
+// none, printer and scanner state unknown, empty lists, no decision or inventory.
 func initialStatus() apitypes.Status {
 	return apitypes.Status{
 		Config: apitypes.StatusConfig{State: apitypes.ConfigMissing, Errors: []config.FieldError{}},
@@ -52,7 +53,8 @@ func initialStatus() apitypes.Status {
 func offlinePrinter(uri string) apitypes.StatusPrinter {
 	return apitypes.StatusPrinter{
 		URI: uri, State: apitypes.StateUnknown,
-		Reasons: []string{}, Formats: []string{}, Media: []string{}, Markers: []apitypes.Marker{},
+		Reasons: []string{}, Formats: []string{}, ConvertedFormats: []apitypes.FormatConversion{},
+		Media: []string{}, Markers: []apitypes.Marker{},
 	}
 }
 
@@ -64,9 +66,11 @@ func modeOf(s *device.Spec) string {
 	return s.Mode
 }
 
-// pickService returns the browsed instance of type typ whose TXT has key: the
-// one named preferName, else the first by name order.
-func pickService(services []device.DNSSDService, typ, key, preferName string) (device.DNSSDService, bool) {
+// pickService returns the browsed instance of type typ whose TXT has key.
+// Instances on one of the family's own ports (familyPort, nil: any) come
+// first, so another service of the same type on the node cannot win by
+// name; among them the one named preferName, else the first by name order.
+func pickService(services []device.DNSSDService, typ, key, preferName string, familyPort func(int) bool) (device.DNSSDService, bool) {
 	var cands []device.DNSSDService
 	for _, s := range services {
 		if _, ok := s.TXT[key]; ok && s.Type == typ {
@@ -76,16 +80,27 @@ func pickService(services []device.DNSSDService, typ, key, preferName string) (d
 	if len(cands) == 0 {
 		return device.DNSSDService{}, false
 	}
+	if familyPort != nil && slices.ContainsFunc(cands, func(s device.DNSSDService) bool { return familyPort(s.Port) }) {
+		cands = slices.DeleteFunc(cands, func(s device.DNSSDService) bool { return !familyPort(s.Port) })
+	}
 	if i := slices.IndexFunc(cands, func(s device.DNSSDService) bool { return preferName != "" && s.Name == preferName }); i >= 0 {
 		return cands[i], true
 	}
 	return slices.MinFunc(cands, func(a, b device.DNSSDService) int { return strings.Compare(a.Name, b.Name) }), true
 }
 
-// pickIPP picks the _ipp._tcp instance with TXT rp set, preferring preferName.
-func pickIPP(services []device.DNSSDService, preferName string) (device.DNSSDService, bool) {
-	return pickService(services, device.ServiceIPP, "rp", preferName)
+// pickIPP picks the _ipp._tcp instance with TXT rp set for printer family
+// fam: on ipp-usb's ports for the ipp-usb family, then preferName.
+func pickIPP(services []device.DNSSDService, fam catalog.Printer, preferName string) (device.DNSSDService, bool) {
+	var ports func(int) bool
+	if fam.ID == "ipp-usb" {
+		ports = ippUSBPort
+	}
+	return pickService(services, device.ServiceIPP, "rp", preferName, ports)
 }
+
+// ippUSBPort reports whether port is one ipp-usb listens on.
+func ippUSBPort(port int) bool { return port >= device.IPPUSBMinPort && port <= device.IPPUSBMaxPort }
 
 func serviceURL(scheme, hostIP string, s device.DNSSDService, key string) string {
 	return scheme + "://" + net.JoinHostPort(hostIP, strconv.Itoa(s.Port)) + "/" + strings.TrimPrefix(s.TXT[key], "/")
@@ -119,15 +134,17 @@ func printerURI(backend string, fam catalog.Printer, obs device.Observation, r *
 	case r == nil || obs.HostIP == "":
 		return ""
 	}
-	s, ok := pickIPP(r.Services, preferName)
+	s, ok := pickIPP(r.Services, fam, preferName)
 	if !ok {
 		return ""
 	}
 	return serviceURL("ipp", obs.HostIP, s, "rp")
 }
 
-// scannerURL is the eSCL base URL: the observation in sim, _uscan._tcp in k8s.
-func scannerURL(backend string, spec *device.Spec, obs device.Observation, r *device.AgentReport) string {
+// scannerURL is the eSCL base URL: the observation in sim, _uscan._tcp in
+// k8s, preferring the scanner family's catalog port (ipp-usb's own ports for
+// ipp-usb's eSCL).
+func scannerURL(cat *catalog.Catalog, backend string, spec *device.Spec, obs device.Observation, r *device.AgentReport) string {
 	switch {
 	case spec == nil || spec.Scanner == "":
 		return ""
@@ -136,7 +153,16 @@ func scannerURL(backend string, spec *device.Spec, obs device.Observation, r *de
 	case r == nil || obs.HostIP == "":
 		return ""
 	}
-	s, ok := pickService(r.Services, device.ServiceUScan, "rs", "")
+	var ports func(int) bool
+	if i := slices.IndexFunc(cat.Scanners, func(s catalog.Scanner) bool { return s.ID == spec.Scanner }); i >= 0 {
+		switch port := cat.Scanners[i].Port; {
+		case port != 0:
+			ports = func(p int) bool { return p == port }
+		case spec.Scanner == "ipp-usb":
+			ports = ippUSBPort
+		}
+	}
+	s, ok := pickService(r.Services, device.ServiceUScan, "rs", "", ports)
 	if !ok {
 		return ""
 	}
@@ -153,10 +179,10 @@ func advertised(r *device.AgentReport) []apitypes.AdvertisedService {
 	return out
 }
 
-func connect(r *device.AgentReport, preferName, ippURI, esclURL string) apitypes.Connect {
+func connect(r *device.AgentReport, fam catalog.Printer, preferName, ippURI, esclURL string) apitypes.Connect {
 	c := apitypes.Connect{IPPURIs: []string{}, ESCLURLs: []string{}}
 	if r != nil {
-		if s, ok := pickIPP(r.Services, preferName); ok {
+		if s, ok := pickIPP(r.Services, fam, preferName); ok {
 			c.DNSSDName = s.Name
 		}
 	}
@@ -169,10 +195,96 @@ func connect(r *device.AgentReport, preferName, ippURI, esclURL string) apitypes
 	return c
 }
 
+// acceptedRef returns the config entry accepting EULA id at the catalog's
+// version, matched on id and version only.
+func acceptedRef(cat *catalog.Catalog, id string, acc []config.EULARef) (config.EULARef, bool) {
+	e, ok := cat.EULA(id)
+	if !ok {
+		return config.EULARef{}, false
+	}
+	i := slices.IndexFunc(acc, func(a config.EULARef) bool { return a.ID == id && a.Version == e.Version })
+	if i < 0 {
+		return config.EULARef{}, false
+	}
+	return acc[i], true
+}
+
 // accepted reports whether EULA id is accepted at the catalog's version.
 func accepted(cat *catalog.Catalog, id string, acc []config.EULARef) bool {
-	e, ok := cat.EULA(id)
-	return ok && slices.Contains(acc, config.EULARef{ID: id, Version: e.Version})
+	_, ok := acceptedRef(cat, id, acc)
+	return ok
+}
+
+// acceptedEULAs is Spec.AcceptedEULAs: the accepted entries, with their text
+// sha256, of the EULAs of refs, sorted by id.
+func acceptedEULAs(refs []device.BlobRef, acc []config.EULARef, cat *catalog.Catalog) []device.EULARef {
+	out := []device.EULARef{}
+	for _, r := range refs {
+		b, ok := cat.Blob(r.ID)
+		if !ok || slices.ContainsFunc(out, func(e device.EULARef) bool { return e.ID == b.EULA }) {
+			continue
+		}
+		if a, ok := acceptedRef(cat, b.EULA, acc); ok {
+			out = append(out, device.EULARef{ID: a.ID, Version: a.Version, TextSHA256: a.TextSHA256})
+		}
+	}
+	slices.SortFunc(out, func(a, b device.EULARef) int { return strings.Compare(a.ID, b.ID) })
+	return out
+}
+
+// eulaIDs lists the catalog EULAs the Setup DTO shows, without duplicates:
+// the decision's required and optional EULAs, then the accepted ones.
+func eulaIDs(cat *catalog.Catalog, dec *device.Decision, acc []config.EULARef) []string {
+	var ids []string
+	if dec != nil {
+		ids = append(slices.Clone(dec.RequiredEULAs), dec.OptionalEULAs...)
+	}
+	for _, a := range acc {
+		ids = append(ids, a.ID)
+	}
+	out := []string{}
+	for _, id := range ids {
+		if _, ok := cat.EULA(id); ok && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// stageEULAs is DesiredState.StageEULAs: every EULA of eulaIDs at its
+// catalog version, sorted by id so an unchanged list compares equal.
+// Accepted EULAs stay in, as texts live only in memory and Settings needs
+// them after a control-plane restart.
+func stageEULAs(cat *catalog.Catalog, dec *device.Decision, acc []config.EULARef) []device.EULARef {
+	out := []device.EULARef{}
+	for _, id := range eulaIDs(cat, dec, acc) {
+		e, _ := cat.EULA(id)
+		out = append(out, device.EULARef{ID: id, Version: e.Version})
+	}
+	slices.SortFunc(out, func(a, b device.EULARef) int { return strings.Compare(a.ID, b.ID) })
+	return out
+}
+
+// eulaText is the stored agent text of EULA e: pending until a report carried
+// it at the catalog version.
+func eulaText(e catalog.EULAInfo, texts map[string]device.EULAText) device.EULAText {
+	if t, ok := texts[e.ID]; ok && t.Version == e.Version {
+		return t
+	}
+	return device.EULAText{ID: e.ID, Version: e.Version, State: device.EULAPending}
+}
+
+// eulaDTO is the body of GET /eulas/{id}.
+func eulaDTO(e catalog.EULAInfo, texts map[string]device.EULAText) apitypes.EULA {
+	t := eulaText(e, texts)
+	out := apitypes.EULA{
+		ID: e.ID, Version: e.Version, Title: e.Title, Vendor: e.Vendor, Summary: e.Summary,
+		State: t.State, Message: t.Message,
+	}
+	if t.State == device.EULAAvailable {
+		out.TextSHA256, out.Text = &t.TextSHA256, &t.Text
+	}
+	return out
 }
 
 // blobRefs lists, in catalog order, the blobs whose EULA the decision needs or
@@ -252,7 +364,8 @@ func sanitizeName(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.TrimSpace(s)
+	// A leading - is refused by validation (ippeveprinter would read it as an option).
+	s = strings.TrimLeft(strings.TrimSpace(s), "- ")
 	if r := []rune(s); len(r) > 63 {
 		s = strings.TrimSpace(string(r[:63]))
 	}
@@ -268,9 +381,12 @@ type setupInput struct {
 	missing      bool
 	cfg          *config.Config // the valid config, else the last-known-good, else nil
 	inventory    *device.Inventory
+	texts        map[string]device.EULAText // latest agent EULA texts by id
 }
 
-// setup builds the Setup DTO (controller rules, "Setup DTO").
+// setup builds the Setup DTO: the inventory and decision for the configured
+// (or default) selector, the EULAs that decision needs or offers plus the
+// accepted ones with their text state, and a suggested config.
 func setup(cat *catalog.Catalog, in setupInput) apitypes.Setup {
 	sel := config.Default(defaultName).Device
 	acc := []config.EULARef{}
@@ -282,23 +398,16 @@ func setup(cat *catalog.Catalog, in setupInput) apitypes.Setup {
 		Required: in.missing, Backend: in.backend, USBResourceConfigured: in.usbAvailable,
 		Inventory: in.inventory, Decision: dec, EULAs: []apitypes.SetupEULA{},
 	}
-	var ids []string
 	var required []string
 	if dec != nil {
 		required = dec.RequiredEULAs
-		ids = append(slices.Clone(dec.RequiredEULAs), dec.OptionalEULAs...)
 	}
-	for _, a := range acc {
-		ids = append(ids, a.ID)
-	}
-	for _, id := range ids {
-		e, ok := cat.EULA(id)
-		if !ok || slices.ContainsFunc(s.EULAs, func(x apitypes.SetupEULA) bool { return x.ID == id }) {
-			continue
-		}
+	for _, id := range eulaIDs(cat, dec, acc) {
+		e, _ := cat.EULA(id)
+		d := eulaDTO(e, in.texts)
 		s.EULAs = append(s.EULAs, apitypes.SetupEULA{
-			ID: e.ID, Version: e.Version, Title: e.Title, Vendor: e.Vendor, URL: e.URL, Summary: e.Summary,
-			Required: slices.Contains(required, id),
+			ID: e.ID, Version: e.Version, Title: e.Title, Vendor: e.Vendor, Summary: e.Summary,
+			Required: slices.Contains(required, id), State: d.State, TextSHA256: d.TextSHA256,
 		})
 	}
 	name := defaultName

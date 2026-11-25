@@ -4,11 +4,12 @@ import { setupStrings } from "./Setup.strings";
 const d = setupStrings.defaults;
 
 export const settingsStrings = {
-  description: "Everything printscan reads from its config file. Saving edits the file in place.",
+  description:
+    "Change the printer's name, driver and defaults. Saving updates printscan's settings file.",
   loadFailed: "Could not load the settings.",
   missing: {
     title: "printscan is not set up yet",
-    body: "Finish setup to create the config file.",
+    body: "Finish setup to create the settings file.",
     action: "Go to setup",
   },
   sections: {
@@ -21,7 +22,7 @@ export const settingsStrings = {
   fields: {
     name: "Name",
     nameHint:
-      "Shown at the top of every page. Printers driven by printscan, and the simulated printer, use it as their network name. Driverless (IPP over USB) printers and the scanner announce the device's own name.",
+      "Shown at the top of every page. Computers and phones may show the printer's own name instead.",
     location: "Location",
     locationHint: "Optional, for example Living room.",
     mode: "Device",
@@ -52,8 +53,8 @@ export const settingsStrings = {
     } as Record<string, string>,
     quality: "Quality",
     qualityOptions: { draft: "Draft", normal: "Normal", high: "High" } as Record<string, string>,
-    maxUpload: "Upload limit (MiB)",
-    maxUploadHint: "The largest file the Print page accepts, 1 to 500 MiB.",
+    maxUpload: "Upload limit (MB)",
+    maxUploadHint: "The largest file the Print page accepts, 1 to 500 MB.",
     source: d.source,
     sourceOptions: d.sourceOptions,
     resolution: d.resolution,
@@ -100,6 +101,13 @@ export const settingsStrings = {
   blobState: (state: string, message: string) => (message ? `${state}: ${message}` : state),
   blobLabel: "Vendor files",
   reset: "Reset",
+  unsaved: "Unsaved changes",
+  leave: {
+    title: "Leave without saving?",
+    body: "If you leave this page, your unsaved changes are lost.",
+    stay: "Keep editing",
+    confirm: "Leave",
+  },
   saved: "Settings saved",
   invalidValues: "The server rejected some settings:",
   errorAt: (where: string, message: string) => `${where}: ${message}`,
@@ -108,7 +116,7 @@ export const settingsStrings = {
   fileChanged:
     "The file changed on disk. Saving shows you the differences; Reset loads the file's version.",
   invalid: {
-    title: "The config file has errors",
+    title: "The settings file has errors",
     withLastGood: "printscan keeps using the last working settings until the file is fixed.",
     withoutLastGood: "printscan has no earlier working settings to fall back on. Fix the file.",
     location: (line: number, column: number) => `Line ${line}, column ${column}`,
@@ -128,7 +136,8 @@ export const settingsStrings = {
     inFile: "In the file now",
     keepMine: "Keep mine",
     useFile: "Use the file",
-    review: "Review",
+    review: "Show the file's values",
+    alsoChanged: "Also changed in the file",
     invalidTitle: "The file on disk changed and is now invalid",
     invalidBody: "Someone edited the file while you were editing here, and it now has errors:",
     replace: "Replace the file with my settings",

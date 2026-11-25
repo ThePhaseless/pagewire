@@ -41,11 +41,19 @@ func TestSPA(t *testing.T) {
 
 func TestSecurityHeaders(t *testing.T) {
 	e := newEnv(t, func(d *Deps) { d.UI = uiFS })
-	for _, path := range []string{"/", "/api/v1/status"} {
+	const csp = "default-src 'self'; img-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+	for _, path := range []string{"/", "/api/v1/status", "/api/v1/nope"} {
 		h := e.do("GET", path, nil).Header()
-		if h.Get("Content-Security-Policy") != "default-src 'self'; img-src 'self' blob: data:; frame-ancestors 'none'" ||
-			h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" {
+		if h.Get("Content-Security-Policy") != csp ||
+			h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" ||
+			h.Get("Cross-Origin-Opener-Policy") != "same-origin" || h.Get("Cross-Origin-Resource-Policy") != "same-origin" {
 			t.Errorf("%s: headers %v", path, h)
+		}
+	}
+	// API JSON and problems are never cached.
+	for _, path := range []string{"/api/v1/status", "/api/v1/nope"} {
+		if got := e.do("GET", path, nil).Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control %q, want no-store", path, got)
 		}
 	}
 }

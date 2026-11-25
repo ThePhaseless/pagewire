@@ -2,9 +2,17 @@
 # ippeveprinter. Always build with an explicit target:
 #   docker buildx build -f images/device/Dockerfile --target device .
 #   docker buildx build -f images/device/Dockerfile --target sources -o type=local,dest=out .
+# The sources target lists the packages of the local device stage by default. CI passes
+# SOURCES_LISTS=pushed and PUSHED_IMAGE=<the image it pushed for this commit>, so the
+# list is the union of that image's amd64 and arm64 package lists instead.
 
-ARG IPP_USB_VERSION=0.9.34 # renovate: datasource=github-tags depName=OpenPrinting/ipp-usb
-ARG AIRSANE_VERSION=v0.4.16 # renovate: datasource=github-tags depName=SimulPiscator/AirSane
+# Upstreams are built by commit; the Renovate comment keeps the release tag.
+ARG IPP_USB_COMMIT=057c7ac8739e557d12796378f3c180136cb3e274 # renovate: datasource=github-tags depName=OpenPrinting/ipp-usb currentValue=0.9.34
+ARG AIRSANE_COMMIT=e96627ae7a85e700fbb353b23deacfba868869ad # renovate: datasource=github-tags depName=SimulPiscator/AirSane currentValue=v0.4.16
+ARG VERSION=dev
+ARG SOURCES_LISTS=local
+# A sentinel: the pushed-* stages that read it are never built in local mode.
+ARG PUSHED_IMAGE=scratch
 # Fixed system uids, so the renderer can set runAsUser (also recorded in LABELs below).
 ARG MESSAGEBUS_UID=101
 ARG AVAHI_UID=102
@@ -12,27 +20,37 @@ ARG NONROOT_UID=65532
 
 FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS ipp-usb
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
-ARG IPP_USB_VERSION
+ARG IPP_USB_COMMIT
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libusb-1.0-0-dev libavahi-client-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone --depth 1 --branch "${IPP_USB_VERSION}" https://github.com/OpenPrinting/ipp-usb.git . \
+RUN git init -q . \
+ && git fetch -q --depth 1 https://github.com/OpenPrinting/ipp-usb.git "${IPP_USB_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && mkdir -p /out/upstream /out/quirks \
+ && git archive --prefix="ipp-usb-${IPP_USB_COMMIT}/" -o "/out/upstream/ipp-usb-${IPP_USB_COMMIT}.tar.gz" HEAD \
  && go build -trimpath -mod=vendor -tags nethttpomithttp2 -ldflags "-s -w" -o /out/ipp-usb . \
- && mkdir -p /out/quirks \
  && cp ipp-usb-quirks/*.conf /out/quirks/ \
+ # The binary links the Go standard library and the vendored goipp, each under its own licence.
+ && cp "$(go env GOROOT)/LICENSE" /out/LICENSE.go \
+ && cp vendor/github.com/OpenPrinting/goipp/LICENSE /out/LICENSE.goipp \
  # The quirks directory this image installs to is one ipp-usb searches by default.
  && grep -q 'DefaultPathGlobalQuirksDir = "/usr/share/ipp-usb/quirks"' paths.go
 
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS airsane
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
-ARG AIRSANE_VERSION
+ARG AIRSANE_COMMIT
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git make cmake g++ \
       libsane-dev libavahi-client-dev libjpeg-dev libpng-dev libusb-1.0-0-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone --depth 1 --branch "${AIRSANE_VERSION}" https://github.com/SimulPiscator/AirSane.git . \
+RUN git init -q . \
+ && git fetch -q --depth 1 https://github.com/SimulPiscator/AirSane.git "${AIRSANE_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && mkdir -p /out/upstream \
+ && git archive --prefix="AirSane-${AIRSANE_COMMIT}/" -o "/out/upstream/AirSane-${AIRSANE_COMMIT}.tar.gz" HEAD \
  && cmake -S . -B build -DCMAKE_BUILD_TYPE=MinSizeRel \
  && cmake --build build -j"$(nproc)" \
  && install -D -m 0755 build/airsaned /out/airsaned
@@ -59,10 +77,12 @@ RUN apt-get update \
 COPY --from=ipp-usb /out/ipp-usb /usr/local/sbin/ipp-usb
 COPY --from=ipp-usb /out/quirks/ /usr/share/ipp-usb/quirks/
 COPY --from=ipp-usb /src/LICENSE /usr/share/licenses/ipp-usb/LICENSE
+COPY --from=ipp-usb /out/LICENSE.go /out/LICENSE.goipp /usr/share/licenses/ipp-usb/
 COPY --from=airsane /out/airsaned /usr/local/bin/airsaned
 COPY --from=airsane /src/LICENSE /usr/share/licenses/airsane/LICENSE
 COPY images/device/dbus.conf images/device/avahi-daemon.conf /etc/printscan/
-# HP plug-in paths point into the blob PVC (decision 14). mkdir the parents,
+# HP plug-in paths point into the blob PVC, where the plug-in is installed after
+# the user accepts HP's licence; the image never contains it. mkdir the parents,
 # remove whatever is at each link path, then link, so no link lands inside a directory.
 RUN mkdir -p /usr/share/hplip/prnt /usr/share/hplip/scan /usr/share/hplip/fax /usr/share/hplip/data /var/lib/hp \
  && for p in prnt/plugins scan/plugins fax/plugins data/firmware; do \
@@ -74,29 +94,54 @@ RUN mkdir -p /usr/share/hplip/prnt /usr/share/hplip/scan /usr/share/hplip/fax /u
  && test -e "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-hpaio.so.1" \
  && test -e "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-test.so.1" \
  && if ldd /usr/local/sbin/ipp-usb /usr/local/bin/airsaned | grep 'not found'; then exit 1; fi
-# Last RUN that touches packages: the Corresponding source list (decision 20).
+# Last RUN that touches packages: the source packages the sources target downloads
+# as the corresponding source of this image.
 RUN mkdir -p /usr/share/printscan \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
  && test -s /usr/share/printscan/source-packages.txt
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=printscan-device
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
+LABEL dev.printscan.sources="${SOURCES_REF}"
 LABEL dev.printscan.uid.messagebus="${MESSAGEBUS_UID}" \
       dev.printscan.uid.avahi="${AVAHI_UID}" \
       dev.printscan.uid.nonroot="${NONROOT_UID}"
 EXPOSE 8090 8631 60000-60009
 
+# Package lists for the sources target, chosen by SOURCES_LISTS.
+FROM scratch AS lists-local
+COPY --from=device /usr/share/printscan/source-packages.txt /lists/device.txt
+
+# The pushed stages only COPY, so the arm64 one needs no emulation.
+FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
+FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
+
+FROM scratch AS lists-pushed
+COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/amd64.txt
+COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/arm64.txt
+
+FROM lists-${SOURCES_LISTS} AS lists
+
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sources-fetch
-ARG IPP_USB_VERSION
-ARG AIRSANE_VERSION
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
-COPY --from=device /usr/share/printscan/source-packages.txt /sources/source-packages.txt
+COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
 # Lines are source package names (--only-source: never mapped through binary names,
 # e.g. coreutils vs coreutils-from). apt-get names any line it cannot resolve and fails.
-RUN chown _apt /sources/ubuntu \
+RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
+ && chown _apt /sources/ubuntu \
  && apt-get update \
  && xargs apt-get source --only-source --download-only < /sources/source-packages.txt \
  && test "$(ls *.dsc | wc -l)" = "$(wc -l < /sources/source-packages.txt)"
-ADD https://github.com/OpenPrinting/ipp-usb/archive/refs/tags/${IPP_USB_VERSION}.tar.gz /sources/upstream/ipp-usb-${IPP_USB_VERSION}.tar.gz
-ADD https://github.com/SimulPiscator/AirSane/archive/refs/tags/${AIRSANE_VERSION}.tar.gz /sources/upstream/AirSane-${AIRSANE_VERSION}.tar.gz
+# Upstream sources as git archives of the pinned commits the binaries were built from.
+COPY --from=ipp-usb /out/upstream/ /sources/upstream/
+COPY --from=airsane /out/upstream/ /sources/upstream/
+# How the image was built.
+COPY images/device/Dockerfile images/device/dbus.conf images/device/avahi-daemon.conf /sources/build/
 
 FROM scratch AS sources
 COPY --from=sources-fetch /sources /sources

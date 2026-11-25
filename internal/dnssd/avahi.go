@@ -27,6 +27,10 @@ const (
 	ifaceUnspec int32 = -1
 	protoUnspec int32 = -1
 
+	// lookupResultLocal is AVAHI_LOOKUP_RESULT_LOCAL: the service browser
+	// sets it on ItemNew for records this host announced.
+	lookupResultLocal uint32 = 8
+
 	resolveTimeout = 2 * time.Second
 )
 
@@ -160,7 +164,9 @@ func (b *browser) collect(ctx context.Context, browsers map[dbus.ObjectPath]stri
 			case "ItemNew":
 				var it item
 				var flags uint32
-				if dbus.Store(s.Body, &it.iface, &it.proto, &it.name, &it.typ, &it.domain, &flags) == nil {
+				// Only instances this host announced: another LAN host can
+				// announce any address, this node's included.
+				if dbus.Store(s.Body, &it.iface, &it.proto, &it.name, &it.typ, &it.domain, &flags) == nil && flags&lookupResultLocal != 0 {
 					items = append(items, it)
 				}
 			case "ItemRemove":

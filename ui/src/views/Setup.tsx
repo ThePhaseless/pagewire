@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import { api, ConflictError, ProblemError, problemMessage } from "../api/client";
 import { useStatus } from "../api/events";
-import { EulaAccept } from "../components/EulaAccept";
+import { acceptedSha, EulaAccept, withAccepted } from "../components/EulaAccept";
 import {
   Button,
   Card,
+  Disclosure,
   InlineError,
   LinkButton,
   PageHeader,
@@ -203,6 +204,10 @@ export function Setup({
   const next = () => {
     if (step === "name" && !(nameOk && locationOk)) {
       setTried(true);
+      // After the error messages render, take keyboard users to the first one.
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>(".setup-view [aria-invalid='true']")?.focus(),
+      );
       return;
     }
     setEdited(draft);
@@ -216,6 +221,7 @@ export function Setup({
   };
 
   const finish = async () => {
+    if (submitting) return;
     // Only licences the wizard showed (and therefore asked about) are written.
     const shown = new Set(setup.eulas.map((e) => `${e.id}@${e.version}`));
     const body: Config = {
@@ -258,7 +264,11 @@ export function Setup({
           </li>
         ))}
       </ol>
-      <PageHeader title={s.steps[step]} description={descriptions[step]} />
+      <PageHeader
+        title={s.steps[step]}
+        description={descriptions[step]}
+        documentTitle={s.stepTitle(idx + 1, STEPS.length, s.steps[step])}
+      />
 
       {step === "detect" && (
         <Detect
@@ -321,8 +331,10 @@ export function Setup({
           <Button onPress={() => go(STEPS[idx - 1] ?? "detect")}>{strings.buttons.back}</Button>
         )}
         {step === "review" ? (
-          <Button variant="primary" onPress={finish} isPending={submitting} isDisabled={conflict}>
-            {s.review.finish}
+          // No isPending: the button unmounts on success, and React Aria's pending announcement
+          // would be left pointing at nothing.
+          <Button variant="primary" onPress={finish} isDisabled={conflict}>
+            {submitting ? s.review.finishing : s.review.finish}
           </Button>
         ) : (
           <Button variant="primary" onPress={next} isDisabled={!canContinue}>
@@ -419,7 +431,11 @@ function Detect({
           <ul className="setup-devices">
             {inventory.devices.map((dev) => (
               <li key={`${dev.bus}-${dev.address}`}>
-                <span className="setup-device-name">{dev.product || s.detect.unnamedDevice}</span>
+                <span className="setup-device-name">
+                  {inventory.simulated
+                    ? s.detect.simulatedName(dev.product || s.detect.unnamedDevice)
+                    : dev.product || s.detect.unnamedDevice}
+                </span>
                 <span className="setup-device-meta">
                   {[
                     dev.manufacturer,
@@ -441,9 +457,13 @@ function Detect({
             <dd>{family(d.printer)}</dd>
             <dt>{s.detect.scannerLabel}</dt>
             <dd>{family(d.scanner || "none")}</dd>
-            <dt>{s.detect.ruleLabel}</dt>
-            <dd>{d.rule}</dd>
           </dl>
+          <Disclosure title={strings.technicalDetails}>
+            <dl className="setup-facts">
+              <dt>{s.detect.ruleLabel}</dt>
+              <dd>{d.rule}</dd>
+            </dl>
+          </Disclosure>
         </Card>
       ) : (
         <Card title={s.detect.searchingTitle}>
@@ -463,13 +483,11 @@ function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; upda
   const simulated = draft.device.mode === "simulated";
   const auto = (id: string | undefined) =>
     id === undefined ? s.driver.automaticUnknown : s.driver.automatic(family(id));
-  const accepted = (id: string, version: string) =>
-    draft.licenses.acceptedEulas.some((r) => r.id === id && r.version === version);
-  const setAccepted = (id: string, version: string, on: boolean) =>
-    update((c) => {
-      const rest = c.licenses.acceptedEulas.filter((r) => !(r.id === id && r.version === version));
-      return { ...c, licenses: { acceptedEulas: on ? [...rest, { id, version }] : rest } };
-    });
+  const setAccepted = (id: string, version: string, sha: string | null) =>
+    update((c) => ({
+      ...c,
+      licenses: { acceptedEulas: withAccepted(c.licenses.acceptedEulas, id, version, sha) },
+    }));
 
   return (
     <>
@@ -478,9 +496,7 @@ function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; upda
           <p>{s.driver.simulated}</p>
         ) : (
           <>
-            {d && (
-              <p>{s.driver.explained(d.rule, family(d.printer), family(d.scanner || "none"))}</p>
-            )}
+            {d && <p>{s.driver.explained(family(d.printer), family(d.scanner || "none"))}</p>}
             <Select
               label={s.driver.driverLabel}
               options={DeviceSchema.shape.driver.options.map((id) => ({
@@ -522,8 +538,8 @@ function Driver({ setup, draft, update }: { setup: SetupDTO; draft: Config; upda
             <EulaAccept
               key={e.id}
               eula={e}
-              isAccepted={accepted(e.id, e.version)}
-              onChange={(on) => setAccepted(e.id, e.version, on)}
+              accepted={acceptedSha(draft.licenses.acceptedEulas, e.id, e.version)}
+              onChange={(sha) => setAccepted(e.id, e.version, sha)}
             />
           ))
         )}

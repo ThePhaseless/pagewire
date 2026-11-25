@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { createEventStore } from "../api/events";
 import { App, overallTone } from "../app";
@@ -26,6 +26,8 @@ import {
   TabPanel,
   Tabs,
   TextField,
+  toast,
+  toastQueue,
 } from "./ui";
 
 afterEach(cleanup);
@@ -135,6 +137,19 @@ describe("components", () => {
     );
     const trigger = screen.getByRole("button", { name: /Paper size/ });
     expect(trigger.textContent).toContain("A4");
+    // Only the selected text: no option markup (such as the hidden check icon) in the trigger.
+    const value = trigger.querySelector(".ui-select-value");
+    expect(value?.textContent).toBe("A4");
+    expect(value?.querySelector("svg, .ui-option-label")).toBeNull();
+  });
+
+  test("problem toasts time out after 10 s, other toasts after 5 s", () => {
+    toast({ title: "Saved", tone: "ok" });
+    toast({ title: "Upload failed", tone: "problem" });
+    const timeouts = Object.fromEntries(
+      toastQueue.visibleToasts.map((t) => [t.content.title, t.timeout]),
+    );
+    expect(timeouts).toEqual({ Saved: 5000, "Upload failed": 10_000 });
   });
 
   test("Dialog has the dialog role, its title as name, and a Close button", async () => {
@@ -231,6 +246,7 @@ const baseStatus = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -299,6 +315,7 @@ describe("app shell", () => {
     }) as unknown as typeof fetch;
     const store = createEventStore({
       newEventSource: () => new FakeEventSource() as unknown as EventSource,
+      notFoundAfterMs: 300,
     });
     render(<App store={store} />);
     const es = FakeEventSource.last;
@@ -332,6 +349,13 @@ describe("app shell", () => {
     const banner = screen.getAllByRole("alert").find((el) => el.classList.contains("app-banner"));
     expect(banner?.textContent).toContain("Line 12: unknown value");
     await screen.findByText("Hall printer");
+    // Settings lists the file's errors itself, so the banner stays away there.
+    act(() => navigate("/settings"));
+    await waitFor(() =>
+      expect(
+        screen.queryAllByRole("alert").filter((el) => el.classList.contains("app-banner")),
+      ).toEqual([]),
+    );
   });
 
   test("link clicks navigate in place and move focus to the new page heading", async () => {
@@ -341,8 +365,22 @@ describe("app shell", () => {
     expect(window.location.pathname).toBe("/print");
     await waitFor(() => expect(document.activeElement?.textContent).toBe("Print"));
     expect(document.activeElement?.tagName).toBe("H1");
+    await waitFor(() => expect(document.title).toBe("Print · Hall printer"));
     act(() => navigate("/nowhere"));
     expect(screen.getByRole("heading", { level: 1, name: "Page not found" })).toBeTruthy();
+  });
+
+  test("a route change clears problem toasts and keeps the others", async () => {
+    mount("/");
+    act(() => FakeEventSource.last.status(baseStatus));
+    act(() => {
+      toast({ title: "Scan failed", tone: "problem" });
+      toast({ title: "Saved", tone: "ok" });
+    });
+    await screen.findByText("Scan failed");
+    fireEvent.click(screen.getByRole("link", { name: "Print" }));
+    await waitFor(() => expect(screen.queryByText("Scan failed")).toBeNull());
+    expect(screen.getByText("Saved")).toBeTruthy();
   });
 
   test("overall tone follows the device phase and the connection", () => {
@@ -356,5 +394,34 @@ describe("app shell", () => {
       overallTone({ ...baseStatus, device: { ...baseStatus.device, phase: "error" } }, true).tone,
     ).toBe("problem");
     expect(overallTone(null, true).tone).toBe("idle");
+  });
+
+  test("no config reads Not set up, and a printer not found is a problem", () => {
+    const probing = { ...baseStatus, device: { ...baseStatus.device, phase: "probing" as const } };
+    const missing = { ...probing, config: { ...probing.config, state: "missing" as const } };
+    expect(overallTone(missing, true)).toEqual({ tone: "idle", label: "Not set up", pulse: false });
+    expect(overallTone(probing, true, true)).toEqual({
+      tone: "problem",
+      label: "Printer not found",
+      pulse: false,
+    });
+    expect(overallTone(missing, true, true).label).toBe("Not set up");
+  });
+
+  test("the header says Printer not found after a few seconds of probing with no printer", async () => {
+    mount("/");
+    const probing = {
+      ...baseStatus,
+      device: {
+        ...baseStatus.device,
+        phase: "probing",
+        inventory: { devices: [], probedAt: "2026-11-24T18:00:00+01:00", simulated: false },
+      },
+    };
+    act(() => FakeEventSource.last.status(probing as Status));
+    // The Status card at / says it too, so look in the header only.
+    const header = within(document.querySelector(".app-header") as HTMLElement);
+    expect(await header.findByText("Starting")).toBeTruthy();
+    expect(await header.findByText("Printer not found", {}, { timeout: 3000 })).toBeTruthy();
   });
 });

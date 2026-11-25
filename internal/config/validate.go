@@ -3,8 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 )
+
+var textSHARe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Known lists what the catalog offers, so this package need not import it.
 type Known struct {
@@ -13,7 +16,8 @@ type Known struct {
 }
 
 // Validate runs the semantic checks a parsed config needs: accepted EULAs
-// exist in the catalog, the driver is a catalog family or auto, and
+// exist in the catalog (matched on id and version), appear once and carry a
+// text sha256, the driver is a catalog family or auto, and
 // device.usb is only set with mode usb. Errors are an *ErrorList without
 // positions; Check adds them.
 func Validate(c *Config, k Known) error {
@@ -28,8 +32,19 @@ func Validate(c *Config, k Known) error {
 		add("/device/driver", "driver %s is not in the catalog", c.Device.Driver)
 	}
 	for i, e := range c.Licenses.AcceptedEULAs {
-		if !slices.Contains(k.EULAs, e) {
-			add(fmt.Sprintf("/licenses/acceptedEulas/%d", i), "EULA %s version %s is not in the catalog", e.ID, e.Version)
+		at := fmt.Sprintf("/licenses/acceptedEulas/%d", i)
+		same := func(o EULARef) bool { return o.ID == e.ID && o.Version == e.Version }
+		switch {
+		case !slices.ContainsFunc(k.EULAs, same):
+			add(at, "EULA %s version %s is not in the catalog", e.ID, e.Version)
+		case slices.ContainsFunc(c.Licenses.AcceptedEULAs[:i], same):
+			add(at, "duplicate: EULA %s version %s is already accepted above", e.ID, e.Version)
+		}
+		switch {
+		case e.TextSHA256 == "":
+			add(at+"/textSha256", "is required: review and accept the licence again in Settings")
+		case !textSHARe.MatchString(e.TextSHA256):
+			add(at+"/textSha256", "must be 64 lowercase hex characters: review and accept the licence again in Settings")
 		}
 	}
 	if len(el.Errors) > 0 {

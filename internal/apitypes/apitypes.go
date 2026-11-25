@@ -68,15 +68,41 @@ type Setup struct {
 	Suggested             config.Config     `json:"suggested"`
 }
 
-// SetupEULA is one EULA the wizard shows.
+// EULA text states: pending until the device agent has staged the vendor
+// archive and reported the text, then available or failed.
+const (
+	EULAPending   = "pending"
+	EULAAvailable = "available"
+	EULAFailed    = "failed"
+)
+
+// SetupEULA is one EULA the wizard shows. Its text is GET /eulas/{id}.
 type SetupEULA struct {
 	ID       string `json:"id"`
 	Version  string `json:"version"`
 	Title    string `json:"title"`
 	Vendor   string `json:"vendor"`
-	URL      string `json:"url"`
 	Summary  string `json:"summary"`
 	Required bool   `json:"required"`
+	State    string `json:"state" jsonschema:"enum=pending,enum=available,enum=failed"`
+	// TextSHA256 is the lowercase hex sha256 of the current licence text, the
+	// value an acceptance records; null unless state is available.
+	TextSHA256 *string `json:"textSha256" jsonschema:"nullable"`
+}
+
+// EULA is the body of GET /eulas/{id}: the licence text read from the
+// verified vendor archive. Text and TextSHA256 are null unless state is
+// available; Message says why when state is failed.
+type EULA struct {
+	ID         string  `json:"id"`
+	Version    string  `json:"version"`
+	Title      string  `json:"title"`
+	Vendor     string  `json:"vendor"`
+	Summary    string  `json:"summary"`
+	State      string  `json:"state" jsonschema:"enum=pending,enum=available,enum=failed"`
+	Message    string  `json:"message"`
+	TextSHA256 *string `json:"textSha256" jsonschema:"nullable"`
+	Text       *string `json:"text" jsonschema:"nullable"`
 }
 
 // Status is the body of GET /status and the SSE status event.
@@ -122,9 +148,17 @@ type StatusPrinter struct {
 	URI       string   `json:"uri"`
 	State     string   `json:"state" jsonschema:"enum=idle,enum=processing,enum=stopped,enum=unknown"`
 	Reasons   []string `json:"reasons"`
-	Formats   []string `json:"formats"`
-	Media     []string `json:"media"`
-	Markers   []Marker `json:"markers"`
+	Formats   []string `json:"formats"` // the printer's own document-format-supported
+	// ConvertedFormats are the other inputs printscan converts for this printer.
+	ConvertedFormats []FormatConversion `json:"convertedFormats"`
+	Media            []string           `json:"media"`
+	Markers          []Marker           `json:"markers"`
+}
+
+// FormatConversion is one upload format printscan converts before printing.
+type FormatConversion struct {
+	From string `json:"from"` // detected MIME type, e.g. image/png
+	To   string `json:"to"`   // MIME type sent to the printer
 }
 
 // Marker is one supply level (IPP marker-*).

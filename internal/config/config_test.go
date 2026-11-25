@@ -81,7 +81,7 @@ func TestNumberLikeStringsRoundTrip(t *testing.T) {
 	want := Default("2024")
 	want.Location = "true"
 	want.Device.USB = &USB{VendorID: "0482", ProductID: "0001", Serial: "012345"}
-	want.Licenses.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24"}}
+	want.Licenses.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24", TextSHA256: testSHA}}
 	b, err := yaml.Marshal(want)
 	if err != nil {
 		t.Fatal(err)

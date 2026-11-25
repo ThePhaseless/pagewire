@@ -43,6 +43,8 @@ export type StoreOptions = {
   loadStatus?: () => Promise<Status>;
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /** How long the device may probe without finding a printer before usePrinterNotFound says so. */
+  notFoundAfterMs?: number;
 };
 
 export type Snapshot = {
@@ -116,6 +118,7 @@ export function createEventStore(opts: StoreOptions = {}) {
   }
 
   return {
+    notFoundAfterMs: opts.notFoundAfterMs ?? 5000,
     start() {
       if (running) return;
       running = true;
@@ -183,6 +186,30 @@ export function useEvent<T extends EventType>(type: T): EventPayload[T] | null {
   const store = useContext(EventsContext);
   const subscribe = useCallback((fn: () => void) => store.on(type, fn), [store, type]);
   return useSyncExternalStore(subscribe, () => store.latest(type));
+}
+
+/**
+ * True once a configured device has been probing for longer than the store's notFoundAfterMs
+ * with an inventory but no decision, which means no usable printer is plugged in or switched on.
+ * Without an inventory the device agent has not reported yet, so nothing is known.
+ */
+export function usePrinterNotFound(): boolean {
+  const store = useContext(EventsContext);
+  const status = useStatus();
+  const searching =
+    status !== null &&
+    status.config.state !== "missing" &&
+    status.device.phase === "probing" &&
+    status.device.inventory !== null &&
+    status.device.decision === null;
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    setLate(false);
+    if (!searching) return;
+    const t = setTimeout(() => setLate(true), store.notFoundAfterMs);
+    return () => clearTimeout(t);
+  }, [searching, store]);
+  return searching && late;
 }
 
 export const MAX_JOBS = 20;

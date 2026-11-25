@@ -24,6 +24,7 @@ type apiRoot struct {
 	ConfigResponse apitypes.ConfigResponse
 	ConfigEvent    apitypes.ConfigEvent
 	Setup          apitypes.Setup
+	EULA           apitypes.EULA
 	Status         apitypes.Status
 	PrintOptions   apitypes.PrintOptions
 	Job            apitypes.Job

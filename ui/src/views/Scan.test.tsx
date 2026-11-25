@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createEventStore, EventsContext } from "../api/events";
+import { toastQueue } from "../components/ui";
 import type { Config, ConfigResponse, Scan as ScanDTO, ScannerCaps, Status } from "../gen/api";
 import { Scan } from "./Scan";
 
@@ -11,6 +12,7 @@ let caps: ScannerCaps;
 let configResponse: ConfigResponse | null = null;
 let postScan: () => Response;
 let scannerFailures = 0;
+let listFailures = 0;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -33,10 +35,19 @@ const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     return json(caps);
   }
-  if (path === "/api/v1/scans" && method === "GET") return json(scans);
+  if (path === "/api/v1/scans" && method === "GET") {
+    if (listFailures > 0) {
+      listFailures--;
+      return problem(500, "Internal Server Error");
+    }
+    return json(scans);
+  }
   if (path === "/api/v1/scans" && method === "POST") return postScan();
-  if (path.startsWith("/api/v1/scans/") && method === "DELETE")
-    return new Response(null, { status: 204 });
+  if (path.startsWith("/api/v1/scans/") && method === "DELETE") {
+    // A running scan is canceled (202 with its body), a finished one deleted (204).
+    const s = scans.find((x) => path.endsWith(x.id));
+    return s?.state === "scanning" ? json(s, 202) : new Response(null, { status: 204 });
+  }
   if (path === "/api/v1/config") {
     return configResponse ? json(configResponse) : problem(404, "Not found");
   }
@@ -49,6 +60,7 @@ beforeEach(() => {
   scans = [];
   configResponse = null;
   scannerFailures = 0;
+  listFailures = 0;
   caps = {
     sources: ["platen", "adf", "adf-duplex"],
     resolutions: [75, 150, 300, 600],
@@ -107,6 +119,7 @@ const noScanner: Status = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -165,12 +178,14 @@ class FakeEventSource {
 const emit = (type: string, data: unknown) =>
   act(async () => FakeEventSource.last?.emit(type, data));
 
-async function renderScan(status: Status | null) {
+async function renderScan(status: Status | null, online = true) {
   const store = createEventStore({
     newEventSource: () => new FakeEventSource() as unknown as EventSource,
     minBackoffMs: 0,
+    notFoundAfterMs: 20,
   });
   store.start();
+  if (online) act(() => FakeEventSource.last?.onopen?.(new Event("open")));
   if (status) act(() => FakeEventSource.last?.emit("status", status));
   let view!: ReturnType<typeof render>;
   await act(async () => {
@@ -266,7 +281,11 @@ describe("Scan view", () => {
     await waitFor(() => expect(disabled(scanButton())).toBe(false));
     await press(scanButton());
     expect(screen.getByRole("progressbar", { name: "Scanning…" })).toBeTruthy();
-    expect(disabled(scanButton())).toBe(true);
+    // Pending, not disabled, so keyboard focus stays on the button.
+    expect(disabled(scanButton())).toBe(false);
+    expect(scanButton().hasAttribute("data-pending")).toBe(true);
+    // No page count before the first page arrives.
+    expect(document.body.textContent).not.toContain("0 pages");
 
     const live = { state: "scanning" as const, format: "jpeg" as const };
     await emit("scan", scan({ ...live, pages: 1 }));
@@ -288,6 +307,8 @@ describe("Scan view", () => {
     expect(link.getAttribute("href")).toBe(`/api/v1/scans/${ID}/download`);
     expect(link.hasAttribute("download")).toBe(true);
     expect(disabled(scanButton())).toBe(false);
+    expect(scanButton().hasAttribute("data-pending")).toBe(false);
+    expect(toastQueue.visibleToasts.map((t) => t.content.title)).toEqual(["Scan ready, 2 pages"]);
   });
 
   test("the download names the file type", async () => {
@@ -352,11 +373,97 @@ describe("Scan view", () => {
     expect(disabled(scanButton())).toBe(false);
   });
 
-  test("a scanner that is processing keeps the Scan button disabled", async () => {
+  test("a scanner that is processing shows the Scan button pending", async () => {
     await renderScan({ ...ready, scanner: { ...ready.scanner, state: "processing" } });
-    // Options showing means the capabilities arrived, so only the processing state disables Scan.
+    // Options showing means the capabilities arrived, so only the processing state holds Scan.
+    await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
+    expect(scanButton().hasAttribute("data-pending")).toBe(true);
+  });
+
+  test("scanning is off while the connection to printscan is down", async () => {
+    await renderScan(ready, false);
     await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
     expect(disabled(scanButton())).toBe(true);
+  });
+
+  test("a running scan can be canceled and stays listed as canceled", async () => {
+    scans = [scan({ state: "scanning", pages: 1 })];
+    await renderScan(ready);
+    const cancel = await screen.findByRole("button", { name: "Cancel scan" });
+    await press(cancel);
+    expect(calls).toContainEqual({ method: "DELETE", path: `/api/v1/scans/${ID}` });
+    const list = screen.getByRole("list", { name: "Recent scans" });
+    expect(within(list).getAllByRole("listitem").length).toBe(1);
+    await emit("scan", scan({ state: "canceled", pages: 0 }));
+    expect(screen.getByText("The scan was canceled.")).toBeTruthy();
+    expect(within(list).getByText("Canceled")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancel scan" })).toBeNull();
+    // Canceling is not announced as a failure.
+    expect(toastQueue.visibleToasts.length).toBe(0);
+  });
+
+  test("a scan that fails while you watch is announced", async () => {
+    scans = [scan({ state: "scanning", pages: 0 })];
+    await renderScan(ready);
+    await screen.findByRole("button", { name: "Cancel scan" });
+    await emit("scan", scan({ state: "failed", pages: 0, error: "paper jam" }));
+    expect(toastQueue.visibleToasts.map((t) => t.content.title)).toEqual(["Scan failed"]);
+  });
+
+  test("an empty history says so, and a failed list can be retried", async () => {
+    listFailures = 1;
+    await renderScan(ready);
+    await press(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No recent scans")).toBeTruthy();
+    expect(screen.queryByText("Could not load the scan list.")).toBeNull();
+  });
+
+  test("the page preview steps to the previous and next page", async () => {
+    scans = [scan({ pages: 3 })];
+    await renderScan(ready);
+    await press(await screen.findByRole("button", { name: "Open page 1" }));
+    let dialog = screen.getByRole("dialog", { name: "Page 1 of 3" });
+    expect(disabled(within(dialog).getByRole("button", { name: "Previous page" }))).toBe(true);
+    await press(within(dialog).getByRole("button", { name: "Next page" }));
+    dialog = screen.getByRole("dialog", { name: "Page 2 of 3" });
+    expect(within(dialog).getByAltText("Page 2")).toBeTruthy();
+    await press(within(dialog).getByRole("button", { name: "Next page" }));
+    dialog = screen.getByRole("dialog", { name: "Page 3 of 3" });
+    expect(disabled(within(dialog).getByRole("button", { name: "Next page" }))).toBe(true);
+    await press(within(dialog).getByRole("button", { name: "Previous page" }));
+    expect(screen.getByRole("dialog", { name: "Page 2 of 3" })).toBeTruthy();
+  });
+
+  test("full scan storage asks you to delete old scans", async () => {
+    postScan = () =>
+      json(
+        {
+          type: "storage-full",
+          title: "Insufficient Storage",
+          status: 507,
+          detail: "stored scans use 1 GiB; delete old scans to scan again",
+          errors: [],
+        },
+        507,
+      );
+    await renderScan(ready);
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    expect(screen.getByText(/Delete old scans under Recent scans/)).toBeTruthy();
+  });
+
+  test("a device that finds no printer tells you to plug it in", async () => {
+    await renderScan({
+      ...noScanner,
+      config: { ...noScanner.config, state: "applied" },
+      device: {
+        ...noScanner.device,
+        phase: "probing",
+        mode: "probe",
+        inventory: { devices: [], probedAt: "2026-11-24T18:00:00Z", simulated: false },
+      },
+    });
+    expect(await screen.findByText(/Plug the printer in with USB/)).toBeTruthy();
   });
 
   test("a failed capabilities request can be retried", async () => {
@@ -377,7 +484,8 @@ describe("Scan view", () => {
   });
 
   test("the list is fetched again after the event stream reconnects", async () => {
-    await renderScan(ready);
+    // Not yet connected: the first open below is the first connect, not a reconnect.
+    await renderScan(ready, false);
     const lists = () => calls.filter((c) => c.method === "GET" && c.path === "/api/v1/scans");
     await waitFor(() => expect(lists().length).toBe(1));
     scans = [scan()];

@@ -41,6 +41,7 @@ licenses:
   acceptedEulas:
     - id: hplip-plugin
       version: "3.24.4"
+      textSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 `
 
 // parseErrors parses src and returns its field errors, failing when Parse
@@ -109,7 +110,7 @@ func TestParseFull(t *testing.T) {
 			Defaults:      ScanDefaults{Source: "adf-duplex", Resolution: 600, ColorMode: "grayscale", Format: "jpeg"},
 			RetentionDays: 0,
 		},
-		Licenses: Licenses{AcceptedEULAs: []EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}},
+		Licenses: Licenses{AcceptedEULAs: []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: testSHA}}},
 	}
 	if !reflect.DeepEqual(*c, want) {
 		t.Errorf("full file\n got  %+v\n want %+v", *c, want)
@@ -226,6 +227,21 @@ func TestParseErrors(t *testing.T) {
 			name: "string where integer expected",
 			src:  minimalYAML + "scan:\n  retentionDays: soon\n",
 			path: "/scan/retentionDays", line: 4, column: 18, msg: "integer",
+		},
+		{
+			name: "name starting with -",
+			src:  "apiVersion: printscan/v1\nname: \"-h\"\n",
+			path: "/name", line: 2, column: 7, msg: "must not start with -",
+		},
+		{
+			name: "serial too long",
+			src:  minimalYAML + "device:\n  usb:\n    vendorId: \"03f0\"\n    productId: \"2b17\"\n    serial: \"" + strings.Repeat("9", 127) + "\"\n",
+			path: "/device/usb/serial", line: 7, column: 13, msg: "126",
+		},
+		{
+			name: "serial with a control character",
+			src:  minimalYAML + "device:\n  usb:\n    vendorId: \"03f0\"\n    productId: \"2b17\"\n    serial: \"AB\\u0007C\"\n",
+			path: "/device/usb/serial", line: 7, column: 13, msg: "control",
 		},
 		{
 			name: "missing name",

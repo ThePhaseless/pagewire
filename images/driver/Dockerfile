@@ -6,20 +6,28 @@
 #   docker buildx build -f images/driver/Dockerfile --target ps .
 #   (ps, hplip, gutenprint, ghostscript)
 #   docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .
+# The sources target lists the packages of the four local targets by default. CI passes
+# SOURCES_LISTS=pushed and PUSHED_IMAGE=<the image it pushed for this commit>, so the
+# list is the union of that image's amd64 and arm64 package lists instead.
 
-ARG PAPPL_VERSION=v1.4.12 # renovate: datasource=github-tags depName=michaelrsweet/pappl
-ARG PAPPL_RETROFIT_VERSION=1.0b3 # renovate: datasource=github-tags depName=OpenPrinting/pappl-retrofit
+# Upstreams are built by commit; the Renovate comment keeps the release tag or branch.
+ARG PAPPL_COMMIT=6db8e137557ad84662e78d24fdb2a591c621f4ac # renovate: datasource=github-tags depName=michaelrsweet/pappl currentValue=v1.4.12
+ARG PAPPL_RETROFIT_COMMIT=9f0d34031e0a1c16acb58c2dffc1413bc8f6b497 # renovate: datasource=github-tags depName=OpenPrinting/pappl-retrofit currentValue=1.0b3
 ARG PS_PRINTER_APP_COMMIT=5ce06c52f8a3a00420587f885e7eb4a238d586ee # renovate: datasource=git-refs depName=https://github.com/OpenPrinting/ps-printer-app currentValue=master
 ARG HPLIP_PRINTER_APP_COMMIT=90478d9edd063df2756e1a1045aaf1bc4012e3f5 # renovate: datasource=git-refs depName=https://github.com/OpenPrinting/hplip-printer-app currentValue=master
 ARG GUTENPRINT_PRINTER_APP_COMMIT=fbfce9086b3e612447eec729240ab68986608857 # renovate: datasource=git-refs depName=https://github.com/OpenPrinting/gutenprint-printer-app currentValue=master
 ARG GHOSTSCRIPT_PRINTER_APP_COMMIT=acf18a476bee525b88526ff8e0154f004b361914 # renovate: datasource=git-refs depName=https://github.com/OpenPrinting/ghostscript-printer-app currentValue=master
+ARG VERSION=dev
+ARG SOURCES_LISTS=local
+# A sentinel: the pushed-* stages that read it are never built in local mode.
+ARG PUSHED_IMAGE=scratch
 
 # PAPPL and pappl-retrofit, both under /usr/local. The rock's PAPPL edits are in
 # images/driver/patches/pappl-max-vendor.patch (PAPPL_MAX_VENDOR is still 32 in 1.4.12).
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS pappl-base
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
-ARG PAPPL_VERSION
-ARG PAPPL_RETROFIT_VERSION
+ARG PAPPL_COMMIT
+ARG PAPPL_RETROFIT_COMMIT
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git build-essential \
       autoconf automake libtool autotools-dev autopoint gettext pkg-config perl-base \
@@ -28,21 +36,29 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY images/driver/patches/pappl-max-vendor.patch /src/
 WORKDIR /src/pappl
-RUN git clone --depth 1 --branch "${PAPPL_VERSION}" https://github.com/michaelrsweet/pappl.git . \
+# The installed patch is the notice of modification that Apache-2.0 4(b) asks for.
+RUN git init -q . \
+ && git fetch -q --depth 1 https://github.com/michaelrsweet/pappl.git "${PAPPL_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && mkdir -p /out/upstream \
+ && git archive --prefix="pappl-${PAPPL_COMMIT}/" -o "/out/upstream/pappl-${PAPPL_COMMIT}.tar.gz" HEAD \
  && patch -p1 < /src/pappl-max-vendor.patch \
  && ./configure --prefix=/usr/local --enable-libjpeg --enable-libpng --enable-libusb --with-dnssd=avahi \
  && make -j"$(nproc)" \
  && make install \
- && install -D -m 0644 -t /out/licenses/pappl LICENSE NOTICE
+ && install -D -m 0644 -t /out/licenses/pappl LICENSE NOTICE /src/pappl-max-vendor.patch
 WORKDIR /src/pappl-retrofit
-RUN git clone --depth 1 --branch "${PAPPL_RETROFIT_VERSION}" https://github.com/OpenPrinting/pappl-retrofit.git . \
+RUN git init -q . \
+ && git fetch -q --depth 1 https://github.com/OpenPrinting/pappl-retrofit.git "${PAPPL_RETROFIT_COMMIT}" \
+ && git checkout -q FETCH_HEAD \
+ && git archive --prefix="pappl-retrofit-${PAPPL_RETROFIT_COMMIT}/" -o "/out/upstream/pappl-retrofit-${PAPPL_RETROFIT_COMMIT}.tar.gz" HEAD \
  && ./autogen.sh \
  && ./configure --prefix=/usr/local \
  && make -j"$(nproc)" \
  && make install \
  && ldconfig \
  && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING \
- # A2: pappl-retrofit runs CUPS backends from "/usr/lib/<app>/backend" (a
+ # pappl-retrofit runs CUPS backends from "/usr/lib/<app>/backend" (a
  # symlink to CUPS's serverbin that the apps' "make install" makes only for
  # prefix /usr), not from CUPS's /usr/lib/cups/backend. The targets below
  # set BACKEND_DIR and FILTER_DIR, which pappl-retrofit reads at start-up.
@@ -51,7 +67,7 @@ RUN git clone --depth 1 --branch "${PAPPL_RETROFIT_VERSION}" https://github.com/
 
 # Each retrofit app at its pinned commit, built as the rock's app part builds it
 # ("make LDFLAGS=-ljpeg", then "make install"), under /usr/local.
-# A1: every app must use pappl-retrofit's CUPS backends only.
+# Every app must use pappl-retrofit's CUPS backends only, never PAPPL's own.
 COPY --chmod=0755 <<'SCRIPT' /src/build-app.sh
 #!/bin/sh
 # usage: build-app.sh <app> <commit>
@@ -62,6 +78,8 @@ cd /src/app
 git init -q .
 git fetch -q --depth 1 "https://github.com/OpenPrinting/${app}.git" "$2"
 git checkout -q FETCH_HEAD
+mkdir -p /out/upstream
+git archive --prefix="${app}-$2/" -o "/out/upstream/${app}-$2.tar.gz" HEAD
 grep -q 'PR_COPTIONS_NO_PAPPL_BACKENDS' "${app}.c"
 grep -q 'PR_COPTIONS_CUPS_BACKENDS' "${app}.c"
 make -j"$(nproc)" prefix=/usr/local LDFLAGS=-ljpeg
@@ -137,6 +155,14 @@ RUN ldconfig \
  && test -s /usr/share/printscan/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=printscan-driver-ps
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
+LABEL dev.printscan.sources="${SOURCES_REF}"
 EXPOSE 8001
 CMD ["/usr/local/bin/ps-printer-app", "-o", "server-port=8001", "server"]
 
@@ -148,7 +174,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=hplip-build /usr/local /usr/local
 COPY --from=hplip-build /out/licenses /usr/share/licenses
-# HP plug-in paths point into the blob PVC (decision 14). mkdir the parents,
+# HP plug-in paths point into the blob PVC, where the plug-in is installed after
+# the user accepts HP's licence; the image never contains it. mkdir the parents,
 # remove whatever is at each link path, then link, so no link lands inside a directory.
 RUN ldconfig \
  && mkdir -p "/var/lib/${APP}/ppd" "/var/spool/${APP}" \
@@ -166,6 +193,14 @@ RUN ldconfig \
  && test -s /usr/share/printscan/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=printscan-driver-hplip
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
+LABEL dev.printscan.sources="${SOURCES_REF}"
 EXPOSE 8002
 CMD ["/usr/local/bin/hplip-printer-app", "-o", "server-port=8002", "server"]
 
@@ -186,6 +221,14 @@ RUN ldconfig \
  && test -s /usr/share/printscan/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=printscan-driver-gutenprint
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
+LABEL dev.printscan.sources="${SOURCES_REF}"
 EXPOSE 8003
 CMD ["/usr/local/bin/gutenprint-printer-app", "-o", "server-port=8003", "server"]
 
@@ -206,23 +249,39 @@ RUN ldconfig \
  && test -s /usr/share/printscan/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+# Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
+# main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
+ARG VERSION
+ARG IMAGE=printscan-driver-ghostscript
+ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
+LABEL dev.printscan.sources="${SOURCES_REF}"
 EXPOSE 8004
 CMD ["/usr/local/bin/ghostscript-printer-app", "-o", "server-port=8004", "server"]
 
-# Corresponding source (decision 20): the union of the four targets' package
-# lists, plus the upstream tarballs of everything built from source and the patch.
+# Package lists for the sources target, chosen by SOURCES_LISTS.
+FROM scratch AS lists-local
+COPY --from=ps /usr/share/printscan/source-packages.txt /lists/ps.txt
+COPY --from=hplip /usr/share/printscan/source-packages.txt /lists/hplip.txt
+COPY --from=gutenprint /usr/share/printscan/source-packages.txt /lists/gutenprint.txt
+COPY --from=ghostscript /usr/share/printscan/source-packages.txt /lists/ghostscript.txt
+
+# The pushed stages only COPY, so the arm64 one needs no emulation.
+FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
+FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
+
+FROM scratch AS lists-pushed
+COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/amd64.txt
+COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/arm64.txt
+
+FROM lists-${SOURCES_LISTS} AS lists
+
+# Corresponding source: the union of the package lists, plus git archives of the
+# pinned commits of everything built from source, the patch and the build files.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sources-fetch
-ARG PAPPL_VERSION
-ARG PAPPL_RETROFIT_VERSION
-ARG PS_PRINTER_APP_COMMIT
-ARG HPLIP_PRINTER_APP_COMMIT
-ARG GUTENPRINT_PRINTER_APP_COMMIT
-ARG GHOSTSCRIPT_PRINTER_APP_COMMIT
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
-COPY --from=ps /usr/share/printscan/source-packages.txt /sources/lists/ps.txt
-COPY --from=hplip /usr/share/printscan/source-packages.txt /sources/lists/hplip.txt
-COPY --from=gutenprint /usr/share/printscan/source-packages.txt /sources/lists/gutenprint.txt
-COPY --from=ghostscript /usr/share/printscan/source-packages.txt /sources/lists/ghostscript.txt
+COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
 # Lines are source package names (--only-source: never mapped through binary names).
 # apt-get names any line it cannot resolve and fails.
@@ -231,13 +290,13 @@ RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
  && apt-get update \
  && xargs apt-get source --only-source --download-only < /sources/source-packages.txt \
  && test "$(ls *.dsc | wc -l)" = "$(wc -l < /sources/source-packages.txt)"
-ADD https://github.com/michaelrsweet/pappl/archive/refs/tags/${PAPPL_VERSION}.tar.gz /sources/upstream/pappl-${PAPPL_VERSION}.tar.gz
-ADD https://github.com/OpenPrinting/pappl-retrofit/archive/refs/tags/${PAPPL_RETROFIT_VERSION}.tar.gz /sources/upstream/pappl-retrofit-${PAPPL_RETROFIT_VERSION}.tar.gz
-ADD https://github.com/OpenPrinting/ps-printer-app/archive/${PS_PRINTER_APP_COMMIT}.tar.gz /sources/upstream/ps-printer-app-${PS_PRINTER_APP_COMMIT}.tar.gz
-ADD https://github.com/OpenPrinting/hplip-printer-app/archive/${HPLIP_PRINTER_APP_COMMIT}.tar.gz /sources/upstream/hplip-printer-app-${HPLIP_PRINTER_APP_COMMIT}.tar.gz
-ADD https://github.com/OpenPrinting/gutenprint-printer-app/archive/${GUTENPRINT_PRINTER_APP_COMMIT}.tar.gz /sources/upstream/gutenprint-printer-app-${GUTENPRINT_PRINTER_APP_COMMIT}.tar.gz
-ADD https://github.com/OpenPrinting/ghostscript-printer-app/archive/${GHOSTSCRIPT_PRINTER_APP_COMMIT}.tar.gz /sources/upstream/ghostscript-printer-app-${GHOSTSCRIPT_PRINTER_APP_COMMIT}.tar.gz
+COPY --from=pappl-base /out/upstream/ /sources/upstream/
+COPY --from=ps-build /out/upstream/ /sources/upstream/
+COPY --from=hplip-build /out/upstream/ /sources/upstream/
+COPY --from=gutenprint-build /out/upstream/ /sources/upstream/
+COPY --from=ghostscript-build /out/upstream/ /sources/upstream/
 COPY images/driver/patches/ /sources/patches/
+COPY images/driver/Dockerfile /sources/build/
 
 FROM scratch AS sources
 COPY --from=sources-fetch /sources /sources

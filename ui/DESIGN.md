@@ -2,11 +2,11 @@
 
 printscan runs one household printer and scanner. People reach the web UI from a phone in the hallway ("print this boarding pass"), from a laptop at a desk, and now and then from the homelab owner's screen while setting up the device. Each visit is a short task: print, scan, check why the printer is offline, change a default. Every screen is an Operate surface: the interface should get out of the way, look the same from screen to screen, and keep its personality to small details.
 
-There is no PRODUCT.md yet. The product facts above come from the implementation plan. Nobody was interviewed for them.
+There is no PRODUCT.md yet. The product facts above are the project's own assumptions; nobody was interviewed for them.
 
 ## World: paper and process ink
 
-The ground is cool office paper, the text is slate ink, and there is a single process-blue accent, the blue of a cyan cartridge mixed down to something you can read. Content sits on sheets: white cards on a slightly darker paper ground, each with a hairline edge and a soft two-layer shadow, like pages lying on a desk. Status colours appear only on the header dot, on badges, on banners and on marker meters (U19 colours those with the printer's own marker colours).
+The ground is cool office paper, the text is slate ink, and there is a single process-blue accent, the blue of a cyan cartridge mixed down to something you can read. Content sits on sheets: white cards on a slightly darker paper ground, each with a hairline edge and a soft two-layer shadow, like pages lying on a desk. Status colours appear only on the header dot, on badges, on banners and on marker meters (which use the printer's own marker colours).
 
 The paper is cool and slightly blue, the way copier paper looks under LED light. The dark theme turns the same system over: deep slate paper, light ink, and a lighter version of the same blue.
 
@@ -16,23 +16,24 @@ The theme follows `prefers-color-scheme`. People print in daylight and at night,
 
 ### Colour roles
 
-| Token                                   | Role                                                                      | Light                    | Dark                    |
-| --------------------------------------- | ------------------------------------------------------------------------- | ------------------------ | ----------------------- |
-| `--paper`                               | Page ground                                                               | `oklch(0.985 0.004 250)` | `oklch(0.19 0.018 255)` |
-| `--paper-raised`                        | Cards, inputs, popovers, dialogs                                          | white                    | `oklch(0.235 0.02 255)` |
-| `--paper-sunken`                        | Wells: drop zone, progress track, hover fill                              | `oklch(0.955 …)`         | `oklch(0.165 …)`        |
-| `--rail`                                | Navigation rail and tab bar                                               | `oklch(0.965 …)`         | `oklch(0.21 …)`         |
-| `--ink`                                 | Body text                                                                 | `oklch(0.24 0.025 255)`  | `oklch(0.94 …)`         |
-| `--ink-muted`                           | Secondary text, descriptions (at least 4.5:1 on paper and raised paper)   | `oklch(0.45 …)`          | `oklch(0.78 …)`         |
-| `--ink-faint`                           | Placeholders, idle icons, input borders on hover                          | `oklch(0.53 …)`          | `oklch(0.68 …)`         |
-| `--rule` / `--rule-strong`              | Hairlines / control borders                                               |                          |                         |
-| `--accent`                              | Primary buttons, selected controls, the active nav item                   | `oklch(0.5 0.15 250)`    | `oklch(0.72 0.13 245)`  |
-| `--accent-tint`                         | Selected backgrounds (active nav, focused option, drop target)            |                          |                         |
-| `--accent-text`                         | Links and quiet buttons                                                   |                          |                         |
-| `--ok`, `--busy`, `--problem`, `--idle` | Status dots, borders and meters                                           | green, amber, red, slate |                         |
-| `--*-tint`, `--*-text`                  | Banner and card backgrounds, and status text that passes contrast on them |                          |                         |
-| `--focus-ring`                          | Every focus outline                                                       |                          |                         |
-| `--selection`, `--scrim`                | Text selection, modal backdrop                                            |                          |                         |
+| Token                                   | Role                                                                                      | Light                    | Dark                    |
+| --------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------ | ----------------------- |
+| `--paper`                               | Page ground                                                                               | `oklch(0.985 0.004 250)` | `oklch(0.19 0.018 255)` |
+| `--paper-raised`                        | Cards, inputs, popovers, dialogs                                                          | white                    | `oklch(0.235 0.02 255)` |
+| `--paper-sunken`                        | Wells: drop zone, progress track, hover fill                                              | `oklch(0.955 …)`         | `oklch(0.165 …)`        |
+| `--rail`                                | Navigation rail and tab bar                                                               | `oklch(0.965 …)`         | `oklch(0.21 …)`         |
+| `--ink`                                 | Body text                                                                                 | `oklch(0.24 0.025 255)`  | `oklch(0.94 …)`         |
+| `--ink-muted`                           | Secondary text, descriptions (at least 4.5:1 on paper and raised paper)                   | `oklch(0.45 …)`          | `oklch(0.78 …)`         |
+| `--ink-faint`                           | Placeholders, idle icons, input borders on hover                                          | `oklch(0.53 …)`          | `oklch(0.68 …)`         |
+| `--rule` / `--rule-strong`              | Hairlines / dividers and the drop zone edge                                               |                          |                         |
+| `--control-border`                      | Borders of buttons, inputs, selects and steppers, and the off switch track (at least 3:1) | `oklch(0.6 …)`           | `oklch(0.57 …)`         |
+| `--accent`                              | Primary buttons, selected controls, the active nav item                                   | `oklch(0.5 0.15 250)`    | `oklch(0.72 0.13 245)`  |
+| `--accent-tint`                         | Selected backgrounds (active nav, focused option, drop target)                            |                          |                         |
+| `--accent-text`                         | Links and quiet buttons                                                                   |                          |                         |
+| `--ok`, `--busy`, `--problem`, `--idle` | Status dots, borders and meters                                                           | green, amber, red, slate |                         |
+| `--*-tint`, `--*-text`                  | Banner and card backgrounds, and status text that passes contrast on them                 |                          |                         |
+| `--focus-ring`                          | Every focus outline                                                                       |                          |                         |
+| `--selection`, `--scrim`                | Text selection, modal backdrop                                                            |                          |                         |
 
 Colours are always written as `oklch()`. Do not write raw hex in component or view CSS; reach for a role. When a view needs a colour that has no role yet, add the role here and in `tokens.css` first.
 
@@ -57,13 +58,15 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 - Every interactive target is at least `--touch` (44 px) in both directions.
 - Shell metrics: `--tabbar-height` 64 px, `--rail-width` 88 px, `--rail-width-wide` 240 px, `--content-max` 72 rem.
 - Safe-area insets (`--safe-*`) pad the header, the tab bar, overlays and toasts (`viewport-fit=cover`).
+- `scroll-padding-block` keeps a focused control clear of the sticky header, the phone tab bar and a visible toast. While a toast shows, `--toast-reserve` adds about one toast's height to the page's bottom padding. While a sticky action bar shows (Settings with unsaved edits), `--bar-reserve` adds its height there and lifts the toast region above it.
+- Button labels wrap rather than overflow, and the device name in the header keeps room for about ten characters; at large text sizes the status badge moves to a second line.
 
 ### Motion
 
 - Durations: `--dur-fast` 120 ms for hover and press, `--dur` 180 ms for state changes, `--dur-slow` 240 ms for dialogs and progress fills, all with `--ease-out` (an exponential ease-out).
 - Motion only reports state: a popover or dialog opening, a switch flipping, a progress fill growing, and the one authored moment, the header dot breathing while the device is probing or deploying.
 - Nothing animates on page load, and there are no entrance sequences.
-- Under `prefers-reduced-motion: reduce` every duration token drops to 0 and the infinite animations (the breathing dot and the indeterminate bar) stop.
+- Under `prefers-reduced-motion: reduce` every duration token drops to 0, the breathing dot stops, and the indeterminate bar becomes a static striped track across its full width.
 
 ## Layers
 
@@ -75,7 +78,7 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 
 ## App shell (`src/app.tsx`)
 
-- The header is sticky and slightly translucent. It shows the paper-sheet mark, the device name (the config's `name`, or the last good config's while the file is invalid, else "printscan") and a `StatusBadge` for the device phase: Ready, Starting (breathing), Needs attention, Not set up, or Offline when the event stream is down.
+- The header is sticky and slightly translucent. It shows the paper-sheet mark, the device name (the config's `name`, or the last good config's while the file is invalid, else "printscan") and a `StatusBadge` for the device phase: Ready, Starting (breathing), Needs attention, Not set up (no config file), Printer not found (a configured device has been looking for a printer for 5 s), or Offline when the event stream is down.
 - Navigation has four destinations: Status, Print, Scan and Settings.
   - Under 768 px it is a bottom tab bar, and the current item gets a tinted pill behind its icon.
   - From 768 px it is a compact rail with the icon above the label.
@@ -83,8 +86,10 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 - While the config file is missing, the shell hides the navigation and redirects every route to `/setup`.
 - Banners sit above the page:
   - offline (amber, after 2.5 s without the stream);
-  - invalid config (red, with the first error's line and message and a link to Settings).
+  - invalid config (red, with the first error's line and message and a link to Settings), except on Settings, which lists the errors itself.
 - A skip link, the toast region, and focus moving to the page `h1` after each navigation.
+- Pages that hold unsaved work block navigation to another page with `useNavigationBlocker` (`src/router.tsx`): links, `navigate()` and Back/Forward wait for the page to confirm. Settings asks in an alert dialog while it has unsaved edits, and also sets `beforeunload`.
+- `document.title` is the page `h1` and the device name ("Print · Hall printer"), or `printscan` before one is set. In setup the title carries the step ("Step 2 of 5: Name and location") through `PageHeader`'s `documentTitle`.
 
 ## Components (`src/components/ui.tsx`)
 
@@ -94,15 +99,17 @@ They are styled wrappers over react-aria-components 1.22. They take their copy f
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Button`                                           | Variants `primary` (one per view, for its main action), `secondary` (default), `quiet` (text-like, accent), `danger`. RAC states: hovered, pressed, disabled, pending.                                                                                 |
 | `LinkButton`                                       | A link that looks like a button, for navigation and downloads.                                                                                                                                                                                         |
-| `TextField`, `NumberField`, `Select`, `RadioGroup` | Label above, description and `errorMessage` below. `errorMessage` marks the field invalid. `Select` and `RadioGroup` take `options: {id, label, description?}[]`.                                                                                      |
+| `TextField`, `NumberField`, `Select`, `RadioGroup` | Label above, description and `errorMessage` below. `errorMessage` marks the field invalid. `Select` and `RadioGroup` take `options: {id, label, description?}[]`. A required `TextField` shows "(required)" after its label.                           |
 | `Checkbox`, `Switch`                               | Use a checkbox for consent (EULAs) and a switch for an immediate on/off setting.                                                                                                                                                                       |
 | `Dialog`                                           | A modal with a title and a Close button. `role="alertdialog"` drops outside-click dismissal. Use it only when the task needs protected focus: confirmations and conflicts. Prefer inline UI everywhere else. `children` may be `(close) => …`.         |
 | `Tabs`, `TabList`, `Tab`, `TabPanel`               | Underline tabs.                                                                                                                                                                                                                                        |
 | `ProgressBar`                                      | Determinate when given `value`, indeterminate otherwise.                                                                                                                                                                                               |
 | `Meter`                                            | `color` takes the marker's own colour.                                                                                                                                                                                                                 |
-| `toast()`, `ToastRegion`                           | Tones are neutral, ok and problem. Problems stay until dismissed; others leave after 5 s. The region sits above the tab bar on phones and bottom-right from 768 px.                                                                                    |
+| `toast()`, `ToastRegion`                           | Tones are neutral, ok and problem. Problems leave after 10 s or when the route changes; others leave after 5 s. Timers pause while a toast is hovered or focused. The region sits above the tab bar on phones and bottom-right from 768 px.            |
 | `DropZone`, `FileTrigger`                          | Drop target (tinted while dragging) and file picker.                                                                                                                                                                                                   |
-| `Disclosure`                                       | A heading-level-3 trigger with a chevron.                                                                                                                                                                                                              |
+| `Disclosure`                                       | A heading-level-3 trigger with a chevron. "Technical details" disclosures hold jargon (USB IDs, matched rule, mode) on Status and in setup.                                                                                                            |
+| `EulaAccept` (`src/components/EulaAccept.tsx`)     | One vendor licence: progress while the device agent fetches the archive, the exact text in a scrollable, focusable region, the failure message, and a checkbox that records the text's sha256. A changed text asks again.                              |
+| `ConflictDialog`                                   | The 412 dialog in Settings: your changes side by side with the file, plus what else the file changed.                                                                                                                                                  |
 | `Card`                                             | A sheet with an optional title (h2 by default) and actions. It is a container-query container, so lay out its contents with `@container`. Never nest cards. `tone="problem"` is for errors that block the card's job.                                  |
 | `StatusBadge`                                      | A dot and a text label (colour never carries meaning alone). Tones are ok, busy, problem and idle. `pulse` only while work is in flight.                                                                                                               |
 | `PageHeader`                                       | Every view starts with one: the `h1` (the focus target after navigation), an optional description, and actions.                                                                                                                                        |

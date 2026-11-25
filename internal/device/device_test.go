@@ -84,6 +84,9 @@ func TestSpecHash(t *testing.T) {
 		"blob version":   func(s *Spec) { s.Blobs[0].Version = "3.25.2" },
 		"scanner":        func(s *Spec) { s.Scanner = "" },
 		"backends order": func(s *Spec) { s.SaneBackends = []string{"epson2", "hpaio"} },
+		"accepted EULA": func(s *Spec) {
+			s.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: strings.Repeat("a", 64)}}
+		},
 	}
 	for name, change := range changes {
 		t.Run("changes on "+name, func(t *testing.T) {
@@ -105,9 +108,18 @@ func TestSpecHash(t *testing.T) {
 
 	t.Run("nil and empty slices hash alike", func(t *testing.T) {
 		a := Spec{Mode: ModeSimulated, Printer: "sim", Scanner: "sim"}
-		b := Spec{Mode: ModeSimulated, Printer: "sim", Scanner: "sim", SaneBackends: []string{}, Blobs: []BlobRef{}}
+		b := Spec{Mode: ModeSimulated, Printer: "sim", Scanner: "sim", SaneBackends: []string{}, Blobs: []BlobRef{}, AcceptedEULAs: []EULARef{}}
 		if SpecHash(&a) != SpecHash(&b) {
 			t.Error("nil and empty slices hash differently")
+		}
+	})
+
+	t.Run("accepted text sha changes the hash", func(t *testing.T) {
+		a, b := baseSpec(), baseSpec()
+		a.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: strings.Repeat("a", 64)}}
+		b.AcceptedEULAs = []EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: strings.Repeat("b", 64)}}
+		if SpecHash(&a) == SpecHash(&b) {
+			t.Error("a different accepted text sha256 hashes alike")
 		}
 	})
 
@@ -127,7 +139,8 @@ func TestSpecHash(t *testing.T) {
 			if !reflect.DeepEqual(s, before) {
 				t.Errorf("SpecHash modified its input:\n got  %#v\n want %#v", s, before)
 			}
-			if (s.SaneBackends == nil) != (before.SaneBackends == nil) || (s.Blobs == nil) != (before.Blobs == nil) {
+			if (s.SaneBackends == nil) != (before.SaneBackends == nil) || (s.Blobs == nil) != (before.Blobs == nil) ||
+				(s.AcceptedEULAs == nil) != (before.AcceptedEULAs == nil) {
 				t.Error("SpecHash changed the nil-ness of a slice")
 			}
 		}
@@ -162,8 +175,20 @@ func TestJSONNames(t *testing.T) {
 	if got := mustJSON(BlobRef{ID: "a", Version: "1", Optional: true}); got != `{"id":"a","version":"1","optional":true}` {
 		t.Errorf("BlobRef JSON: %s", got)
 	}
-	if got := mustJSON(AgentReport{}); !strings.Contains(got, `"podUid"`) || !strings.Contains(got, `"appliedHash"`) {
+	if got := mustJSON(AgentReport{}); !strings.Contains(got, `"podUid"`) || !strings.Contains(got, `"appliedHash"`) || !strings.Contains(got, `"eulas"`) {
 		t.Errorf("AgentReport JSON: %s", got)
+	}
+	if got := mustJSON(DesiredState{}); !strings.Contains(got, `"stageEulas"`) {
+		t.Errorf("DesiredState JSON: %s", got)
+	}
+	if got := mustJSON(EULARef{ID: "a", Version: "1", TextSHA256: "ff"}); got != `{"id":"a","version":"1","textSha256":"ff"}` {
+		t.Errorf("EULARef JSON: %s", got)
+	}
+	if got := mustJSON(EULAText{}); got != `{"id":"","version":"","textSha256":"","text":"","state":"","message":""}` {
+		t.Errorf("EULAText JSON: %s", got)
+	}
+	if got := mustJSON(Spec{}); !strings.Contains(got, `"acceptedEulas"`) {
+		t.Errorf("Spec JSON: %s", got)
 	}
 	if got := mustJSON(QueueResult{}); !strings.Contains(got, `"printerUri"`) || !strings.Contains(got, `"deviceUri"`) {
 		t.Errorf("QueueResult JSON: %s", got)

@@ -66,6 +66,12 @@
     border-block-end: 1px solid var(--rule);
   }
 
+  /* File rows: icon, name and state, remove button. The button never wraps under the name. */
+  .print-view .print-files .print-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
   .print-view .print-row:last-child {
     border-block-end: 0;
   }
@@ -94,12 +100,22 @@
 
   .print-view .print-submit {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     justify-content: flex-end;
+    gap: var(--space-2) var(--space-4);
   }
 
   @media (max-width: 767px) {
     .print-view .print-submit .ui-button {
       inline-size: 100%;
+    }
+  }
+
+  /* Touch screens cannot drop files; the Choose files button is the way in. */
+  @media (pointer: coarse) {
+    .print-view .print-drop-hint {
+      display: none;
     }
   }
 }

@@ -8,9 +8,11 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# Only pull requests cancel superseded runs: a pushing run that stopped between pushing
+# images and pushing their sources would leave images without corresponding source.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,11 +33,21 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml
       - run: go tool go-licenses check ./cmd/printscan --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC,MPL-2.0
+      # printscan never runs commands; these dependencies import os/exec for code paths it does not use
+      # (godbus's autolaunch, client-go's exec credential plugin, gnostic's plugin runner).
+      - name: Only the known dependencies import os/exec
+        run: |
+          # shellcheck disable=SC2016 # $p is a Go template variable
+          got=$(go list -deps -f '{{if not .Standard}}{{$p := .ImportPath}}{{range .Imports}}{{if eq . "os/exec"}}{{$p}}{{"\n"}}{{end}}{{end}}{{end}}' ./cmd/printscan | sort -u)
+          want='github.com/godbus/dbus/v5
+          github.com/google/gnostic-models/compiler
+          k8s.io/client-go/plugin/pkg/client/auth/exec'
+          diff <(printf '%s\n' "$want") <(printf '%s\n' "$got")
       - run: actionlint
       - name: Validate the example deployment
         run: kustomize build deploy/base | kubeconform -strict -summary -kubernetes-version 1.37.0 -
-      - name: Validate the rendered device pod goldens and the device plugin example
-        run: kubeconform -strict -summary -kubernetes-version 1.37.0 internal/backend/k8s/testdata/*.golden.yaml deploy/examples/generic-device-plugin.yaml
+      - name: Validate the rendered device pod goldens and the deploy examples
+        run: kubeconform -strict -summary -kubernetes-version 1.37.0 internal/backend/k8s/testdata/*.golden.yaml deploy/examples/*.yaml
       - run: kube-linter lint deploy/base internal/backend/k8s/testdata
 
   ui:
@@ -138,20 +150,36 @@ jobs:
       - if: always()
         run: docker compose -f compose.test.yaml down -v
 
+  # The VERSION build arg: the branch or tag name with each run of characters a tag cannot hold
+  # replaced by `-`, as docker/metadata-action does for type=ref tags. A manual run on renovate/foo
+  # then labels its images with the renovate-foo-sources tag the sources job pushes.
+  version:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ref.outputs.version }}
+    steps:
+      - id: ref
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: printf 'version=%s\n' "$(printf '%s' "$REF_NAME" | sed -E 's/[^a-zA-Z0-9._-]+/-/g')" >> "$GITHUB_OUTPUT"
+
   # Docker's reusable workflow: one native runner per platform, a merged multi-platform manifest,
   # provenance and SBOM attestations signed with the job's OIDC identity. A pull request builds without pushing.
   build:
-    needs: [go, ui, e2e, integration]
+    needs: [go, ui, e2e, integration, version]
     strategy:
       fail-fast: false
       matrix:
+        # licenses: the SPDX expression for the image label. The device and driver images hold
+        # Ubuntu packages under many licences (see THIRD_PARTY_NOTICES.md), so they say NOASSERTION.
         include:
-          - {image: printscan, file: Dockerfile, target: ""}
-          - {image: printscan-device, file: images/device/Dockerfile, target: device}
-          - {image: printscan-driver-ps, file: images/driver/Dockerfile, target: ps}
-          - {image: printscan-driver-hplip, file: images/driver/Dockerfile, target: hplip}
-          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint}
-          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript}
+          - {image: printscan, file: Dockerfile, target: "", licenses: Apache-2.0}
+          - {image: printscan-device, file: images/device/Dockerfile, target: device, licenses: NOASSERTION}
+          - {image: printscan-driver-ps, file: images/driver/Dockerfile, target: ps, licenses: NOASSERTION}
+          - {image: printscan-driver-hplip, file: images/driver/Dockerfile, target: hplip, licenses: NOASSERTION}
+          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint, licenses: NOASSERTION}
+          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript, licenses: NOASSERTION}
     uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
     permissions:
       contents: read
@@ -168,26 +196,32 @@ jobs:
       cache-scope: ${{ matrix.image }}
       sbom: true
       set-meta-labels: true
-      build-args: VERSION=${{ github.ref_name }}
+      meta-labels: org.opencontainers.image.licenses=${{ matrix.licenses }}
+      build-args: VERSION=${{ needs.version.outputs.version }}
       meta-images: ghcr.io/thephaseless/${{ matrix.image }}
       # `latest` follows the newest version tag (the action's default flavor).
+      # sha-<commit> lets the sources job read back exactly the images this run pushed.
       meta-tags: |
         type=ref,event=branch
         type=ref,event=pr
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=semver,pattern={{major}}
+        type=sha,format=long
     secrets:
       registry-auths: |
         - registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-  # Corresponding source for the GPL/LGPL programs in the device and driver images (<image>:<version>-sources).
-  # Same cache scope as the build, so the final stages' source-packages.txt come from the cache.
+  # Corresponding source for the GPL/LGPL programs in the device and driver images, for every pushed
+  # branch and tag (<image>:<branch or version>-sources). The package lists come from the amd64 and arm64
+  # images this run pushed (sha-<commit>), so the sources match them. It runs even when one build leg
+  # failed: the other images were pushed and need their sources; the failed image's leg fails at its
+  # pushed-* stage, and ci-ok fails.
   sources:
-    if: github.ref_type == 'tag'
-    needs: build
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.build.result != 'skipped' }}
+    needs: [build, version]
     strategy:
       fail-fast: false
       matrix:
@@ -213,9 +247,17 @@ jobs:
       cache-scope: ${{ matrix.image }}
       sbom: true
       set-meta-labels: true
-      build-args: VERSION=${{ github.ref_name }}
+      meta-labels: org.opencontainers.image.licenses=NOASSERTION
+      build-args: |
+        VERSION=${{ needs.version.outputs.version }}
+        SOURCES_LISTS=pushed
+        PUSHED_IMAGE=ghcr.io/thephaseless/${{ matrix.image }}:sha-${{ github.sha }}
       meta-images: ghcr.io/thephaseless/${{ matrix.image }}
-      meta-tags: type=semver,pattern={{version}},suffix=-sources
+      meta-tags: |
+        type=ref,event=branch,suffix=-sources
+        type=semver,pattern={{version}},suffix=-sources
+        type=semver,pattern={{major}}.{{minor}},suffix=-sources
+        type=semver,pattern={{major}},suffix=-sources
       # Only the image build moves `latest`.
       meta-flavor: latest=false
     secrets:
@@ -225,7 +267,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
   # The one check a ruleset requires: a skipped job would satisfy a required check of its own,
-  # and the build jobs carry runner labels in their names. `sources` runs only on tags.
+  # and the build jobs carry runner labels in their names. `sources` runs on every push and is
+  # skipped only on pull requests, which push nothing.
   ci-ok:
     if: always()
     needs: [go, ui, e2e, integration, build, sources]
@@ -239,6 +282,6 @@ jobs:
           test "${{ needs.build.result }}" = success
           case "${{ needs.sources.result }}" in
             success) ;;
-            skipped) test "${{ github.ref_type }}" != tag ;;
+            skipped) test "${{ github.event_name }}" = pull_request ;;
             *) exit 1 ;;
           esac

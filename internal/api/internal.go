@@ -39,14 +39,15 @@ func (s *server) agentAuthorized(r *http.Request) bool {
 	if s.d.Agent.Tokens == nil || s.d.Agent.Report == nil {
 		return false
 	}
+	// The header first: a request without a bearer token costs no token read.
+	scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || got == "" || !strings.EqualFold(scheme, device.TokenScheme) {
+		return false
+	}
 	want, err := s.d.Agent.Tokens.AgentToken(r.Context())
 	if err != nil {
 		slog.Warn("agent token unavailable", "err", err)
 		return false
 	}
-	scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !ok || want == "" || !strings.EqualFold(scheme, device.TokenScheme) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

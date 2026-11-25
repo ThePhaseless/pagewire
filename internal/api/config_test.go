@@ -134,7 +134,7 @@ func TestPutConfigRoundTripsTrickyStrings(t *testing.T) {
 	e := newEnv(t)
 	body := `{"apiVersion":"printscan/v1","name":"true","location":"Room: 1 # top",` +
 		`"device":{"mode":"usb","usb":{"vendorId":"03f0","productId":"2b17","serial":"0e21"}},` +
-		`"licenses":{"acceptedEulas":[{"id":"hplip-plugin","version":"3.24.4"}]}}`
+		`"licenses":{"acceptedEulas":[{"id":"hplip-plugin","version":"3.24.4","textSha256":"` + textSHA + `"}]}}`
 	if rec := e.do("PUT", "/api/v1/config", strings.NewReader(body), "If-None-Match", "*"); rec.Code != 201 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -142,7 +142,7 @@ func TestPutConfigRoundTripsTrickyStrings(t *testing.T) {
 	want := config.Default("true")
 	want.Location = "Room: 1 # top"
 	want.Device.USB = &config.USB{VendorID: "03f0", ProductID: "2b17", Serial: "0e21"}
-	want.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+	want.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 	if got == nil || !reflect.DeepEqual(*got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
@@ -163,8 +163,8 @@ func TestPatchWizardFile(t *testing.T) {
 		patch string
 		apply func(*config.Config)
 	}{
-		{`{"licenses":{"acceptedEulas":[{"id":"hplip-plugin","version":"3.24.4"}]}}`, func(c *config.Config) {
-			c.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+		{`{"licenses":{"acceptedEulas":[{"id":"hplip-plugin","version":"3.24.4","textSha256":"` + textSHA + `"}]}}`, func(c *config.Config) {
+			c.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 		}},
 		{`{"print":{"defaults":{"media":"na_letter_8.5x11in"}}}`, func(c *config.Config) { c.Print.Defaults.Media = "na_letter_8.5x11in" }},
 		{`{"device":{"usb":{"vendorId":"03f0","productId":"2b17","serial":"0e21"}}}`, func(c *config.Config) {
@@ -266,8 +266,9 @@ func TestConfigStorageError(t *testing.T) {
 	e := newEnv(t, func(d *Deps) { d.Store = failingStore{} })
 	p := wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"x"}`), "If-None-Match", "*"),
 		500, "storage-error")
-	if !strings.Contains(p.Detail, "read-only") {
-		t.Fatalf("detail %q", p.Detail)
+	// The raw error goes to the log, not to the client.
+	if strings.Contains(p.Detail, "read-only") || p.Detail == "" {
+		t.Fatalf("detail %q, want a generic message", p.Detail)
 	}
 	wantProblem(t, e.do("PATCH", "/api/v1/config", strings.NewReader(`{"name":"y"}`), "If-Match", `"x"`, "Content-Type", mergePatch),
 		500, "storage-error")

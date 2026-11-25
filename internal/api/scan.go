@@ -26,9 +26,11 @@ func scanError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusConflict, "scan-not-finished", err.Error())
 	case errors.Is(err, scanning.ErrNotFound):
 		writeProblem(w, http.StatusNotFound, "not-found", err.Error())
+	case errors.Is(err, scanning.ErrStorageFull):
+		writeProblem(w, http.StatusInsufficientStorage, "storage-full", err.Error())
 	case errors.As(err, &se):
 		slog.Error("scan storage", "err", err)
-		writeProblem(w, http.StatusInternalServerError, "storage-error", err.Error())
+		writeProblem(w, http.StatusInternalServerError, "storage-error", "the scan could not be stored; the server log has the details")
 	case errors.Is(err, scanning.ErrNoScanner):
 		writeProblem(w, http.StatusServiceUnavailable, "scanner-unavailable", err.Error())
 	default:
@@ -47,6 +49,7 @@ func (s *server) getScanner(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) postScan(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w, s.d.readTimeout)
 	var set apitypes.ScanSettings
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxOptsSize))
 	dec.DisallowUnknownFields()
@@ -89,7 +92,7 @@ func (s *server) getScanPage(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = f.Close() }()
 	noWriteDeadline(w)
 	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "no-store")
 	if _, err := io.Copy(w, f); err != nil {
 		slog.Debug("scan page write", "err", err)
 	}
@@ -104,13 +107,25 @@ func (s *server) getScanDownload(w http.ResponseWriter, r *http.Request) {
 	noWriteDeadline(w)
 	w.Header().Set("Content-Type", d.ContentType)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+d.Name+`"`)
+	w.Header().Set("Cache-Control", "no-store")
 	if err := d.Write(w); err != nil {
 		slog.Warn("scan download write", "err", err)
 	}
 }
 
+// deleteScan cancels a running scan (202 with the scan as it is now; a scan
+// SSE event carries its canceled state) and deletes a finished one (204).
 func (s *server) deleteScan(w http.ResponseWriter, r *http.Request) {
-	if err := s.d.Scans.Delete(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	sc, err := s.d.Scans.Cancel(id)
+	if err == nil {
+		writeJSON(w, http.StatusAccepted, sc)
+		return
+	}
+	if errors.Is(err, scanning.ErrNotRunning) {
+		err = s.d.Scans.Delete(id)
+	}
+	if err != nil {
 		scanError(w, err)
 		return
 	}

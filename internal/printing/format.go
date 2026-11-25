@@ -6,6 +6,8 @@ import (
 	"mime"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/ThePhaseless/printscan/internal/apitypes"
 )
 
 // Document formats as IPP document-format MIME types.
@@ -76,18 +78,52 @@ func (e *UnsupportedFormatError) Error() string {
 		e.Detected, strings.Join(e.Supported, ", "))
 }
 
-// Negotiate checks a detected format against the printer's
-// document-format-supported list (decision 10: no conversion). Parameters
-// such as charset are ignored. An unknown format is always refused, even when
-// the printer lists application/octet-stream, since printscan cannot tell what
-// the printer would make of it.
-func Negotiate(detected string, supported []string) error {
-	if detected != FormatUnknown {
-		for _, s := range supported {
-			if t, _, err := mime.ParseMediaType(s); err == nil && t == detected {
-				return nil
-			}
+// Negotiate returns the format to send the printer: the detected one when
+// the printer's document-format-supported lists it, else the format
+// printscan converts it to (see Conversions), else *UnsupportedFormatError.
+// Parameters such as charset are ignored. An unknown format is always
+// refused, even when the printer lists application/octet-stream, since
+// printscan cannot tell what the printer would make of it.
+func Negotiate(detected string, supported []string) (string, error) {
+	if detected != FormatUnknown && listed(detected, supported) {
+		return detected, nil
+	}
+	if to := convertTo(detected, supported); to != "" {
+		return to, nil
+	}
+	return "", &UnsupportedFormatError{Detected: detected, Supported: supported}
+}
+
+// Conversions lists the formats printscan converts for a printer with this
+// document-format-supported list (what Negotiate converts).
+func Conversions(supported []string) []apitypes.FormatConversion {
+	out := []apitypes.FormatConversion{}
+	for _, from := range []string{FormatPNG, FormatJPEG} {
+		if to := convertTo(from, supported); to != "" && !listed(from, supported) {
+			out = append(out, apitypes.FormatConversion{From: from, To: to})
 		}
 	}
-	return &UnsupportedFormatError{Detected: detected, Supported: supported}
+	return out
+}
+
+// convertTo is the conversion target for an image the printer does not take
+// as is: JPEG for a PNG when the printer takes JPEG, else a PDF. "" when none.
+func convertTo(from string, supported []string) string {
+	switch {
+	case from == FormatPNG && listed(FormatJPEG, supported):
+		return FormatJPEG
+	case (from == FormatPNG || from == FormatJPEG) && listed(FormatPDF, supported):
+		return FormatPDF
+	}
+	return ""
+}
+
+// listed reports whether supported holds format, ignoring case and parameters.
+func listed(format string, supported []string) bool {
+	for _, s := range supported {
+		if t, _, err := mime.ParseMediaType(s); err == nil && t == format {
+			return true
+		}
+	}
+	return false
 }

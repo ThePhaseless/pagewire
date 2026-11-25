@@ -87,6 +87,55 @@
     margin-block-start: var(--space-4);
   }
 
+  .settings-view .settings-actions {
+    align-items: center;
+  }
+
+  .settings-view .settings-actions-status {
+    flex: 1 1 14rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+  }
+
+  .settings-view .settings-unsaved {
+    font-weight: var(--weight-medium);
+  }
+
+  /* While the form has unsaved edits, Reset and Save stay in view at the bottom of the window. */
+  .settings-view .settings-actions[data-sticky] {
+    position: sticky;
+    z-index: 20;
+    inset-block-end: max(var(--space-3), var(--safe-bottom));
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sheet);
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-float);
+  }
+
+  /* Focused fields scroll clear of the bar, and toasts sit above it. */
+  :root:has(.settings-actions[data-sticky]) {
+    --bar-reserve: 6rem;
+  }
+
+  @media (max-width: 767px) {
+    .settings-view .settings-actions[data-sticky] {
+      inset-block-end: calc(var(--tabbar-height) + var(--safe-bottom) + var(--space-2));
+    }
+
+    :root:has(.settings-actions[data-sticky]) {
+      --bar-reserve: 8rem;
+    }
+  }
+
+  .ui-dialog .conflict-also {
+    margin-block-start: var(--space-4);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+  }
+
   .ui-dialog .conflict-changes {
     list-style: none;
     padding: 0;

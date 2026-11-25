@@ -76,6 +76,7 @@ const noPrinter: Status = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -172,11 +173,13 @@ function fakeUpload() {
   return { upload, uploads };
 }
 
-async function renderPrint(status: Status | null, upload?: typeof uploadPrint) {
+async function renderPrint(status: Status | null, upload?: typeof uploadPrint, online = true) {
   const store = createEventStore({
     newEventSource: () => new FakeEventSource() as unknown as EventSource,
+    notFoundAfterMs: 20,
   });
   store.start();
+  if (online) act(() => FakeEventSource.last?.onopen?.(new Event("open")));
   if (status) act(() => FakeEventSource.last?.emit("status", status));
   let view!: ReturnType<typeof render>;
   await act(async () => {
@@ -200,7 +203,9 @@ async function pick(container: HTMLElement, files: File[]) {
 }
 
 const row = (name: string) => screen.getByText(name).closest("li") as HTMLElement;
-const printButton = () => screen.getByRole("button", { name: /^Print/ });
+const printButton = () => screen.getByRole("button", { name: /^Print( |$)/ });
+const problem = (status: number, type: string, detail: string) =>
+  new ProblemError({ type, title: "x", status, detail, errors: [] });
 /** The visible value of the Select labelled `label` (the hidden native select lists every option). */
 const selected = (label: string) =>
   screen
@@ -279,8 +284,12 @@ describe("Print view", () => {
     expect(
       within(row("notes.docx")).getByText(/not a document format printscan can send/),
     ).toBeTruthy();
+    expect(row("notes.docx").textContent).toContain(
+      "Open it in Word or Google Docs, choose Print > Save as PDF, then add the PDF here.",
+    );
+    expect(row("photo.jpg").textContent).toContain("export it as JPEG");
 
-    expect(printButton().textContent).toBe("Print");
+    expect(printButton().textContent).toBe("Print 1 of 3 files");
     await act(async () => {
       fireEvent.click(printButton());
     });
@@ -295,7 +304,7 @@ describe("Print view", () => {
     expect(selected("Sides")).toBe("Two-sided, flip on long edge");
     expect(selected("Colour")).toBe("Black and white");
     expect(selected("Quality")).toBe("High");
-    expect(screen.getByText("Up to 1 MiB per file.", { exact: false })).toBeTruthy();
+    expect(screen.getByText("Up to 1 MB per file.", { exact: false })).toBeTruthy();
 
     const big = new Uint8Array(1024 * 1024 + 1);
     big.set(bytes("%PDF-"));
@@ -305,7 +314,8 @@ describe("Print view", () => {
       new File([big], "huge.pdf"),
     ]);
     await waitFor(() => expect(within(row("huge.pdf")).getByText(/upload limit/)).toBeTruthy());
-    expect(printButton().textContent).toBe("Print 2 files");
+    expect(printButton().textContent).toBe("Print 2 of 3 files");
+    expect(screen.getByText("1 copy · Letter · two-sided, flip on long edge")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(printButton());
@@ -321,7 +331,9 @@ describe("Print view", () => {
     act(() => uploads[0]?.progress(0.5));
     const bar = screen.getByRole("progressbar", { name: "Uploading a.pdf" });
     expect(bar.getAttribute("aria-valuenow")).toBe("50");
-    expect(printButton().hasAttribute("disabled")).toBe(true);
+    // Pending, not disabled, so keyboard focus stays on the button.
+    expect(printButton().hasAttribute("disabled")).toBe(false);
+    expect(printButton().hasAttribute("data-pending")).toBe(true);
     // The batch is fixed once Print is pressed, so no row can be removed from it mid-way.
     expect(screen.getByRole("button", { name: "Remove b.pdf" }).hasAttribute("disabled")).toBe(
       true,
@@ -344,6 +356,91 @@ describe("Print view", () => {
     );
     expect(within(row("b.pdf")).getByText(/does not accept this file type/)).toBeTruthy();
     expect(screen.getByText("huge.pdf")).toBeTruthy();
+  });
+
+  test("files the server converts are accepted and listed", async () => {
+    const { container } = await renderPrint({
+      ...ready,
+      printer: {
+        ...ready.printer,
+        convertedFormats: [{ from: "image/png", to: "image/jpeg" }],
+      },
+    });
+    expect(screen.getByText(/This printer accepts PDF, JPEG, and PNG\./)).toBeTruthy();
+    await pick(container, [new File([bytes("\x89PNG\r\n\x1a\n")], "scan.png")]);
+    await waitFor(() => expect(within(row("scan.png")).getByText(/Ready to print/)).toBeTruthy());
+    expect(printButton().textContent).toBe("Print");
+  });
+
+  test("conversion and load problems from the server show on the file's row", async () => {
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint(ready, upload);
+    await pick(container, [
+      new File([Uint8Array.of(0xff, 0xd8, 0xff, 0xee)], "cmyk.jpg"),
+      new File([Uint8Array.of(0xff, 0xd8, 0xff, 0xe0)], "huge.jpg"),
+      new File([Uint8Array.of(0xff, 0xd8, 0xff, 0xe0)], "broken.jpg"),
+      new File([Uint8Array.of(0xff, 0xd8, 0xff, 0xe0)], "busy.jpg"),
+    ]);
+    await waitFor(() => expect(printButton().textContent).toBe("Print 4 files"));
+    await act(async () => {
+      fireEvent.click(printButton());
+    });
+    const cmyk =
+      "This JPEG uses a colour format the printer path cannot embed. Save it as an RGB JPEG or a PDF.";
+    await act(async () => uploads[0]?.fail(problem(415, "unsupported-format", cmyk)));
+    await act(async () =>
+      uploads[1]?.fail(
+        problem(413, "image-too-large", "the image is 30000 x 30000 pixels, too large to convert"),
+      ),
+    );
+    await act(async () => uploads[2]?.fail(problem(400, "invalid-image", "the file is damaged")));
+    await act(async () =>
+      uploads[3]?.fail(
+        problem(429, "too-many-jobs", "another image is being converted; try again in a moment"),
+      ),
+    );
+    expect(within(row("cmyk.jpg")).getByText(cmyk)).toBeTruthy();
+    expect(row("huge.jpg").textContent).toContain("30000 x 30000 pixels");
+    expect(row("broken.jpg").textContent).toContain("damaged");
+    expect(row("busy.jpg").textContent).toContain("try again in a moment");
+  });
+
+  test("copies stay in the button and the summary, which follows both cards", async () => {
+    const { container } = await renderPrint(ready, fakeUpload().upload);
+    await pick(container, [new File(["%PDF-1.7\n"], "a.pdf"), new File(["%PDF-1.7\n"], "b.pdf")]);
+    const copies = screen.getByRole("textbox", { name: "Copies" }) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(copies, { target: { value: "3" } });
+      fireEvent.blur(copies);
+    });
+    await waitFor(() => expect(printButton().textContent).toBe("Print 2 files, 3 copies each"));
+    expect(screen.getByText("3 copies · A4 · one-sided")).toBeTruthy();
+    const options = screen.getByRole("heading", { name: "Options" });
+    // The submit row comes after the Options card in reading order.
+    expect(
+      options.compareDocumentPosition(printButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  test("printing is off while the connection to printscan is down", async () => {
+    const { container } = await renderPrint(ready, fakeUpload().upload, false);
+    await pick(container, [new File(["%PDF-1.7\n"], "a.pdf")]);
+    await waitFor(() => expect(within(row("a.pdf")).getByText(/Ready to print/)).toBeTruthy());
+    expect(printButton().hasAttribute("disabled")).toBe(true);
+  });
+
+  test("a device that finds no printer tells you to plug it in", async () => {
+    await renderPrint({
+      ...noPrinter,
+      config: { ...noPrinter.config, state: "applied" },
+      device: {
+        ...noPrinter.device,
+        phase: "probing",
+        mode: "probe",
+        inventory: { devices: [], probedAt: "2026-11-24T18:00:00Z", simulated: false },
+      },
+    });
+    expect(await screen.findByText(/Plug the printer in with USB/)).toBeTruthy();
   });
 
   test("a cleared copies field blocks printing", async () => {

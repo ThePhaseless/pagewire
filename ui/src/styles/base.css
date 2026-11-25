@@ -65,6 +65,27 @@
     accent-color: var(--accent);
     caret-color: var(--accent);
     scrollbar-color: var(--rule-strong) transparent;
+    /* Keep focused controls clear of the sticky header (3.5rem) and of a visible toast. */
+    scroll-padding-block: calc(3.5rem + var(--safe-top) + var(--space-3))
+      calc(var(--space-4) + var(--safe-bottom) + var(--toast-reserve) + var(--bar-reserve));
+  }
+
+  /* About one toast's height; RAC only renders the region while a toast is visible. */
+  :root:has(.ui-toast-region) {
+    --toast-reserve: 6rem;
+  }
+
+  /* Phones: the bottom tab bar also covers the page. */
+  @media (max-width: 767px) {
+    html:has(.app[data-nav]) {
+      scroll-padding-block-end: calc(
+        var(--tabbar-height) +
+        var(--safe-bottom) +
+        var(--space-4) +
+        var(--toast-reserve) +
+        var(--bar-reserve)
+      );
+    }
   }
 
   ::selection {
@@ -186,9 +207,10 @@
     inset-block-start: 0;
     z-index: 20;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-3);
+    gap: var(--space-1) var(--space-3);
     min-block-size: calc(3.5rem + var(--safe-top));
     padding: var(--safe-top) max(var(--space-4), var(--safe-right)) 0
       max(var(--space-4), var(--safe-left));
@@ -197,8 +219,10 @@
     backdrop-filter: saturate(1.2) blur(10px);
   }
 
+  /* The name keeps room for about ten characters; at large text sizes the status badge wraps instead. */
   .app-identity {
     display: flex;
+    flex: 1 1 10rem;
     align-items: center;
     gap: var(--space-2);
     min-inline-size: 0;
@@ -228,13 +252,18 @@
     inline-size: 100%;
     max-inline-size: var(--content-max);
     margin-inline: auto;
-    padding: var(--space-5) max(var(--space-4), var(--safe-right)) var(--space-7)
-      max(var(--space-4), var(--safe-left));
+    padding: var(--space-5) max(var(--space-4), var(--safe-right))
+      calc(var(--space-7) + var(--toast-reserve)) max(var(--space-4), var(--safe-left));
     outline: none;
   }
 
   .app[data-nav] .app-main {
-    padding-block-end: calc(var(--tabbar-height) + var(--safe-bottom) + var(--space-6));
+    padding-block-end: calc(
+      var(--tabbar-height) +
+      var(--safe-bottom) +
+      var(--space-6) +
+      var(--toast-reserve)
+    );
   }
 
   .app-nav {
@@ -319,7 +348,8 @@
     }
 
     .app[data-nav] .app-main {
-      padding: var(--space-6) max(var(--space-6), var(--safe-right)) var(--space-7) var(--space-6);
+      padding: var(--space-6) max(var(--space-6), var(--safe-right))
+        calc(var(--space-7) + var(--toast-reserve)) var(--space-6);
     }
   }
 

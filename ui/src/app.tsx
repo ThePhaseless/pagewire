@@ -7,11 +7,26 @@ import {
   type EventStore,
   EventsContext,
   useConnected,
+  usePrinterNotFound,
   useStatus,
 } from "./api/events";
-import { Icon, type IconName, StatusBadge, ToastRegion, type Tone } from "./components/ui";
+import {
+  dismissProblemToasts,
+  Icon,
+  type IconName,
+  StatusBadge,
+  ToastRegion,
+  type Tone,
+} from "./components/ui";
 import type { Status } from "./gen/api";
-import { navigate, type Route, useFocusOnNavigate, useLinkInterception, usePath } from "./router";
+import {
+  navigate,
+  type Route,
+  useDocumentTitle,
+  useFocusOnNavigate,
+  useLinkInterception,
+  usePath,
+} from "./router";
 import { strings } from "./strings";
 import { Print } from "./views/Print";
 import { Scan } from "./views/Scan";
@@ -38,8 +53,12 @@ const nav: { to: Route; label: string; icon: IconName }[] = [
 export function overallTone(
   status: Status | null,
   connected: boolean,
+  printerNotFound = false,
 ): { tone: Tone; label: string; pulse: boolean } {
   if (!connected) return { tone: "idle", label: strings.connection.offline, pulse: false };
+  if (status?.config.state === "missing")
+    return { tone: "idle", label: strings.connection.idle, pulse: false };
+  if (printerNotFound) return { tone: "problem", label: strings.connection.notFound, pulse: false };
   switch (status?.device.phase) {
     case "ready":
       return { tone: "ok", label: strings.connection.ready, pulse: false };
@@ -107,8 +126,18 @@ function NotFound() {
   );
 }
 
-function Banners({ status, offline }: { status: Status | null; offline: boolean }) {
-  const firstError = status?.config.state === "invalid" ? status.config.errors[0] : undefined;
+function Banners({
+  status,
+  offline,
+  path,
+}: {
+  status: Status | null;
+  offline: boolean;
+  path: string;
+}) {
+  // Settings shows the file's errors itself.
+  const invalid = status?.config.state === "invalid" && path !== "/settings";
+  const firstError = invalid ? status.config.errors[0] : undefined;
   return (
     <>
       {offline && (
@@ -117,7 +146,7 @@ function Banners({ status, offline }: { status: Status | null; offline: boolean 
           <p>{strings.banners.offline}</p>
         </div>
       )}
-      {status?.config.state === "invalid" && (
+      {invalid && (
         <div className="app-banner" data-tone="problem" role="alert">
           <Icon name="alert" size={18} className="app-banner-icon" />
           <div className="app-banner-text">
@@ -146,13 +175,18 @@ function Shell() {
   const offline = useOffline(connected);
   const name = useDeviceName(status);
   const configMissing = status?.config.state === "missing";
+  useDocumentTitle(name ?? strings.appName);
+
+  // A problem belongs to the page it happened on. Keyed on the path: wizard steps change only the hash.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: path is the trigger
+  useEffect(() => dismissProblemToasts(), [path]);
 
   useEffect(() => {
-    if (configMissing && path !== "/setup") navigate("/setup", { replace: true });
+    if (configMissing && path !== "/setup") navigate("/setup", { replace: true, force: true });
   }, [configMissing, path]);
 
   const View = (views as Record<string, (() => ReactNode) | undefined>)[path] ?? NotFound;
-  const health = overallTone(status, connected);
+  const health = overallTone(status, connected, usePrinterNotFound());
   const showNav = !configMissing;
 
   return (
@@ -191,7 +225,7 @@ function Shell() {
         </nav>
       )}
       <main id="main" className="app-main" tabIndex={-1}>
-        <Banners status={status} offline={offline} />
+        <Banners status={status} offline={offline} path={path} />
         <View />
       </main>
       <ToastRegion />

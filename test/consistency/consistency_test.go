@@ -126,7 +126,17 @@ func TestFromLinesPinned(t *testing.T) {
 	for _, file := range dockerfiles {
 		declared := map[string]bool{}
 		for _, s := range parseDockerfile(t, file) {
-			if s.image != "scratch" && !declared[s.image] && !digestRe.MatchString(s.image) {
+			switch {
+			case s.image == "${PUSHED_IMAGE}":
+				// The image CI pushed for this commit, read by the sources stage (never built in local mode).
+				if !strings.HasPrefix(s.name, "pushed-") {
+					t.Errorf("%s: FROM ${PUSHED_IMAGE} in stage %q, allowed only in pushed-* stages", file, s.name)
+				}
+			case s.image == "lists-${SOURCES_LISTS}":
+				if !declared["lists-local"] || !declared["lists-pushed"] {
+					t.Errorf("%s: FROM lists-${SOURCES_LISTS} before both lists-local and lists-pushed", file)
+				}
+			case s.image != "scratch" && !declared[s.image] && !digestRe.MatchString(s.image):
 				t.Errorf("%s: FROM %s is neither scratch, an earlier stage nor pinned as tag@sha256:<digest>", file, s.image)
 			}
 			if s.name != "" {
@@ -312,7 +322,8 @@ func TestCITargets(t *testing.T) {
 func TestCIMetaTags(t *testing.T) {
 	tags := str(get(loadCI(t), "jobs", "build", "with", "meta-tags"))
 	// ImageTag maps a release to its bare semver ({{version}}) and anything else to the branch tag main.
-	for _, want := range []string{"type=ref,event=branch", "type=semver,pattern={{version}}"} {
+	// type=sha,format=long gives sha-<commit>, which the sources job reads back as PUSHED_IMAGE.
+	for _, want := range []string{"type=ref,event=branch", "type=semver,pattern={{version}}", "type=sha,format=long"} {
 		if !strings.Contains(tags, want) {
 			t.Errorf("build meta-tags lack %s", want)
 		}
@@ -345,11 +356,224 @@ func TestSourcesJobsKeepLatest(t *testing.T) {
 func TestCIKubeconformGoldens(t *testing.T) {
 	for _, step := range list(get(loadCI(t), "jobs", "go", "steps")) {
 		run := str(get(step, "run"))
-		if strings.Contains(run, "kubeconform") && strings.Contains(run, "internal/backend/k8s/testdata/*.golden.yaml") {
+		if strings.Contains(run, "kubeconform") && strings.Contains(run, "internal/backend/k8s/testdata/*.golden.yaml") &&
+			strings.Contains(run, "deploy/examples/*.yaml") {
 			return
 		}
 	}
-	t.Error("the go job does not run kubeconform on internal/backend/k8s/testdata/*.golden.yaml")
+	t.Error("the go job does not run kubeconform on internal/backend/k8s/testdata/*.golden.yaml and deploy/examples/*.yaml")
+}
+
+// expr strips the ${{ }} wrapper of a GitHub Actions expression.
+func expr(s string) string {
+	s = strings.TrimSpace(s)
+	if in, ok := strings.CutPrefix(s, "${{"); ok {
+		if in, ok = strings.CutSuffix(in, "}}"); ok {
+			return strings.TrimSpace(in)
+		}
+	}
+	return s
+}
+
+func lines(s string) []string {
+	var out []string
+	for l := range strings.SplitSeq(s, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A pushing run must never be cancelled between pushing images and pushing their sources,
+// and sources must run for every pushed ref, even when one build leg failed.
+func TestSourcesRunForEveryPush(t *testing.T) {
+	ci := loadCI(t)
+	if got, want := str(get(ci, "concurrency", "cancel-in-progress")), "${{ github.event_name == 'pull_request' }}"; got != want {
+		t.Errorf("concurrency.cancel-in-progress = %q, want %q", got, want)
+	}
+	if got, want := expr(str(get(ci, "jobs", "sources", "if"))), "!cancelled() && github.event_name != 'pull_request' && needs.build.result != 'skipped'"; got != want {
+		t.Errorf("sources if = %q, want %q", got, want)
+	}
+	tags := lines(str(get(ci, "jobs", "sources", "with", "meta-tags")))
+	for _, want := range []string{
+		"type=ref,event=branch,suffix=-sources",
+		"type=semver,pattern={{version}},suffix=-sources",
+		"type=semver,pattern={{major}}.{{minor}},suffix=-sources",
+		"type=semver,pattern={{major}},suffix=-sources",
+	} {
+		if !slices.Contains(tags, want) {
+			t.Errorf("sources meta-tags lack %s", want)
+		}
+	}
+	args := lines(str(get(ci, "jobs", "sources", "with", "build-args")))
+	for _, want := range []string{
+		"VERSION=${{ needs.version.outputs.version }}",
+		"SOURCES_LISTS=pushed",
+		"PUSHED_IMAGE=" + str(get(ci, "jobs", "sources", "with", "meta-images")) + ":sha-${{ github.sha }}",
+	} {
+		if !slices.Contains(args, want) {
+			t.Errorf("sources build-args %q lack %s", args, want)
+		}
+	}
+	if got, want := str(get(ci, "jobs", "sources", "with", "meta-images")), str(get(ci, "jobs", "build", "with", "meta-images")); got != want {
+		t.Errorf("sources meta-images %q, build meta-images %q", got, want)
+	}
+	if slices.ContainsFunc(lines(str(get(ci, "jobs", "build", "with", "build-args"))), func(l string) bool {
+		return strings.HasPrefix(l, "SOURCES_LISTS=") || strings.HasPrefix(l, "PUSHED_IMAGE=")
+	}) {
+		t.Error("build job passes SOURCES_LISTS or PUSHED_IMAGE; the image builds use the local defaults")
+	}
+}
+
+// ci-ok accepts a skipped sources job only on a pull request, which pushes nothing.
+func TestCIOkSources(t *testing.T) {
+	steps := list(get(loadCI(t), "jobs", "ci-ok", "steps"))
+	var run []string
+	for _, s := range steps {
+		run = append(run, lines(str(get(s, "run")))...)
+	}
+	for _, want := range []string{
+		`case "${{ needs.sources.result }}" in`,
+		"success) ;;",
+		`skipped) test "${{ github.event_name }}" = pull_request ;;`,
+		"*) exit 1 ;;",
+	} {
+		if !slices.Contains(run, want) {
+			t.Errorf("ci-ok run lacks %q", want)
+		}
+	}
+	for _, l := range run {
+		if strings.HasPrefix(l, "skipped)") && l != `skipped) test "${{ github.event_name }}" = pull_request ;;` {
+			t.Errorf("ci-ok accepts a skipped sources job with %q", l)
+		}
+	}
+}
+
+var (
+	globalArgRe   = regexp.MustCompile(`(?m)^ARG ([A-Z0-9_]+)=(\S+)`)
+	renovateArgRe = regexp.MustCompile(`(?m)^ARG ([A-Z0-9_]+)=(\S+)[ \t]+# renovate:.*$`)
+	commitRe      = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
+
+// Upstreams are built by commit, so a moved tag cannot change what an image contains.
+// Renovate's custom managers must still see every pin.
+func TestUpstreamPinsAreCommits(t *testing.T) {
+	var cfg struct {
+		CustomManagers []struct {
+			MatchStrings []string `json:"matchStrings"`
+		} `json:"customManagers"`
+	}
+	if err := json.Unmarshal([]byte(read(t, "renovate.json")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var managers []*regexp.Regexp
+	for _, m := range cfg.CustomManagers {
+		for _, s := range m.MatchStrings {
+			managers = append(managers, regexp.MustCompile(s))
+		}
+	}
+	for _, file := range []string{"images/device/Dockerfile", "images/driver/Dockerfile"} {
+		text := read(t, file)
+		pins := renovateArgRe.FindAllStringSubmatch(text, -1)
+		if len(pins) == 0 {
+			t.Errorf("%s: no ARG pins with a renovate comment", file)
+		}
+		for _, p := range pins {
+			if !commitRe.MatchString(p[2]) {
+				t.Errorf("%s: ARG %s=%s is not a 40-hex commit", file, p[1], p[2])
+			}
+			n := 0
+			for _, re := range managers {
+				if re.MatchString(p[0] + "\n") {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("%s: %d renovate custom managers match %q, want 1", file, n, p[0])
+			}
+		}
+		for _, a := range globalArgRe.FindAllStringSubmatch(text, -1) {
+			if strings.HasSuffix(a[1], "_VERSION") || strings.HasSuffix(a[1], "_COMMIT") {
+				if !slices.ContainsFunc(pins, func(p []string) bool { return p[1] == a[1] }) {
+					t.Errorf("%s: ARG %s has no renovate comment", file, a[1])
+				}
+			}
+		}
+	}
+}
+
+// The sources stage reads its package lists either from the local final stages (the default)
+// or, in CI, from the amd64 and arm64 images pushed for this commit.
+func TestSourcesListSwitch(t *testing.T) {
+	for _, file := range []string{"images/device/Dockerfile", "images/driver/Dockerfile"} {
+		text := strings.ReplaceAll(read(t, file), "\\\n", " ")
+		for _, want := range []string{
+			`(?m)^ARG SOURCES_LISTS=local\s*$`,
+			`(?m)^ARG PUSHED_IMAGE=scratch\s*$`,
+			`(?m)^FROM --platform=linux/amd64 \$\{PUSHED_IMAGE\} AS pushed-amd64\s*$`,
+			`(?m)^FROM --platform=linux/arm64 \$\{PUSHED_IMAGE\} AS pushed-arm64\s*$`,
+			`(?m)^FROM lists-\$\{SOURCES_LISTS\} AS lists\s*$`,
+			`(?m)^COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/`,
+			`(?m)^COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/`,
+			`(?m)^COPY --from=lists /lists/ /sources/lists/\s*$`,
+			`sort -u /sources/lists/\*`,
+			`(?m)^COPY .*\b` + regexp.QuoteMeta(file) + `\b.* /sources/build/`,
+		} {
+			if !regexp.MustCompile(want).MatchString(text) {
+				t.Errorf("%s: no line matching %s", file, want)
+			}
+		}
+		stages := parseDockerfile(t, file)
+		for _, name := range []string{"lists-local", "lists-pushed"} {
+			if s := findStage(stages, name); s == nil || s.image != "scratch" {
+				t.Errorf("%s: stage %s missing or not FROM scratch", file, name)
+			}
+		}
+	}
+}
+
+// Each device and driver image says where its corresponding source is: a SOURCES file and a
+// label naming <image>:<version without v>-sources, the tag the sources job publishes.
+func TestSourcesReference(t *testing.T) {
+	ci := loadCI(t)
+	prefix, ok := strings.CutSuffix(str(get(ci, "jobs", "build", "with", "meta-images")), "${{ matrix.image }}")
+	if !ok {
+		t.Fatal("build meta-images does not end with ${{ matrix.image }}")
+	}
+	ref := prefix + "${IMAGE}:${VERSION#v}-sources"
+	n := 0
+	for _, e := range list(get(ci, "jobs", "build", "strategy", "matrix", "include")) {
+		file, target, image := str(get(e, "file")), str(get(e, "target")), str(get(e, "image"))
+		if !hasSourcesStage(t, file) {
+			continue
+		}
+		n++
+		s := findStage(parseDockerfile(t, file), target)
+		if s == nil {
+			t.Errorf("%s: no stage %s", file, target)
+			continue
+		}
+		for _, want := range []string{
+			"ARG VERSION",
+			"ARG IMAGE=" + image,
+			"ARG SOURCES_REF=" + ref,
+			"COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/",
+			`LABEL dev.printscan.sources="${SOURCES_REF}"`,
+		} {
+			if !slices.ContainsFunc(s.lines, func(l string) bool { return strings.TrimSpace(l) == want }) {
+				t.Errorf("%s stage %s: no line %q", file, target, want)
+			}
+		}
+		if !slices.ContainsFunc(s.lines, func(l string) bool {
+			return strings.HasPrefix(l, "RUN ") && strings.Contains(l, `"${SOURCES_REF}" > /usr/share/printscan/SOURCES`)
+		}) {
+			t.Errorf("%s stage %s: no RUN writing \"${SOURCES_REF}\" to /usr/share/printscan/SOURCES", file, target)
+		}
+	}
+	if n != 5 {
+		t.Errorf("%d build matrix entries with a sources stage, want 5 (device and four drivers)", n)
+	}
 }
 
 func TestDeploymentContainerName(t *testing.T) {

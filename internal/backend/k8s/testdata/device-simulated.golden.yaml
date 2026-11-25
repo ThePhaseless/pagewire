@@ -9,7 +9,7 @@ metadata:
   annotations:
     ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
     ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
-    printscan.dev/spec-hash: c569a1e0f7ba80b6f46f6c93a8babe66e56dfda6bf70efd4c220b456e306b829
+    printscan.dev/spec-hash: d4aad576b417e7a80b16db6bee8365c150fda660a3b26ce9f0d339541ffefe22
     reloader.stakater.com/auto: "false"
   ownerReferences:
   - apiVersion: apps/v1
@@ -30,7 +30,7 @@ spec:
         app.kubernetes.io/name: printscan-device
       annotations:
         printscan.dev/config-hash: 7e1f8bd6b7baa02a34e548aa590a44edc9e8d41ad033d7ab5ba9826cc4b4b23b
-        printscan.dev/spec-hash: c569a1e0f7ba80b6f46f6c93a8babe66e56dfda6bf70efd4c220b456e306b829
+        printscan.dev/spec-hash: d4aad576b417e7a80b16db6bee8365c150fda660a3b26ce9f0d339541ffefe22
     spec:
       volumes:
       - name: run-printscan

@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -36,8 +38,18 @@ var (
 	ErrBusy        = errors.New("a scan is already running") // 409
 	ErrNoScanner   = errors.New("no scanner available")      // 503
 	ErrNotFound    = errors.New("scan not found")            // 404
-	ErrRunning     = errors.New("scan is still running")     // 409 on DELETE
+	ErrRunning     = errors.New("scan is still running")     // Delete of a running scan; DELETE cancels it instead
 	ErrNotFinished = errors.New("scan has not finished yet") // 409 on download
+	ErrNotRunning  = errors.New("scan is not running")       // Cancel of a finished scan; DELETE deletes it instead
+	// ErrStorageFull refuses a new scan at MaxStoredBytes (507).
+	ErrStorageFull = errors.New("stored scans use 1 GiB; delete old scans to scan again")
+)
+
+// Storage limits. The data volume also holds the config, so the scans stay
+// well below its default 2 GiB.
+const (
+	MaxPageBytes   = 256 << 20 // one scanned page
+	MaxStoredBytes = 1 << 30   // all stored scans; a new scan is refused at or above it
 )
 
 // StorageError is a failure to write the scan directory (API: 500 storage-error).
@@ -74,7 +86,11 @@ type Service struct {
 	o       Options
 	mu      sync.Mutex
 	scans   map[string]*apitypes.Scan
-	running string // id of the running scan, "" when idle
+	running string             // id of the running scan, "" when idle
+	stop    context.CancelFunc // cancels the running scan
+	cancel  bool               // Cancel was called for the running scan
+
+	pageLimit, quota int64 // MaxPageBytes and MaxStoredBytes; tests lower them
 }
 
 // New returns a Service and loads the scans already in o.Dir. A scan left
@@ -86,7 +102,7 @@ func New(o Options) *Service {
 	if o.Context == nil {
 		o.Context = context.Background()
 	}
-	s := &Service{o: o, scans: map[string]*apitypes.Scan{}}
+	s := &Service{o: o, scans: map[string]*apitypes.Scan{}, pageLimit: MaxPageBytes, quota: MaxStoredBytes}
 	entries, err := os.ReadDir(o.Dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("cannot read scan directory", "dir", o.Dir, "err", err)
@@ -136,6 +152,11 @@ func (s *Service) Start(set Settings) (apitypes.Scan, error) {
 	if s.running != "" {
 		return apitypes.Scan{}, ErrBusy
 	}
+	if used, err := dirSize(s.o.Dir); err != nil {
+		return apitypes.Scan{}, &StorageError{err}
+	} else if used >= s.quota {
+		return apitypes.Scan{}, ErrStorageFull
+	}
 	id, err := newID()
 	if err != nil {
 		return apitypes.Scan{}, err
@@ -150,8 +171,46 @@ func (s *Service) Start(set Settings) (apitypes.Scan, error) {
 	}
 	s.scans[id] = &scan
 	s.running = id
-	go s.run(sc, scan)
+	ctx, stop := context.WithTimeout(s.o.Context, scanTimeout)
+	s.stop, s.cancel = stop, false
+	go s.run(ctx, sc, scan)
 	return scan, nil
+}
+
+// dirSize is the total size of the regular files under dir (0 if it is missing).
+func dirSize(dir string) (int64, error) {
+	var n int64
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		info, err := d.Info()
+		if err == nil {
+			n += info.Size()
+		}
+		return err
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	return n, err
+}
+
+// Cancel stops a running scan and returns it as it is now. The scan then
+// ends canceled, its pages removed, and the record stays until Delete. A
+// finished scan gives ErrNotRunning.
+func (s *Service) Cancel(id string) (apitypes.Scan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !idPattern.MatchString(id) || s.scans[id] == nil {
+		return apitypes.Scan{}, ErrNotFound
+	}
+	if s.running != id {
+		return apitypes.Scan{}, ErrNotRunning
+	}
+	s.cancel = true
+	s.stop()
+	return *s.scans[id], nil
 }
 
 func newID() (string, error) {
@@ -163,10 +222,8 @@ func newID() (string, error) {
 }
 
 // run fetches every page, assembles the PDF and records the outcome.
-func (s *Service) run(sc Scanner, scan apitypes.Scan) {
+func (s *Service) run(ctx context.Context, sc Scanner, scan apitypes.Scan) {
 	s.emit(scan)
-	ctx, cancel := context.WithTimeout(s.o.Context, scanTimeout)
-	defer cancel()
 	dir := filepath.Join(s.o.Dir, scan.ID)
 
 	fail := func(job string, err error) {
@@ -203,10 +260,16 @@ func (s *Service) run(sc Scanner, scan apitypes.Scan) {
 			fail(job, err)
 			return
 		}
-		err = writeFile(filepath.Join(dir, pageName(pages+1)), body)
+		path := filepath.Join(dir, pageName(pages+1))
+		n, err := writeFile(path, io.LimitReader(body, s.pageLimit+1))
 		_ = body.Close()
 		if err != nil {
 			fail(job, &StorageError{err})
+			return
+		}
+		if n > s.pageLimit {
+			_ = os.Remove(path)
+			fail(job, fmt.Errorf("page %d is larger than %d MiB", pages+1, s.pageLimit>>20))
 			return
 		}
 		pages++
@@ -231,33 +294,33 @@ func (s *Service) run(sc Scanner, scan apitypes.Scan) {
 
 func pageName(n int) string { return "page-" + strconv.Itoa(n) + ".jpg" }
 
-func writeFile(path string, r io.Reader) error {
+func writeFile(path string, r io.Reader) (int64, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path built from a validated id
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := io.Copy(f, r); err != nil {
+	n, err := io.Copy(f, r)
+	if err != nil {
 		_ = f.Close()
-		return err
+		return n, err
 	}
-	return f.Close()
+	return n, f.Close()
 }
 
 func (s *Service) writePDF(dir string, pages, dpi int) error {
-	imgs := make([][]byte, pages)
-	for i := range imgs {
-		b, err := os.ReadFile(filepath.Join(dir, pageName(i+1))) //nolint:gosec // path built from a validated id
+	open := func(i int) (io.ReadSeekCloser, error) {
+		f, err := os.Open(filepath.Join(dir, pageName(i+1))) //nolint:gosec // path built from a validated id
 		if err != nil {
-			return &StorageError{err}
+			return nil, &StorageError{err}
 		}
-		imgs[i] = b
+		return f, nil
 	}
 	f, err := renameio.NewPendingFile(filepath.Join(dir, "scan.pdf"), renameio.WithPermissions(0o600))
 	if err != nil {
 		return &StorageError{err}
 	}
 	defer func() { _ = f.Cleanup() }()
-	if err := WriteJPEGPDF(f, imgs, dpi); err != nil {
+	if err := WriteJPEGPDF(f, pages, open, dpi); err != nil {
 		return err
 	}
 	if err := f.CloseAtomicallyReplace(); err != nil {
@@ -266,7 +329,9 @@ func (s *Service) writePDF(dir string, pages, dpi int) error {
 	return nil
 }
 
-// finish records the scan's final state, persists it and emits it.
+// finish records the scan's final state, persists it and emits it. After
+// Cancel the state is canceled whatever stage the scan had reached, and its
+// files other than meta.json are removed.
 func (s *Service) finish(id, state string, err error) {
 	s.mu.Lock()
 	sc := s.scans[id]
@@ -274,14 +339,32 @@ func (s *Service) finish(id, state string, err error) {
 	if err != nil {
 		sc.Error = ptr(err.Error())
 	}
+	if s.cancel {
+		sc.State, sc.Error, sc.Pages = ScanCanceled, nil, 0
+		s.removeFiles(id)
+	}
 	cur := *sc
 	// Written before running is cleared, so Delete and the janitor cannot race it.
 	if err := s.writeMeta(cur); err != nil {
 		slog.Warn("cannot write scan metadata", "id", id, "err", err)
 	}
-	s.running = ""
+	s.running, s.cancel = "", false
+	s.stop()
 	s.mu.Unlock()
 	s.emit(cur)
+}
+
+// removeFiles deletes a scan's pages and PDF, keeping meta.json.
+func (s *Service) removeFiles(id string) {
+	dir := filepath.Join(s.o.Dir, id)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != "meta.json" {
+			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+				slog.Warn("cannot remove canceled scan file", "id", id, "file", e.Name(), "err", err)
+			}
+		}
+	}
 }
 
 func (s *Service) writeMeta(sc apitypes.Scan) error {

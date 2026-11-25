@@ -25,10 +25,10 @@ eulas:
     version: "3.24.4"
     vendor: HP
     title: HP Linux Imaging and Printing proprietary plug-in
-    # HP's plug-in page: developers.hp.com answers 403 to automated clients, but
-    # the Wayback Machine has a 200 snapshot of it from 2026-03-10. Its content
-    # was not reviewed. The licence text itself ships inside the .run file.
-    url: https://developers.hp.com/hp-linux-imaging-and-printing/plugins
+    # The licence text ships inside HP's .run archive (./license.txt in the
+    # payload). The agent downloads and verifies the archive and shows this
+    # file before the user accepts; HP's text is never stored in this repo.
+    text: {blob: hplip-plugin, path: license.txt}
     summary: Needed by some HP lasers for firmware upload and by some HP scanners.
 
 blobs:
@@ -41,8 +41,13 @@ blobs:
     # fingerprint is the GPG_Verification default key in hplip 3.24.4's
     # base/validation.py. The key was fetched from keyserver.ubuntu.com because
     # the keys.openpgp.org copy has its user ID stripped, which go-crypto
-    # refuses to parse. HP signs the .run with DSA over SHA-1.
-    verify: {pgpSignatureURL: https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-3.24.4-plugin.run.asc, pgpKey: keys/hplip.asc}
+    # refuses to parse. HP signs the .run with DSA over SHA-1, so the sha256 of
+    # the archive is pinned as well and both checks must pass. Update the sha256
+    # together with the version.
+    verify:
+      pgpSignatureURL: https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-3.24.4-plugin.run.asc
+      pgpKey: keys/hplip.asc
+      sha256: 1f3c6bdd25661a8a2e18153655d6f06f028c1d9c308d69c8ecfd7767a2d0c5aa
     format: hplip-plugin
     maxBytes: 52428800
 

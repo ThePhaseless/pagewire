@@ -5,8 +5,9 @@ printscan's own code is licensed under Apache-2.0 (`LICENSE`, `NOTICE`). The con
 Versions were read from images built from this repository on 2026-11-24 (linux/arm64). Ubuntu and Debian package versions move with security updates, because every image build runs `apt-get upgrade`. For a given image the authoritative lists are inside it and attached to it:
 
 - the SBOM attestation published with every image (Go modules, npm packages, Alpine, Debian and Ubuntu packages);
-- `/licenses` in the control-plane image (`go/` for Go modules, `c/` for the statically linked C libraries, `printscan/` for this project);
-- `/usr/share/printscan/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`.
+- `/licenses` in the control-plane image (`go/` for Go modules and the Go standard library, `c/` for the statically linked C libraries, `printscan/` for this project's `LICENSE`, `NOTICE` and this file);
+- `/usr/share/printscan/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`;
+- `/usr/share/printscan/` in the device and driver images also holds `NOTICE`, this file and `SOURCES`, which names the image with the corresponding source (`ghcr.io/thephaseless/<image>:<tag>-sources`). The image label `dev.printscan.sources` carries the same name.
 
 Licence cells give the licence of the component's own files. Debian packaging files (`debian/*`) are often GPL-2.0-or-later and are not repeated here; the copyright file in the image has every stanza.
 
@@ -18,11 +19,11 @@ A single statically linked Go binary with the web UI embedded, on Google's distr
 
 ### Go modules (linked)
 
-Licences as classified by `go tool go-licenses`. The full texts ship in the image under `/licenses/go/`, and each module's source is at `https://pkg.go.dev/<module>@<version>`. None is modified.
+Licences as classified by `go tool go-licenses`, which skips the standard library. The full texts ship in the image under `/licenses/go/`, the standard library's as `/licenses/go/LICENSE-go-stdlib`. Each module's source is at `https://pkg.go.dev/<module>@<version>`, and the standard library's at https://go.dev/dl/. None is modified.
 
 | Module | Version | Licence |
 |---|---|---|
-| Go standard library | 1.27.1 | BSD-3-Clause |
+| Go standard library (not listed by go-licenses) | 1.27.1 | BSD-3-Clause |
 | `github.com/bahlo/generic-list-go` | v0.2.0 | BSD-3-Clause |
 | `github.com/buger/jsonparser` | v1.1.2 | MIT |
 | `github.com/cloudflare/circl` | v1.6.3 | BSD-3-Clause |
@@ -154,8 +155,8 @@ Built from upstream source:
 | Component | Version | Licence | How included | Source |
 |---|---|---|---|---|
 | ipp-usb | 0.9.34 | BSD-2-Clause | Separate program `/usr/local/sbin/ipp-usb`, with its quirks files in `/usr/share/ipp-usb/quirks/` | https://github.com/OpenPrinting/ipp-usb/tree/0.9.34 |
-| goipp (inside ipp-usb) | v1.2.0 | BSD-2-Clause | Linked into ipp-usb, vendored in its source tree | https://github.com/OpenPrinting/goipp |
-| Go standard library (inside ipp-usb) | 1.27.1 | BSD-3-Clause | Linked into ipp-usb | https://go.dev/dl/ |
+| goipp (inside ipp-usb) | v1.2.0 | BSD-2-Clause | Linked into ipp-usb, vendored in its source tree; licence in `/usr/share/licenses/ipp-usb/LICENSE.goipp` | https://github.com/OpenPrinting/goipp |
+| Go standard library (inside ipp-usb) | 1.27.1 | BSD-3-Clause | Linked into ipp-usb; licence in `/usr/share/licenses/ipp-usb/LICENSE.go` | https://go.dev/dl/ |
 | AirSane | v0.4.16 | GPL-3.0-or-later | Separate program `/usr/local/bin/airsaned` | https://github.com/SimulPiscator/AirSane/tree/v0.4.16 |
 
 The main Ubuntu packages (`apt-get install --no-install-recommends`; the full list, with dependencies and the base image, is `/usr/share/printscan/source-packages.txt`):
@@ -191,7 +192,7 @@ Built from upstream source (identical in all four images, except the application
 | gutenprint-printer-app | commit fbfce9086b3e612447eec729240ab68986608857 | Apache-2.0 | Separate program, `printscan-driver-gutenprint` only | None | https://github.com/OpenPrinting/gutenprint-printer-app |
 | ghostscript-printer-app | commit acf18a476bee525b88526ff8e0154f004b361914 | Apache-2.0 | Separate program, `printscan-driver-ghostscript` only | None | https://github.com/OpenPrinting/ghostscript-printer-app |
 
-Their LICENSE and NOTICE files are in `/usr/share/licenses/<component>/`. The patch carries PAPPL's licence and is published in the `-sources` images.
+Their LICENSE and NOTICE files are in `/usr/share/licenses/<component>/`. The patch carries PAPPL's licence; it ships in `/usr/share/licenses/pappl/pappl-max-vendor.patch` and in the `-sources` images.
 
 The main Ubuntu packages (all unmodified):
 
@@ -207,6 +208,7 @@ The main Ubuntu packages (all unmodified):
 | ghostscript (ghostscript) | 10.06.0~dfsg-3ubuntu1.2 | AGPL-3.0-or-later | all four (a dependency in hplip and gutenprint) | Separate program, run by the filters |
 | foomatic-db-compressed-ppds (foomatic-db) | 20250819-1build1 | GPL-2.0-only AND GPL-2.0-or-later AND MIT | ps, ghostscript | PPD data files |
 | hplip, printer-driver-hpcups, hplip-data (hplip) | 3.24.4+dfsg0-0ubuntu8.4 | GPL-2.0-or-later AND BSD-3-Clause AND MIT | hplip | Separate programs (the `hp` backend and `hpcups` filter) and data |
+| libcurl3t64-gnutls (curl) | 8.18.0-1ubuntu2.8 | curl | all | Library, a dependency of poppler and libproxy |
 | libcurl4t64 (curl) | 8.18.0-1ubuntu2.8 | curl | hplip | Library linked into hplip-printer-app |
 | libssl3t64 (openssl) | 3.5.5-1ubuntu3.7 | Apache-2.0 | all | Library |
 | printer-driver-gutenprint, libgutenprint9 (gutenprint) | 5.3.4.20220624T01008808d602-4ubuntu2 | GPL-2.0-or-later | gutenprint | Separate program (filter) and its library |
@@ -219,13 +221,16 @@ In `printscan-driver-hplip` the HP plug-in paths are symlinks into the vendor-fi
 
 ## Corresponding source
 
-For every release, CI publishes `ghcr.io/thephaseless/<image>:<version>-sources` for the device image and each driver image. Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
+For every published image tag, CI publishes a matching `-sources` image for the device image and each driver image: `ghcr.io/thephaseless/<image>:<tag>-sources`, for example `main-sources`, `1.2.3-sources`, `1.2-sources` and `1-sources`. The source for `latest` is the newest `<version>-sources`. The `SOURCES` file and the `dev.printscan.sources` label in each image name its `-sources` image.
 
-- `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt` (the union of the four lists for the driver images), fetched with `apt-get source`;
-- `upstream/`: the tarballs of everything built from source at the exact tag or commit (ipp-usb and AirSane; PAPPL, pappl-retrofit and the four applications);
-- `patches/` (driver images): the PAPPL patch.
+Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
 
-To extract one: `docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .` from a checkout of the release tag, or copy `/sources` out of the published `-sources` image. The `-sources` image must come from the same release as the image it covers.
+- `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt`, fetched with `apt-get source`. In CI the list is the union of the amd64 and arm64 lists read from the images that the same run pushed (`sha-<commit>`), so it matches the published binaries. A local build of the `sources` target uses the lists of the targets it builds, the union of all four for the driver Dockerfile;
+- `upstream/`: `git archive` tarballs of everything built from source, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit and the four applications);
+- `patches/` (driver images): the PAPPL patch;
+- `build/`: the Dockerfile and, for the device image, its config files.
+
+To extract one: `docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .` from a checkout of the same commit, or copy `/sources` out of the published `-sources` image. Use the `-sources` image with the same tag as the image it covers.
 
 The control-plane image has no `-sources` image. Its Go and npm dependencies are permissively licensed and listed above. For the distroless Debian packages, see the pointers in that section.
 
@@ -233,7 +238,8 @@ The control-plane image has no `-sources` image. Its Go and npm dependencies are
 
 These are never in an image, in this repository or in CI:
 
-- HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files): printscan downloads it at runtime on your cluster, through the `agent fetch` step in the device pod's `fetch-blobs` init container, and only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin` and the matching version). It comes from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`, must match HP's detached OpenPGP signature against the key in `internal/catalog/keys/hplip.asc`, and is unpacked into the vendor-file volume. hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. printscan never opens that page, and the plug-in paths lead into `/blobs`, which is either the read-only vendor-file mount or does not exist on the read-only root file system. The licence link that the setup wizard and Settings show for this plug-in (the catalog EULA `url`, `https://developers.hp.com/hp-linux-imaging-and-printing/plugins`) is not yet confirmed to carry or link HP's licence text, because that page refuses automated clients. The pre-public review has to confirm it or replace it with a page that does. The licence text itself ships inside the `.run` file.
+- HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files) and its licence text: printscan downloads the archive at runtime on your cluster, from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`. The device pod's agent downloads it into the vendor-file volume before acceptance, checks it against HP's detached OpenPGP signature (key in `internal/catalog/keys/hplip.asc`) and the sha256 pinned in the catalog, and reads HP's licence text from inside it, so the wizard and Settings can show that text. The `agent fetch` step in the `fetch-blobs` init container installs the plug-in only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin`, the matching version and the sha256 of the text shown), and only if the text in the archive still has that sha256. It unpacks the plug-in into the vendor-file volume.
+- hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. printscan never opens that page. Its plug-in paths lead into `/blobs`. The driver container mounts the vendor-file volume there only after you accepted HP's licence, and then read-only; before that, `/blobs` does not exist on the read-only root file system. So hplip-printer-app could install the plug-in itself only into a mounted `/blobs`, which happens after acceptance, and the read-only mount stops even that.
 - foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and printscan adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
 - Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript, foo2zjs, SpliX, HPLIP's free parts) and the SANE backends Ubuntu ships.
 - The Mopria eSCL specification: printscan's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.

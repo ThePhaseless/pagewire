@@ -64,6 +64,9 @@ func New(uri string) *Client { return &Client{uri: uri} }
 
 var requestID atomic.Uint32
 
+// maxResponseBytes caps an IPP response; a longer one fails to decode.
+const maxResponseBytes = 8 << 20
+
 func (c *Client) request(op goipp.Op) *goipp.Message {
 	m := goipp.NewRequest(goipp.DefaultVersion, op, requestID.Add(1))
 	m.Operation.Add(goipp.MakeAttribute("attributes-charset", goipp.TagCharset, goipp.String("utf-8")))
@@ -113,7 +116,7 @@ func (c *Client) do(ctx context.Context, msg *goipp.Message, doc io.Reader) (*go
 		return nil, fmt.Errorf("ipp %s: HTTP %s", goipp.Op(msg.Code), resp.Status)
 	}
 	rsp := &goipp.Message{}
-	if err := rsp.Decode(resp.Body); err != nil {
+	if err := rsp.Decode(io.LimitReader(resp.Body, maxResponseBytes)); err != nil {
 		return nil, fmt.Errorf("ipp %s: decode response: %w", goipp.Op(msg.Code), err)
 	}
 	if st := goipp.Status(rsp.Code); st > 0x00ff { // 0x0000-0x00ff are successful-*

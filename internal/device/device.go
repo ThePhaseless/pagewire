@@ -22,6 +22,13 @@ const (
 	ModeProbe     = "probe" // probe + agent only, feeds the wizard
 )
 
+// IPPUSBMinPort and IPPUSBMaxPort bound the HTTP ports ipp-usb listens on
+// (its rendered config) and so the ports its DNS-SD services advertise.
+const (
+	IPPUSBMinPort = 60000
+	IPPUSBMaxPort = 60009
+)
+
 // Observation phases.
 const (
 	PhaseAbsent  = "absent"
@@ -124,6 +131,9 @@ type Spec struct {
 	Name         string    `json:"name"`     // simulated mode only (ippeveprinter / virtual printer name); "" in usb and probe modes
 	Location     string    `json:"location"` // simulated mode only (ippeveprinter / virtual printer location); "" in usb and probe modes
 	Hash         string    `json:"hash"`     // SpecHash(spec); written to the pod template, so a change rolls the pod
+	// AcceptedEULAs are the config's accepted entries, with their text sha256,
+	// for the EULAs of Blobs, sorted by id. Accepting a licence changes the hash.
+	AcceptedEULAs []EULARef `json:"acceptedEulas"`
 }
 
 // SpecHash returns the hex sha256 of the canonical JSON (encoding/json of the
@@ -143,6 +153,9 @@ func SpecHash(s *Spec) string {
 	}
 	if c.Blobs == nil {
 		c.Blobs = []BlobRef{}
+	}
+	if c.AcceptedEULAs == nil {
+		c.AcceptedEULAs = []EULARef{}
 	}
 	b, err := json.Marshal(c)
 	if err != nil {

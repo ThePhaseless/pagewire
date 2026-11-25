@@ -171,11 +171,11 @@ func TestSubmitStreamsDocumentWithOptions(t *testing.T) {
 		t.Errorf("Send-Document document-format = %q", got)
 	}
 
-	// A14: go-mfp's virtual printer (b3cc636803df) never moves a job past
+	// go-mfp's virtual printer (b3cc636803df) never moves a job past
 	// pending-held after Send-Document: handleSendDocument only clears
 	// SendDocumentActive, and only Cancel-Job reaches a terminal state. The
 	// abstract.Printer backend gets no job handle, so it cannot set completed
-	// either. We assert what it reports; U14 must make jobs complete itself.
+	// either. We assert what it reports.
 	j, err := c.Job(ctx, id)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +268,7 @@ func TestUnsupportedFormatRefusedBeforeAnyIPPCall(t *testing.T) {
 
 	// The caller (the API's print handler) negotiates before submitting.
 	head := []byte("just some text\n")
-	err = Negotiate(Detect(head, "notes.txt"), a.Formats)
+	_, err = Negotiate(Detect(head, "notes.txt"), a.Formats)
 	var ufe *UnsupportedFormatError
 	if !errors.As(err, &ufe) || ufe.Detected != FormatText || !slices.Equal(ufe.Supported, testFormats) {
 		t.Fatalf("Negotiate = %v, want UnsupportedFormatError for text/plain", err)
@@ -388,4 +388,40 @@ func attrString(attrs goipp.Attributes, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestResponseSizeLimit(t *testing.T) {
+	big := strings.Repeat("x", 32000)
+	respond := func(values int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			req := &goipp.Message{}
+			if err := req.Decode(r.Body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			rsp := goipp.NewResponse(goipp.DefaultVersion, goipp.StatusOk, req.RequestID)
+			attr := goipp.MakeAttribute("printer-state-reasons", goipp.TagKeyword, goipp.String(big))
+			for range values - 1 {
+				attr.Values.Add(goipp.TagKeyword, goipp.String(big))
+			}
+			rsp.Printer.Add(attr)
+			w.Header().Set("Content-Type", goipp.ContentType)
+			_ = rsp.Encode(w)
+		}
+	}
+	// 3 values: under the limit; 300 values (about 9.6 MB): over it.
+	for _, tc := range []struct {
+		values int
+		ok     bool
+	}{{3, true}, {300, false}} {
+		srv := httptest.NewServer(respond(tc.values))
+		_, err := New("ipp://" + strings.TrimPrefix(srv.URL, "http://") + "/ipp/print").Attributes(context.Background())
+		srv.Close()
+		if (err == nil) != tc.ok {
+			t.Errorf("%d values of 32000 bytes: err = %v, want ok=%v", tc.values, err, tc.ok)
+		}
+	}
+	if maxResponseBytes != 8<<20 {
+		t.Errorf("maxResponseBytes = %d, want 8 MiB", maxResponseBytes)
+	}
 }

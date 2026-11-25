@@ -21,7 +21,7 @@ import {
   useStatus,
 } from "./events";
 
-// The Status the controller returns before any input (plan: controller rules, "Initial Status").
+// The Status the controller returns before any input: no config, no device, nothing reconciled.
 const initialStatus = {
   config: {
     state: "missing",
@@ -45,6 +45,7 @@ const initialStatus = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -194,6 +195,44 @@ describe("response parsing", () => {
     } finally {
       console.error = realError;
     }
+  });
+});
+
+describe("scans and licences", () => {
+  const scanBody = {
+    id: "0123456789abcdef",
+    state: "scanning",
+    createdAt: "2026-11-24T17:00:00+01:00",
+    pages: 1,
+    format: "pdf",
+    settings: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
+    error: null,
+  };
+
+  test("DELETE on a running scan returns the scan (202), on a finished one null (204)", async () => {
+    respond(202, scanBody);
+    expect((await api.deleteScan(scanBody.id))?.state).toBe("scanning");
+    expect(calls[0]?.init.method).toBe("DELETE");
+    globalThis.fetch = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+    expect(await api.deleteScan(scanBody.id)).toBeNull();
+  });
+
+  test("a licence while pending has null text and sha", async () => {
+    respond(200, {
+      id: "hplip-plugin",
+      version: "3.24.4",
+      title: "HP plug-in",
+      vendor: "HP",
+      summary: "",
+      state: "pending",
+      message: "",
+      textSha256: null,
+      text: null,
+    });
+    const e = await api.getEula("hplip-plugin");
+    expect(e.state).toBe("pending");
+    expect(e.text).toBeNull();
+    expect(calls[0]?.url).toBe(`${API}/eulas/hplip-plugin`);
   });
 });
 

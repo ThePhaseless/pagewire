@@ -34,6 +34,10 @@ export const scanStrings = {
     },
   },
   submit: "Scan",
+  cancel: "Cancel scan",
+  cancelFailed: "The scan was not canceled",
+  ready: (pages: number) => `Scan ready, ${pages} ${pages === 1 ? "page" : "pages"}`,
+  failed: "Scan failed",
   busy: "The scanner is busy. Wait for the current scan to finish.",
   scanning: (pages: number) =>
     pages === 0 ? "Scanning…" : `Scanning… ${pages} ${pages === 1 ? "page" : "pages"} so far`,
@@ -47,6 +51,8 @@ export const scanStrings = {
     page: (n: number) => `Page ${n}`,
     openPage: (n: number) => `Open page ${n}`,
     pageOf: (n: number, total: number) => `Page ${n} of ${total}`,
+    previous: "Previous page",
+    next: "Next page",
   },
   download: {
     pdf: "Download PDF",
@@ -61,6 +67,8 @@ export const scanStrings = {
         : `Scans are deleted after ${days} ${days === 1 ? "day" : "days"}.`,
     summary: (pages: number, format: string) =>
       `${pages} ${pages === 1 ? "page" : "pages"}, ${format}`,
+    empty: "No recent scans",
+    emptyBody: "Scans you make are listed here until you delete them or they expire.",
     show: "Show",
     showScan: (when: string) => `Show scan from ${when}`,
     deleteScan: (when: string) => `Delete scan from ${when}`,

@@ -15,7 +15,8 @@ resources:
   - service.yaml
   - networkpolicy.yaml
 images:
-  # Example tag only: real deployments pin tag@digest (newTag: 1.2.3@sha256:<digest>).
+  # Use main until the first release, then pin <version>@sha256:<digest>
+  # (and drop imagePullPolicy: Always in deployment.yaml).
   # The device pod's probe, agent and fetch-blobs containers reuse this exact image string.
   - name: ghcr.io/thephaseless/printscan
-    newTag: 0.0.0
+    newTag: main

@@ -140,8 +140,15 @@ func sig(path dbus.ObjectPath, member string, body ...any) *dbus.Signal {
 	return &dbus.Signal{Sender: ":1.5", Path: path, Name: browserIface + "." + member, Body: body}
 }
 
+// itemSig is a browser signal for an instance this host announced
+// (AVAHI_LOOKUP_RESULT_MULTICAST | AVAHI_LOOKUP_RESULT_LOCAL).
 func itemSig(path dbus.ObjectPath, member string, proto int32, name, typ string) *dbus.Signal {
-	return sig(path, member, int32(2), proto, name, typ, "local", uint32(4))
+	return sig(path, member, int32(2), proto, name, typ, "local", uint32(4|8))
+}
+
+// remoteItemSig is an instance announced by another host (multicast only).
+func remoteItemSig(path dbus.ObjectPath, proto int32, name, typ string) *dbus.Signal {
+	return sig(path, "ItemNew", int32(2), proto, name, typ, "local", uint32(4))
 }
 
 func newBrowser(f *fakeAvahi) *browser {
@@ -177,6 +184,8 @@ func TestBrowseMapsLocalServices(t *testing.T) {
 					itemSig(p, "ItemNew", 0, "Living room printer", device.ServiceIPP),
 					itemSig(p, "ItemNew", 0, "Other printer", device.ServiceIPP),
 					itemSig(p, "ItemNew", 0, "Neighbour", device.ServiceIPP),
+					// another host announcing this node's address: never resolved
+					remoteItemSig(p, 0, "Spoofed", device.ServiceIPP),
 					itemSig(p, "ItemNew", 0, "Stale", device.ServiceIPP),
 					itemSig(p, "ItemNew", 0, "Hung", device.ServiceIPP),
 					itemSig(p, "ItemNew", 0, "Removed", device.ServiceIPP),
@@ -195,6 +204,7 @@ func TestBrowseMapsLocalServices(t *testing.T) {
 			"_ipp._tcp/Living room printer/1": {host: "node.local", addr: "fe80::1%eth0", port: 8631, txt: [][]byte{[]byte("rp=ipp/print")}},
 			"_ipp._tcp/Other printer/0":       {host: "node.local", addr: "192.168.1.20", port: 631, txt: [][]byte{[]byte("rp=ipp/print"), []byte("ty=Other")}},
 			"_ipp._tcp/Neighbour/0":           {host: "neighbour.local", addr: "192.168.1.99", port: 631},
+			"_ipp._tcp/Spoofed/0":             {host: "node.local", addr: "192.168.1.20", port: 60000, txt: [][]byte{[]byte("rp=ipp/print")}},
 			"_ipp._tcp/Stale/0":               {err: errors.New("timeout")},
 			"_ipp._tcp/Hung/0":                {block: true},
 			"_uscan._tcp/Scanner/0":           {host: "node.local", addr: "192.168.1.20", port: 8090},

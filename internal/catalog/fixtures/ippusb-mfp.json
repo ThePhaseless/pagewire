@@ -3,7 +3,7 @@
     {
       "vendorId": "03f0",
       "productId": "2754",
-      "serial": "TH0AB1C2D3",
+      "serial": "FAKE0005",
       "manufacturer": "HP",
       "product": "OfficeJet Pro 8020 series",
       "bus": 1,
@@ -15,7 +15,7 @@
         {"class": 7, "subClass": 1, "protocol": 4},
         {"class": 7, "subClass": 1, "protocol": 4}
       ],
-      "deviceId": "MFG:HP;MDL:OfficeJet Pro 8020 series;CMD:PCL3GUI,PJL,Automatic,JPEG,PCLM,AppleRaster,PWGRaster,DW-PCL,802.11,DESKJET,DYN;CLS:PRINTER;DES:1KR67A;CID:HPIJVIPAV9;LEDMDIS:USB#FF#CC#00,USB#07#01#02,USB#FF#04#01;SN:TH0AB1C2D3;"
+      "deviceId": "MFG:HP;MDL:OfficeJet Pro 8020 series;CMD:PCL3GUI,PJL,Automatic,JPEG,PCLM,AppleRaster,PWGRaster,DW-PCL,802.11,DESKJET,DYN;CLS:PRINTER;DES:1KR67A;CID:HPIJVIPAV9;LEDMDIS:USB#FF#CC#00,USB#07#01#02,USB#FF#04#01;SN:FAKE0005;"
     }
   ],
   "probedAt": "2026-11-24T12:00:00Z",

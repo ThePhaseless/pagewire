@@ -25,7 +25,7 @@ Without them every Go build and test fails at the cgo step. Run tools through `m
 
 ## Never shell out
 
-No Go file imports `os/exec` or calls `os.StartProcess`, `syscall.Exec`, `syscall.ForkExec` or `unix.Exec`; depguard and forbidigo in `.golangci.yml` fail the lint. Talk to daemons over IPP, eSCL, D-Bus or the Kubernetes API. Daemons are containers in the rendered pod spec, or in-process virtual devices in `sim`. No Go test spawns a process. The browser e2e harness (`ui/e2e/harness.ts`) builds and starts the binary; it is test infrastructure, outside this rule. Check with:
+No Go file imports `os/exec` or `golang.org/x/sys/execabs`, or calls `os.StartProcess`, `syscall.StartProcess`, `syscall`/`unix` `Exec` or `ForkExec`, or uses `SYS_EXECVE`; depguard and forbidigo in `.golangci.yml` fail the lint (test/integration included, through `run.build-tags`). A CI step also fails when a dependency beyond the known three (godbus, client-go's exec auth plugin, gnostic-models) imports `os/exec` into `./cmd/printscan`. Talk to daemons over IPP, eSCL, D-Bus or the Kubernetes API. Daemons are containers in the rendered pod spec, or in-process virtual devices in `sim`. No Go test spawns a process. The browser e2e harness (`ui/e2e/harness.ts`) builds and starts the binary; it is test infrastructure, outside this rule. Check with:
 
 ```sh
 grep -rn --include='*.go' --exclude-dir=node_modules --exclude-dir=.cache '"os/exec"' .
@@ -51,7 +51,7 @@ UPDATE_SCHEMA=1 mise x -- go test ./internal/schema
 cd ui && mise x -- bun run gen
 ```
 
-Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) change in their own commit. During parallel work one owner edits them; any other change that needs a new import stops and names the package and the reason.
+Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) change in their own commit.
 
 ### JSON shapes
 
@@ -83,17 +83,16 @@ Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) chan
 ## Images and CI
 
 - The device and driver Dockerfiles end with a `sources` stage, so every build names its target: `--target device`, or `ps`, `hplip`, `gutenprint`, `ghostscript`. CI matrix entries do too.
-- Every `FROM` naming an external image is `tag@sha256:<multi-arch index digest>` (from `docker buildx imagetools inspect`). Only `FROM scratch` and earlier stage names go without.
+- Every `FROM` naming an external image is `tag@sha256:<multi-arch index digest>` (from `docker buildx imagetools inspect`). Only `FROM scratch`, earlier stage names, `${PUSHED_IMAGE}` in the `pushed-amd64`/`pushed-arm64` stages and `lists-${SOURCES_LISTS}` go without.
+- Upstream sources built in the Dockerfiles are pinned by commit: `ARG X=<40-hex sha> # renovate: datasource=github-tags depName=<owner/repo> currentValue=<tag>`. Renovate's regex manager reads that comment, so keep its shape.
+- Each device and driver final stage writes `ghcr.io/thephaseless/<its image>:${VERSION#v}-sources` to `/usr/share/printscan/SOURCES` and to the `dev.printscan.sources` label, and copies `NOTICE` and `THIRD_PARTY_NOTICES.md` beside it.
 - The control-plane `Dockerfile` links cgo statically through `/usr/local/bin/pkg-config-static` (`exec pkgconf --static "$@"`) with `ENV PKG_CONFIG` pointing at it: cmd/go reads only the first word of `$PKG_CONFIG`, so `--static` cannot go into the variable.
-- The `sources` CI job sets `meta-flavor: latest=false`; only the image build moves `latest`.
+- The `sources` CI job runs for every push (branch or tag), reads the package lists from the images the same run pushed (`SOURCES_LISTS=pushed`, `PUSHED_IMAGE=...:sha-<commit>`), and sets `meta-flavor: latest=false`; only the image build moves `latest`. `concurrency.cancel-in-progress` is true only for pull requests, so a pushing run never stops between images and their sources. `test/consistency` asserts these CI and Dockerfile rules; change the test with the rule.
 - `ui/dist/.keep` stays committed so Go builds without a UI build; `bun run build` keeps it.
 
-## Parallel work in one tree
+## Docs
 
-When several agents share a working tree:
-
-- Run checks on your own paths only: `go vet`, `golangci-lint run` and `go test` on your package directories (never `./...`); `bun test <files>`, `bunx biome check <files>`, and `bunx tsc --noEmit` counting only errors in your files. Repo-wide runs come last, once everyone is done.
-- Commit only your files: `git add <files> && git commit -m "<message>" -- <files>`. If `.git/index.lock` exists, poll every second for up to 30 s and retry; leave the lock file alone.
+`README.md`, `SECURITY.md`, `CONTRIBUTING.md` and `docs/kubernetes.md` name flags, environment variables, status codes, problem types, limits and file paths. When you change one of those in code, `git grep` for it and update the docs in the same change.
 
 ## Commits
 

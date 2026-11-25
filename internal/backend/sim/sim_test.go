@@ -17,6 +17,8 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 
+	"github.com/ThePhaseless/printscan/internal/blobs"
+	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
 	"github.com/ThePhaseless/printscan/internal/catalog"
 	"github.com/ThePhaseless/printscan/internal/device"
 	"github.com/ThePhaseless/printscan/internal/printing"
@@ -135,7 +137,7 @@ func TestProbeReportsFixture(t *testing.T) {
 	}
 	want := catalog.Fixture("hp-legacy-mfp").Devices
 	rep := r.wait(t, "the fixture inventory", func(rep device.AgentReport) bool { return len(rep.Inventory.Devices) > 0 })
-	if rep.Inventory.Devices[0].Serial != want[0].Serial || !rep.DevicePresent || rep.Queue != nil {
+	if rep.Inventory.Devices[0].Serial != want[0].Serial || !rep.DevicePresent || rep.Queue != nil || !rep.Inventory.Simulated {
 		t.Errorf("report = %+v", rep)
 	}
 	o := observe(t, b)
@@ -182,6 +184,7 @@ func TestIPPUSBPrinterAndScanner(t *testing.T) {
 	}
 
 	pdf := samplePDF(t)
+	before := time.Now().Add(-2 * time.Second)
 	id, err := pc.Submit(ctx(t), "sample.pdf", "web", printing.FormatPDF, bytes.NewReader(pdf), printing.PrintOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -190,9 +193,12 @@ func TestIPPUSBPrinterAndScanner(t *testing.T) {
 	if err != nil || j.State != "completed" {
 		t.Errorf("Job(%d) = %+v, %v; want completed", id, j, err)
 	}
+	if j.CreatedAt.Before(before) || j.CreatedAt.After(time.Now().Add(2*time.Second)) {
+		t.Errorf("Job(%d).CreatedAt = %v, want about now", id, j.CreatedAt)
+	}
 	jobs, err := pc.Jobs(ctx(t), 20)
-	if err != nil || len(jobs) != 1 || jobs[0].State != "completed" {
-		t.Errorf("Jobs() = %+v, %v", jobs, err)
+	if err != nil || len(jobs) != 1 || jobs[0].State != "completed" || !jobs[0].CreatedAt.Equal(j.CreatedAt) {
+		t.Errorf("Jobs() = %+v, %v; want createdAt %v", jobs, err, j.CreatedAt)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "sim-output", "1.bin")) //nolint:gosec // test temp dir
 	if err != nil || !bytes.Equal(got, pdf) {
@@ -293,13 +299,15 @@ func TestSimulatedPrinterNamedFromSpec(t *testing.T) {
 func TestPAPPLPath(t *testing.T) {
 	spec := &device.Spec{
 		Mode: device.ModeUSB, Printer: "hplip", Scanner: "airsane", SaneBackends: []string{"hpaio"},
-		Blobs: []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}},
+		Blobs:         []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}},
+		AcceptedEULAs: []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: blobs.TextSHA256([]byte(blobtest.License))}},
 	}
 	spec.Hash = device.SpecHash(spec)
 	r := &reporter{desired: device.DesiredState{
-		Hash:   spec.Hash,
-		Queue:  &device.QueueSpec{Name: "Printer", Driver: "auto", Schemes: []string{"hp", "usb"}, Media: "iso_a4_210x297mm"},
-		Browse: device.BrowseTypes,
+		Hash:       spec.Hash,
+		Queue:      &device.QueueSpec{Name: "Printer", Driver: "auto", Schemes: []string{"hp", "usb"}, Media: "iso_a4_210x297mm"},
+		Browse:     device.BrowseTypes,
+		StageEULAs: []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}},
 	}}
 	b, dir := newSim(t, "hp-legacy-mfp", r)
 	if err := b.Apply(ctx(t), spec); err != nil {
@@ -344,6 +352,34 @@ func TestPAPPLPath(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "sim-blobs", "hplip-plugin", ".printscan-version")); err != nil {
 		t.Error(err)
 	}
+
+	// The licence text comes from the synthetic vendor's archive.
+	rep = r.wait(t, "the EULA text", func(rep device.AgentReport) bool {
+		return len(rep.EULAs) == 1 && rep.EULAs[0].State == device.EULAAvailable
+	})
+	if e := rep.EULAs[0]; e.Text != blobtest.License || e.TextSHA256 != spec.AcceptedEULAs[0].TextSHA256 {
+		t.Errorf("EULAs = %+v", rep.EULAs)
+	}
+}
+
+// TestProbeStagesEULA: before any config, the probe-mode agent stages the
+// licence text the wizard shows.
+func TestProbeStagesEULA(t *testing.T) {
+	spec := &device.Spec{Mode: device.ModeProbe}
+	spec.Hash = device.SpecHash(spec)
+	r := &reporter{desired: device.DesiredState{
+		Hash: spec.Hash, Browse: device.BrowseTypes, StageEULAs: []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}},
+	}}
+	b, _ := newSim(t, "hp-legacy-mfp", r)
+	if err := b.Apply(ctx(t), spec); err != nil {
+		t.Fatal(err)
+	}
+	rep := r.wait(t, "the EULA text", func(rep device.AgentReport) bool {
+		return len(rep.EULAs) == 1 && rep.EULAs[0].State == device.EULAAvailable
+	})
+	if rep.EULAs[0].Text != blobtest.License {
+		t.Errorf("EULAs = %+v", rep.EULAs)
+	}
 }
 
 func TestSwitchAndNilStopServers(t *testing.T) {
@@ -385,7 +421,7 @@ func TestSwitchAndNilStopServers(t *testing.T) {
 }
 
 // TestApplyNeverWaitsForReport: the controller may hold a lock around Apply
-// that its report handler also takes (decision 33). Both Apply(spec) and
+// that its report handler also takes. Both Apply(spec) and
 // Apply(nil) must return while a report is blocked on that lock.
 func TestApplyNeverWaitsForReport(t *testing.T) {
 	var m sync.Mutex
@@ -431,4 +467,64 @@ func TestApplyNeverWaitsForReport(t *testing.T) {
 		return b.Apply(context.Background(), &device.Spec{Mode: device.ModeProbe})
 	})
 	within("Apply(nil)", func() error { return b.Apply(context.Background(), nil) })
+}
+
+func TestScanDelay(t *testing.T) {
+	const delay = time.Second
+	b := New(Options{Fixture: "ippusb-mfp", DataDir: t.TempDir(), ScanDelay: delay})
+	b.SetReporter((&reporter{}).report)
+	t.Cleanup(func() { _ = b.Apply(context.Background(), nil) })
+	if err := b.Apply(ctx(t), &device.Spec{Mode: device.ModeUSB, Printer: "ipp-usb", Scanner: "ipp-usb"}); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := scanning.NewMFP(observe(t, b).Endpoints.ScannerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := scanning.Settings{Source: "platen", Resolution: 75, ColorMode: "color", Format: "jpeg"}
+
+	// Only the page fetch waits.
+	start := time.Now()
+	job, err := sc.Start(ctx(t), set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d >= delay {
+		t.Errorf("Start took %v, want under %v", d, delay)
+	}
+	start = time.Now()
+	page, err := sc.NextPage(ctx(t), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = page.Close()
+	if d := time.Since(start); d < delay {
+		t.Errorf("NextPage took %v, want at least %v", d, delay)
+	}
+	_ = sc.Cancel(ctx(t), job)
+
+	// A cancelled page fetch returns at once, and the scanner takes the next job.
+	job, err = sc.Start(ctx(t), set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithTimeout(ctx(t), delay/6)
+	defer cancel()
+	start = time.Now()
+	if _, err := sc.NextPage(cctx, job); err == nil {
+		t.Error("NextPage with a cancelled context succeeded")
+	}
+	if d := time.Since(start); d >= delay {
+		t.Errorf("cancelled NextPage took %v, want under %v", d, delay)
+	}
+	if err := sc.Cancel(ctx(t), job); err != nil {
+		t.Errorf("Cancel: %v", err)
+	}
+	if job, err = sc.Start(ctx(t), set); err != nil {
+		t.Fatalf("Start after cancel: %v", err)
+	}
+	if page, err = sc.NextPage(ctx(t), job); err != nil {
+		t.Fatalf("NextPage after cancel: %v", err)
+	}
+	_ = page.Close()
 }

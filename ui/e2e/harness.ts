@@ -1,11 +1,11 @@
 // Browser end-to-end harness: builds the real binary, runs it in sim mode and drives headless
-// Chromium through playwright-core. Test infrastructure, not application code (decision 3).
+// Chromium through playwright-core. Test infrastructure, not application code.
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { type Browser, chromium, type Page } from "playwright-core";
+import { type Browser, type BrowserContextOptions, chromium, type Page } from "playwright-core";
 
-// The e2e run must see no fake DOM: package.json's e2e script sets PRINTSCAN_E2E=1 (A12).
+// The e2e run must see no fake DOM: package.json's e2e script sets PRINTSCAN_E2E=1.
 if (typeof window !== "undefined") throw new Error("happy-dom is registered in the e2e run");
 
 export const repoRoot = resolve(import.meta.dir, "../..");
@@ -15,7 +15,7 @@ const binary = join(repoRoot, ".cache/printscan");
 /** Console errors matching one of these are ignored. Kept empty: fix the cause instead. */
 export const consoleAllowlist: RegExp[] = [];
 
-// Chromium logs this for every 4xx/5xx fetch; API statuses are checked by the API status rule (A15).
+// Chromium logs this for every 4xx/5xx fetch; API statuses are checked by the API status rule.
 const LOAD_FAILED = "Failed to load resource: the server responded with a status of";
 
 let built: Promise<void> | undefined;
@@ -50,8 +50,12 @@ export type Server = {
   stop: () => Promise<void>;
 };
 
-/** Starts `serve --backend=sim` on a fresh data dir and waits for /healthz. */
-export async function startServer(name: string, simDevice = "ippusb-mfp"): Promise<Server> {
+/** Starts `serve --backend=sim` on a fresh data dir and waits for /healthz; `args` are extra flags. */
+export async function startServer(
+  name: string,
+  simDevice = "ippusb-mfp",
+  args: string[] = [],
+): Promise<Server> {
   await buildBinary();
   mkdirSync(artifactsDir, { recursive: true });
   const dataDir = mkdtempSync(join(tmpdir(), "printscan-e2e-"));
@@ -70,6 +74,7 @@ export async function startServer(name: string, simDevice = "ippusb-mfp"): Promi
       `--data-dir=${dataDir}`,
       `--config=${configPath}`,
       "--log-level=debug",
+      ...args,
     ],
     { env: { ...process.env, TZ: "Europe/Warsaw" }, stdout: Bun.file(log), stderr: Bun.file(log) },
   );
@@ -286,11 +291,14 @@ export async function scenario(
   server: Server,
   viewport: Viewport,
   fn: (s: Session) => Promise<void>,
+  /** Extra context options, for example `hasTouch` for a coarse pointer. */
+  extra: BrowserContextOptions = {},
 ) {
   const context = await (await getBrowser()).newContext({
     viewport: { width: viewport.width, height: viewport.height },
     colorScheme: "light",
     acceptDownloads: true,
+    ...extra,
   });
   context.setDefaultTimeout(30_000);
   const session = new Session(await context.newPage(), server, viewport);

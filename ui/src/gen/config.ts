@@ -8,7 +8,8 @@ z.config({ jitless: true });
 export const USBSchema = z.strictObject({
   vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
   productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")).optional(),
-  serial: z.string().optional(),
+  /** USB serial number, at most 126 characters, no control characters. */
+  serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
 });
 export type USB = z.infer<typeof USBSchema>;
 
@@ -25,11 +26,13 @@ export type Device = z.infer<typeof DeviceSchema>;
 export const EULARefSchema = z.strictObject({
   id: z.string().optional(),
   version: z.string().optional(),
+  /** Lowercase hex sha256 of the accepted licence text. Settings writes it when you accept; required in acceptedEulas. */
+  textSha256: z.string().regex(new RegExp("^[0-9a-f]{64}$", "u")).optional(),
 });
 export type EULARef = z.infer<typeof EULARefSchema>;
 
 export const LicensesSchema = z.strictObject({
-  /** Each {id, version} must exist in the catalog; duplicates are rejected. */
+  /** Each {id, version} must exist in the catalog and appear once; textSha256 is required. */
   acceptedEulas: z.array(EULARefSchema).refine((a) => new Set(a.map((v) => JSON.stringify(v))).size === a.length, { message: "Items must be unique" }).optional(),
 });
 export type Licenses = z.infer<typeof LicensesSchema>;
@@ -66,8 +69,8 @@ export type ScanConfig = z.infer<typeof ScanConfigSchema>;
 
 export const ConfigSchema = z.strictObject({
   apiVersion: z.literal("printscan/v1"),
-  /** Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
-  name: z.string().min(1).max(63).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
   /** printer-location, 0 to 127 characters. */
   location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")).optional(),
   device: DeviceSchema.optional(),

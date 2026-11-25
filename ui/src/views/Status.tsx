@@ -1,10 +1,11 @@
 // The Status dashboard: device, printer, scanner, jobs, config, problems and how to connect.
 import { useEffect, useState } from "react";
 import { problemMessage } from "../api/client";
-import { useJobs, useStatus } from "../api/events";
+import { useJobs, usePrinterNotFound, useStatus } from "../api/events";
 import {
   Button,
   Card,
+  Disclosure,
   EmptyState,
   Icon,
   InlineError,
@@ -76,65 +77,76 @@ export function reasonText(keyword: string): string | null {
 const markerColor = (c: string) => (/^#[0-9a-f]{6}$/i.test(c) ? c : undefined);
 
 function DeviceCard({ device }: { device: StatusDTO["device"] }) {
+  const notFound = usePrinterNotFound();
   const d = device.decision;
   const usb = d?.device;
   const family = (id: string) => t.device.families[id] ?? id;
+  const usbName = usb && (`${usb.manufacturer} ${usb.product}`.trim() || t.device.unnamedDevice);
+  const tone = notFound ? "problem" : phaseTone[device.phase];
   return (
     <Card
       title={t.device.title}
       actions={
-        <StatusBadge tone={phaseTone[device.phase]} pulse={phaseTone[device.phase] === "busy"}>
-          {t.device.phase[device.phase]}
+        <StatusBadge tone={tone} pulse={tone === "busy"}>
+          {notFound ? t.device.notFound : t.device.phase[device.phase]}
         </StatusBadge>
       }
     >
       {device.message && device.phase !== "error" && (
         <p className="status-message">{device.message}</p>
       )}
+      {notFound && <p className="status-message">{strings.plugInHint}</p>}
       <dl className="status-facts">
-        <div>
-          <dt>{t.device.modeLabel}</dt>
-          <dd>{t.device.mode[device.mode]}</dd>
-        </div>
         <div>
           <dt>{t.device.deviceLabel}</dt>
           <dd>
-            {!d ? (
-              t.device.noDecision
-            ) : !usb ? (
-              t.device.simulatedDevice
-            ) : (
-              <>
-                <span>{`${usb.manufacturer} ${usb.product}`.trim() || t.device.unnamedDevice}</span>
-                <span className="status-subtle">
-                  {[
-                    t.device.usbIds(usb.vendorId, usb.productId),
-                    usb.serial && t.device.serial(usb.serial),
-                  ]
-                    .filter(Boolean)
-                    .join(", ")}
-                </span>
-              </>
-            )}
+            {!d
+              ? t.device.noDecision
+              : !usbName
+                ? t.device.simulatedDevice
+                : device.inventory?.simulated
+                  ? t.device.simulatedName(usbName)
+                  : usbName}
           </dd>
         </div>
-        {d && (
-          <>
-            <div>
-              <dt>{t.device.ruleLabel}</dt>
-              <dd>{d.rule}</dd>
-            </div>
-            <div>
-              <dt>{t.device.printerFamilyLabel}</dt>
-              <dd>{d.printer ? family(d.printer) : t.device.noFamily}</dd>
-            </div>
-            <div>
-              <dt>{t.device.scannerFamilyLabel}</dt>
-              <dd>{d.scanner ? family(d.scanner) : t.device.noFamily}</dd>
-            </div>
-          </>
-        )}
       </dl>
+      <Disclosure title={strings.technicalDetails}>
+        <dl className="status-facts">
+          <div>
+            <dt>{t.device.modeLabel}</dt>
+            <dd>{t.device.mode[device.mode]}</dd>
+          </div>
+          {usb && (
+            <div>
+              <dt>{t.device.usbLabel}</dt>
+              <dd>
+                {[
+                  t.device.usbIds(usb.vendorId, usb.productId),
+                  usb.serial && t.device.serial(usb.serial),
+                ]
+                  .filter(Boolean)
+                  .join(", ")}
+              </dd>
+            </div>
+          )}
+          {d && (
+            <>
+              <div>
+                <dt>{t.device.ruleLabel}</dt>
+                <dd>{d.rule}</dd>
+              </div>
+              <div>
+                <dt>{t.device.printerFamilyLabel}</dt>
+                <dd>{d.printer ? family(d.printer) : t.device.noFamily}</dd>
+              </div>
+              <div>
+                <dt>{t.device.scannerFamilyLabel}</dt>
+                <dd>{d.scanner ? family(d.scanner) : t.device.noFamily}</dd>
+              </div>
+            </>
+          )}
+        </dl>
+      </Disclosure>
       {device.blobs.length > 0 && (
         <section className="status-section">
           <h3>{t.device.blobsTitle}</h3>
@@ -426,10 +438,10 @@ export function Status() {
         </InlineError>
       )}
       <div className="status-grid">
-        <DeviceCard device={status.device} />
         <PrinterCard printer={status.printer} />
         <ScannerCard scanner={status.scanner} />
         <JobsCard available={status.printer.available} />
+        <DeviceCard device={status.device} />
         <ConfigCard config={status.config} />
         {problems.length > 0 && (
           <Card title={t.reconcile.title} tone="problem">

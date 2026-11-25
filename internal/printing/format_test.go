@@ -75,13 +75,28 @@ func TestDetect(t *testing.T) {
 func TestNegotiate(t *testing.T) {
 	supported := []string{"application/pdf", "image/urf", "Image/JPEG", "text/plain; charset=utf-8", "application/octet-stream"}
 	for _, ok := range []string{FormatPDF, FormatURF, FormatJPEG, FormatText} {
-		if err := Negotiate(ok, supported); err != nil {
-			t.Errorf("Negotiate(%q) = %v, want nil", ok, err)
+		if got, err := Negotiate(ok, supported); err != nil || got != ok {
+			t.Errorf("Negotiate(%q) = %q, %v; want it sent as is", ok, got, err)
 		}
 	}
 
-	for _, bad := range []string{FormatPNG, FormatPWGRaster, FormatUnknown} {
-		err := Negotiate(bad, supported)
+	// Converted: PNG to JPEG when the printer takes JPEG, else to PDF.
+	for _, tc := range []struct {
+		detected  string
+		supported []string
+		want      string
+	}{
+		{FormatPNG, supported, FormatJPEG},
+		{FormatPNG, []string{"application/pdf"}, FormatPDF},
+		{FormatJPEG, []string{"application/pdf; x=1", "image/urf"}, FormatPDF},
+	} {
+		if got, err := Negotiate(tc.detected, tc.supported); err != nil || got != tc.want {
+			t.Errorf("Negotiate(%q, %v) = %q, %v; want %q", tc.detected, tc.supported, got, err, tc.want)
+		}
+	}
+
+	for _, bad := range []string{FormatPWGRaster, FormatUnknown} {
+		_, err := Negotiate(bad, supported)
 		var ufe *UnsupportedFormatError
 		if !errors.As(err, &ufe) {
 			t.Fatalf("Negotiate(%q) = %v, want *UnsupportedFormatError", bad, err)
@@ -93,8 +108,20 @@ func TestNegotiate(t *testing.T) {
 			t.Error("empty error message")
 		}
 	}
+	for _, tc := range []struct {
+		detected  string
+		supported []string
+	}{
+		{FormatPNG, []string{"image/urf", "image/pwg-raster"}},
+		{FormatJPEG, []string{"image/urf"}},
+		{FormatText, []string{"application/pdf"}},
+	} {
+		if got, err := Negotiate(tc.detected, tc.supported); err == nil {
+			t.Errorf("Negotiate(%q, %v) = %q, want refused", tc.detected, tc.supported, got)
+		}
+	}
 
-	if err := Negotiate(FormatPDF, nil); err == nil {
+	if _, err := Negotiate(FormatPDF, nil); err == nil {
 		t.Error("Negotiate with no supported formats succeeded")
 	}
 }

@@ -14,7 +14,7 @@ export const statusStrings = {
       error: "Error",
     },
     mode: {
-      none: "No device workload",
+      none: "Not running",
       usb: "USB printer",
       simulated: "Simulated printer",
       probe: "Looking for a USB printer",
@@ -22,7 +22,10 @@ export const statusStrings = {
     modeLabel: "Mode",
     deviceLabel: "Device",
     simulatedDevice: "Simulated device",
-    noDecision: "No printer chosen yet",
+    noDecision: "No printer found yet",
+    notFound: "Printer not found",
+    simulatedName: (name: string) => `${name} (simulated)`,
+    usbLabel: "USB",
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
     unnamedDevice: "Unnamed USB device",
@@ -121,9 +124,9 @@ export const statusStrings = {
     },
   },
   config: {
-    title: "Config file",
+    title: "Settings file",
     state: {
-      missing: "No config file",
+      missing: "No settings file",
       applied: "Applied",
       invalid: "Has errors",
     },
@@ -135,8 +138,8 @@ export const statusStrings = {
   reconcile: {
     title: "Problems",
     items: {
-      device: "Device workload",
-      config: "Config file",
+      device: "Printer and scanner",
+      config: "Settings file",
       "data-dir": "Data directory",
     } as Record<string, string>,
   },
@@ -167,7 +170,7 @@ export const statusStrings = {
       android: (name: string) => [
         "Open a document or photo, choose Print, then Select a printer, then All printers.",
         `Pick ${name}. The built-in print service handles it without an app.`,
-        "To scan, use this web page or a scanning app that supports eSCL.",
+        "To scan, use this web page or a scanning app such as Mopria Scan.",
       ],
       linux: (name: string) => [
         `Most desktops list ${name} in their printer settings automatically.`,
@@ -177,8 +180,8 @@ export const statusStrings = {
     },
     thisPrinter: "the printer",
     manualTitle: "Manual addresses",
-    printerAddress: "Printer address (IPP)",
-    scannerAddress: "Scanner address (eSCL)",
+    printerAddress: "Printer address",
+    scannerAddress: "Scanner address",
     noAddress: "Not available yet",
     copyLabel: (value: string) => `Copy ${value}`,
     copyFailed: "Could not copy. Select the address and copy it by hand.",

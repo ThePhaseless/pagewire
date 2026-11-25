@@ -23,7 +23,8 @@ export type BlobStatus = z.infer<typeof BlobStatusSchema>;
 export const USBSchema = z.strictObject({
   vendorId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
   productId: z.string().regex(new RegExp("^[0-9a-f]{4}$", "u")),
-  serial: z.string(),
+  /** USB serial number, at most 126 characters, no control characters. */
+  serial: z.string().max(126).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
 });
 export type USB = z.infer<typeof USBSchema>;
 
@@ -40,11 +41,13 @@ export type Device = z.infer<typeof DeviceSchema>;
 export const EULARefSchema = z.strictObject({
   id: z.string(),
   version: z.string(),
+  /** Lowercase hex sha256 of the accepted licence text. Settings writes it when you accept; required in acceptedEulas. */
+  textSha256: z.string().regex(new RegExp("^[0-9a-f]{64}$", "u")).optional(),
 });
 export type EULARef = z.infer<typeof EULARefSchema>;
 
 export const LicensesSchema = z.strictObject({
-  /** Each {id, version} must exist in the catalog; duplicates are rejected. */
+  /** Each {id, version} must exist in the catalog and appear once; textSha256 is required. */
   acceptedEulas: z.array(EULARefSchema).refine((a) => new Set(a.map((v) => JSON.stringify(v))).size === a.length, { message: "Items must be unique" }),
 });
 export type Licenses = z.infer<typeof LicensesSchema>;
@@ -81,8 +84,8 @@ export type ScanConfig = z.infer<typeof ScanConfigSchema>;
 
 export const ConfigSchema = z.strictObject({
   apiVersion: z.literal("printscan/v1"),
-  /** Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
-  name: z.string().min(1).max(63).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
+  /** Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
+  name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
   /** printer-location, 0 to 127 characters. */
   location: z.string().max(127).regex(new RegExp("^[^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
   device: DeviceSchema,
@@ -151,6 +154,25 @@ export const DecisionSchema = z.strictObject({
   device: USBDeviceSchema.nullable(),
 });
 export type Decision = z.infer<typeof DecisionSchema>;
+
+export const EULASchema = z.strictObject({
+  id: z.string(),
+  version: z.string(),
+  title: z.string(),
+  vendor: z.string(),
+  summary: z.string(),
+  state: z.enum(["pending","available","failed"]),
+  message: z.string(),
+  textSha256: z.string().nullable(),
+  text: z.string().nullable(),
+});
+export type EULA = z.infer<typeof EULASchema>;
+
+export const FormatConversionSchema = z.strictObject({
+  from: z.string(),
+  to: z.string(),
+});
+export type FormatConversion = z.infer<typeof FormatConversionSchema>;
 
 export const InventorySchema = z.strictObject({
   devices: z.array(USBDeviceSchema),
@@ -234,9 +256,10 @@ export const SetupEULASchema = z.strictObject({
   version: z.string(),
   title: z.string(),
   vendor: z.string(),
-  url: z.string(),
   summary: z.string(),
   required: z.boolean(),
+  state: z.enum(["pending","available","failed"]),
+  textSha256: z.string().nullable(),
 });
 export type SetupEULA = z.infer<typeof SetupEULASchema>;
 
@@ -277,6 +300,7 @@ export const StatusPrinterSchema = z.strictObject({
   state: z.enum(["idle","processing","stopped","unknown"]),
   reasons: z.array(z.string()),
   formats: z.array(z.string()),
+  convertedFormats: z.array(FormatConversionSchema),
   media: z.array(z.string()),
   markers: z.array(MarkerSchema),
 });

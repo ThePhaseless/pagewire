@@ -59,6 +59,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "serve":
 		err = serve(ctx, rest, nil)
 	case "agent":
+		if len(rest) > 0 && isHelp(rest[0]) {
+			_, _ = io.WriteString(stderr, agentUsage)
+			return 2
+		}
 		err = agentCmd(ctx, rest)
 	case "validate":
 		return validate(rest, stdout, stderr)
@@ -83,6 +87,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		slog.Error("command failed", "command", cmd, "err", err)
 		return 1
 	}
+}
+
+func isHelp(arg string) bool {
+	return arg == "-h" || arg == "-help" || arg == "--help" || arg == "help"
 }
 
 // logLevel is the default logger's level; serve's --log-level changes it.

@@ -4,11 +4,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ThePhaseless/printscan/internal/apitypes"
@@ -34,6 +37,8 @@ type StatusSource interface {
 // SetupSource is the wizard data (*controller.Controller).
 type SetupSource interface {
 	Setup() apitypes.Setup
+	// EULA returns the licence text of a catalog EULA, false for an unknown id.
+	EULA(id string) (apitypes.EULA, bool)
 }
 
 // ErrNoPrinter is returned by a Printer while no printer endpoint is
@@ -60,6 +65,8 @@ type Scans interface {
 	Page(id string, n int) (*os.File, error)
 	Download(id string) (scanning.Download, error)
 	Delete(id string) error
+	// Cancel stops a running scan (scanning.ErrNotRunning once it has ended).
+	Cancel(id string) (apitypes.Scan, error)
 	Caps(ctx context.Context) (apitypes.ScannerCaps, error)
 }
 
@@ -98,14 +105,35 @@ type Deps struct {
 	BaseContext     context.Context
 	JobPollInterval time.Duration // default 1 s
 	JobWatchTimeout time.Duration // default 30 min
+	// AllowedHosts are the Host names (port ignored, any case; IPv6 in
+	// brackets) the public routes answer, others get 421. Empty: no check.
+	// /healthz and /readyz are exempt.
+	AllowedHosts []string
+	// ProxySecret, when set, must arrive in ProxySecretHeader (default
+	// X-Printscan-Proxy-Secret) on every /api/ request, else 401.
+	ProxySecret       string
+	ProxySecretHeader string
 
 	heartbeat time.Duration // SSE heartbeat, default 25 s; tests shorten it
+	// Request body read deadlines; tests shorten them.
+	readTimeout, printReadTimeout time.Duration
 }
 
+// DefaultProxySecretHeader carries the proxy secret unless Deps names another.
+const DefaultProxySecretHeader = "X-Printscan-Proxy-Secret" //nolint:gosec // G101 false positive: a header name
+
+const (
+	defaultReadTimeout      = 30 * time.Second // config and scan bodies
+	defaultPrintReadTimeout = 10 * time.Minute // a print upload
+	// maxJobWatchers caps the goroutines that follow web-submitted jobs.
+	maxJobWatchers = 32
+)
+
 type server struct {
-	d   Deps
-	ctx context.Context
-	hub *Hub
+	d        Deps
+	ctx      context.Context
+	hub      *Hub
+	watchers chan struct{} // one slot per running job watcher
 }
 
 type route struct {
@@ -120,6 +148,7 @@ var publicRoutes = []route{
 	{"PUT /api/v1/config", (*server).putConfig},
 	{"PATCH /api/v1/config", (*server).patchConfig},
 	{"GET /api/v1/setup", (*server).getSetup},
+	{"GET /api/v1/eulas/{id}", (*server).getEULA},
 	{"GET /api/v1/status", (*server).getStatus},
 	{"GET /api/v1/events", (*server).events},
 	{"POST /api/v1/print", (*server).print},
@@ -140,7 +169,8 @@ var publicRoutes = []route{
 }
 
 // Security headers on every public response.
-const contentSecurityPolicy = "default-src 'self'; img-src 'self' blob: data:; frame-ancestors 'none'"
+const contentSecurityPolicy = "default-src 'self'; img-src 'self' blob: data:; frame-ancestors 'none'; " +
+	"base-uri 'self'; form-action 'self'; object-src 'none'"
 
 // New returns the public handler (API, SSE, SPA) and the internal handler
 // (agent endpoint). It starts the Status and scan event pumps on BaseContext.
@@ -166,7 +196,16 @@ func New(d Deps) (public, internal http.Handler) {
 	if d.Ready == nil {
 		d.Ready = func() bool { return true }
 	}
-	s := &server{d: d, ctx: d.BaseContext, hub: d.Hub}
+	if d.ProxySecretHeader == "" {
+		d.ProxySecretHeader = DefaultProxySecretHeader
+	}
+	if d.readTimeout <= 0 {
+		d.readTimeout = defaultReadTimeout
+	}
+	if d.printReadTimeout <= 0 {
+		d.printReadTimeout = defaultPrintReadTimeout
+	}
+	s := &server{d: d, ctx: d.BaseContext, hub: d.Hub, watchers: make(chan struct{}, maxJobWatchers)}
 	s.startPumps()
 
 	mux := http.NewServeMux()
@@ -175,7 +214,7 @@ func New(d Deps) (public, internal http.Handler) {
 		mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { h(s, w, r) })
 	}
 	cop := http.NewCrossOriginProtection()
-	public = securityHeaders(cop.Handler(mux))
+	public = securityHeaders(allowedHosts(d.AllowedHosts, proxySecret(d.ProxySecret, d.ProxySecretHeader, cop.Handler(mux))))
 
 	imux := http.NewServeMux()
 	imux.HandleFunc("POST "+device.AgentReportPath, s.agentReport)
@@ -188,8 +227,60 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowedHosts answers 421 to a request whose Host is not in hosts, so a
+// DNS-rebinding page cannot reach the API. No hosts: no check.
+func allowedHosts(hosts []string, next http.Handler) http.Handler {
+	if len(hosts) == 0 {
+		return next
+	}
+	allowed := map[string]bool{}
+	for _, h := range hosts {
+		allowed[hostName(strings.TrimSpace(h))] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowed[hostName(r.Host)] && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" {
+			writeProblem(w, http.StatusMisdirectedRequest, "misdirected-request",
+				"this host name is not in printscan's allowed hosts (PRINTSCAN_ALLOWED_HOSTS)")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostName is host without its port and IPv6 brackets, lower-cased.
+func hostName(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.Trim(host, "[]"))
+}
+
+// proxySecret answers 401 to an /api/ request without the shared secret the
+// auth proxy adds, so the API fails closed when the proxy is bypassed.
+func proxySecret(secret, header string, next http.Handler) http.Handler {
+	if secret == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get(header)), []byte(secret)) != 1 {
+			writeProblem(w, http.StatusUnauthorized, "unauthorized", "missing or wrong proxy secret")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// readDeadline bounds how long a handler waits for the request body.
+func readDeadline(w http.ResponseWriter, d time.Duration) {
+	// Not every ResponseWriter supports it (httptest's recorder does not).
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
 }
 
 // startPumps forwards Status changes and scan events to the hub until

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -85,7 +86,8 @@ type Controller struct {
 	appliedEtag string
 	cfgErrors   []config.FieldError
 	changedAt   time.Time
-	report      *device.AgentReport // latest report since start
+	report      *device.AgentReport        // latest report since start
+	eulaTexts   map[string]device.EULAText // latest agent EULA text by id; in memory only
 	reportAt    time.Time
 	inventory   *device.Inventory
 	absentSince time.Time // first DevicePresent=false report of the current loss
@@ -214,15 +216,54 @@ func (c *Controller) AgentReport(_ context.Context, r device.AgentReport) (devic
 	c.report, c.reportAt = &r, now
 	inv := r.Inventory
 	c.inventory = &inv
+	c.storeTexts(r.EULAs)
 	if r.DevicePresent {
 		c.absentSince, c.restarted = time.Time{}, false
 	} else if c.absentSince.IsZero() {
 		c.absentSince = now
 	}
-	ds := device.DesiredState{Hash: device.SpecHash(c.spec), Queue: c.queueFor(c.spec, c.effective()), Browse: slices.Clone(device.BrowseTypes)}
+	cfg := c.effective()
+	sel, acc := config.Default(defaultName).Device, []config.EULARef{}
+	if cfg != nil {
+		sel, acc = cfg.Device, cfg.Licenses.AcceptedEULAs
+	}
+	ds := device.DesiredState{
+		Hash: device.SpecHash(c.spec), Queue: c.queueFor(c.spec, cfg), Browse: slices.Clone(device.BrowseTypes),
+		StageEULAs: stageEULAs(c.cat, decisionFor(c.cat, sel, &inv), acc),
+	}
 	c.mu.Unlock()
 	c.poke()
 	return ds, nil
+}
+
+// storeTexts keeps the latest text per EULA id. A pending report does not
+// replace a known text of the same version: a rolled pod's agent reports
+// pending until it has re-verified its staged archive. Callers hold mu.
+func (c *Controller) storeTexts(texts []device.EULAText) {
+	if c.eulaTexts == nil {
+		c.eulaTexts = map[string]device.EULAText{}
+	}
+	for _, t := range texts {
+		if _, known := c.cat.EULA(t.ID); !known {
+			continue // only catalog EULAs are ever shown, so the map stays bounded
+		}
+		if old, ok := c.eulaTexts[t.ID]; ok && t.State == device.EULAPending && old.Version == t.Version {
+			continue
+		}
+		c.eulaTexts[t.ID] = t
+	}
+}
+
+// EULA returns the licence text DTO of catalog EULA id, false for an id not
+// in the catalog. Its state is pending until an agent report carries it.
+func (c *Controller) EULA(id string) (apitypes.EULA, bool) {
+	e, ok := c.cat.EULA(id)
+	if !ok {
+		return apitypes.EULA{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return eulaDTO(e, c.eulaTexts), true
 }
 
 // queueFor is the desired PAPPL queue: nil unless the spec's printer family is a PAPPL app.
@@ -301,6 +342,7 @@ func (c *Controller) Setup() apitypes.Setup {
 	in := setupInput{
 		backend: c.backendName, usbAvailable: c.usbAvailable,
 		missing: c.cfgState == apitypes.ConfigMissing, cfg: c.effective(), inventory: c.inventory,
+		texts: maps.Clone(c.eulaTexts),
 	}
 	c.mu.Unlock()
 	return setup(c.cat, in)
@@ -338,6 +380,7 @@ func (c *Controller) deviceSpec(mode string, dec device.Decision, cfg *config.Co
 		Mode: mode, Printer: dec.Printer, Scanner: dec.Scanner,
 		SaneBackends: slices.Clone(dec.SaneBackends), Blobs: blobRefs(dec, cfg.Licenses.AcceptedEULAs, c.cat),
 	}
+	s.AcceptedEULAs = acceptedEULAs(s.Blobs, cfg.Licenses.AcceptedEULAs, c.cat)
 	if mode == device.ModeSimulated {
 		s.Name, s.Location = cfg.Name, cfg.Location
 	}
@@ -345,7 +388,7 @@ func (c *Controller) deviceSpec(mode string, dec device.Decision, cfg *config.Co
 	return desired{spec: s, apply: true}
 }
 
-// decide applies the controller rules for the spec.
+// decide picks the device spec and phase from the config, inventory and pod state.
 func (c *Controller) decide(in snapshot, obs device.Observation, obsErr error) desired {
 	wait := desired{spec: in.spec, phase: apitypes.PhaseDeploying, message: msgWaitingAgent}
 	cfg := in.cfg
@@ -495,7 +538,7 @@ func (c *Controller) observe(ctx context.Context, in snapshot, d desired, obs de
 	}
 	prefer := preferredName(fam, in.cfg)
 	ipp := printerURI(c.backendName, fam, obs, r, prefer)
-	escl := scannerURL(c.backendName, spec, obs, r)
+	escl := scannerURL(c.cat, c.backendName, spec, obs, r)
 
 	st.Printer = offlinePrinter(ipp)
 	if ipp != "" {
@@ -505,7 +548,8 @@ func (c *Controller) observe(ctx context.Context, in snapshot, d desired, obs de
 		if err == nil {
 			st.Printer = apitypes.StatusPrinter{
 				Available: true, URI: ipp, State: a.State,
-				Reasons: nonNil(a.Reasons), Formats: nonNil(a.Formats), Media: nonNil(a.Media), Markers: nonNil(a.Markers),
+				Reasons: nonNil(a.Reasons), Formats: nonNil(a.Formats), ConvertedFormats: printing.Conversions(a.Formats),
+				Media: nonNil(a.Media), Markers: nonNil(a.Markers),
 			}
 		}
 	}
@@ -531,7 +575,7 @@ func (c *Controller) observe(ctx context.Context, in snapshot, d desired, obs de
 	if r != nil {
 		st.Device.Blobs = nonNil(r.Blobs)
 	}
-	st.Connect = connect(r, prefer, ipp, escl)
+	st.Connect = connect(r, fam, prefer, ipp, escl)
 
 	var specDec *device.Decision
 	if spec != nil && spec.Mode != device.ModeProbe {

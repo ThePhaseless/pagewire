@@ -508,3 +508,99 @@ func TestServiceReload(t *testing.T) {
 	close(h.scan.gate)
 	h.wait(t, running.ID, ScanFailed)
 }
+
+func TestServiceCancel(t *testing.T) {
+	h := newHarness(t, 3)
+	h.scan.gate = make(chan struct{})
+	sc, err := h.svc.Start(Settings{Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select { // let one page through
+	case h.scan.gate <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the scanner never asked for a page")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for got, _ := h.svc.Get(sc.ID); got.Pages != 1; got, _ = h.svc.Get(sc.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("first page never landed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got, err := h.svc.Cancel(sc.ID)
+	if err != nil || got.ID != sc.ID {
+		t.Fatalf("Cancel = %+v, %v", got, err)
+	}
+	ev := h.wait(t, sc.ID, ScanCanceled)
+	if last := ev[len(ev)-1]; last.Pages != 0 || last.Error != nil {
+		t.Fatalf("canceled event %+v, want no pages and no error", last)
+	}
+	h.scan.mu.Lock()
+	canceled := h.scan.canceled
+	h.scan.mu.Unlock()
+	if canceled != 1 {
+		t.Fatalf("eSCL job canceled %d times, want 1", canceled)
+	}
+	entries, err := os.ReadDir(filepath.Join(h.dir, sc.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "meta.json" {
+			t.Errorf("canceled scan kept %s", e.Name())
+		}
+	}
+	if _, err := h.svc.Download(sc.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Download of a canceled scan: %v, want ErrNotFound", err)
+	}
+	// The record stays until it is deleted; a second Cancel finds it finished.
+	if _, err := h.svc.Cancel(sc.ID); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("Cancel of a canceled scan: %v, want ErrNotRunning", err)
+	}
+	if err := h.svc.Delete(sc.ID); err != nil {
+		t.Fatalf("Delete of a canceled scan: %v", err)
+	}
+	if _, err := h.svc.Cancel(sc.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Cancel of a deleted scan: %v, want ErrNotFound", err)
+	}
+	// The scanner is free again.
+	h.scan.gate = nil
+	h.scanDone(t, "pdf")
+}
+
+func TestServicePageLimit(t *testing.T) {
+	h := newHarness(t, 2)
+	h.svc.pageLimit = int64(len(h.scan.pages[0]) - 1)
+	sc, err := h.svc.Start(Settings{Source: "adf", Resolution: 300, ColorMode: "color", Format: "pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := h.wait(t, sc.ID, ScanFailed)
+	if last := ev[len(ev)-1]; last.Error == nil || !strings.Contains(*last.Error, "larger than") || last.Pages != 0 {
+		t.Fatalf("failed event %+v, want the page size error and no pages", last)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, sc.ID, pageName(1))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the truncated page was kept: %v", err)
+	}
+}
+
+func TestServiceQuota(t *testing.T) {
+	h := newHarness(t, 1)
+	h.scanDone(t, "pdf")
+	h.svc.quota = 1
+	set := Settings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"}
+	if _, err := h.svc.Start(set); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("Start over the quota: %v, want ErrStorageFull", err)
+	}
+	h.svc.quota = 1 << 30
+	sc, err := h.svc.Start(set)
+	if err != nil {
+		t.Fatalf("Start under the quota: %v", err)
+	}
+	h.wait(t, sc.ID, ScanCompleted)
+	if MaxStoredBytes != 1<<30 || MaxPageBytes != 256<<20 {
+		t.Fatalf("limits %d and %d, want 1 GiB and 256 MiB", MaxStoredBytes, MaxPageBytes)
+	}
+}

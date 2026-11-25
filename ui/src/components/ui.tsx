@@ -127,7 +127,16 @@ export function TextField({
       isInvalid={props.isInvalid || Boolean(errorMessage)}
       className={cx("ui-field", className)}
     >
-      <RAC.Label className="ui-label">{label}</RAC.Label>
+      <RAC.Label className="ui-label">
+        {label}
+        {props.isRequired && (
+          // aria-required already tells assistive tech; this is the visible marker.
+          <span className="ui-required" aria-hidden="true">
+            {" "}
+            {strings.required}
+          </span>
+        )}
+      </RAC.Label>
       <RAC.Input className="ui-input" placeholder={placeholder} />
       <FieldFooter description={description} errorMessage={errorMessage} />
     </RAC.TextField>
@@ -185,7 +194,12 @@ export function Select({
     >
       <RAC.Label className="ui-label">{label}</RAC.Label>
       <RAC.Button className="ui-select-trigger">
-        <RAC.SelectValue className="ui-select-value" />
+        {/* Only the text: the option's markup (label span, check icon) would misalign the trigger. */}
+        <RAC.SelectValue className="ui-select-value">
+          {({ isPlaceholder, selectedText, defaultChildren }) =>
+            isPlaceholder ? defaultChildren : selectedText
+          }
+        </RAC.SelectValue>
         <Icon name="chevronDown" size={18} />
       </RAC.Button>
       <FieldFooter description={description} errorMessage={errorMessage} />
@@ -444,9 +458,18 @@ export type ToastContent = {
 
 export const toastQueue = new RAC.UNSTABLE_ToastQueue<ToastContent>({ maxVisibleToasts: 3 });
 
-/** Shows a toast. Problems stay until dismissed; everything else leaves after 5 s. */
+/**
+ * Shows a toast. Problems leave after 10 s or on the next route change, everything else after 5 s.
+ * The timer pauses while the toast is hovered or focused.
+ */
 export function toast(content: ToastContent) {
-  return toastQueue.add(content, content.tone === "problem" ? undefined : { timeout: 5000 });
+  return toastQueue.add(content, { timeout: content.tone === "problem" ? 10_000 : 5000 });
+}
+
+/** Closes every problem toast, queued ones included (closing one can reveal the next). */
+export function dismissProblemToasts() {
+  const next = () => toastQueue.visibleToasts.find((t) => t.content.tone === "problem");
+  for (let t = next(); t; t = next()) toastQueue.close(t.key);
 }
 
 export function ToastRegion() {
@@ -566,15 +589,20 @@ export function PageHeader({
   title,
   description,
   actions,
+  documentTitle,
 }: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
+  /** Replaces the heading text in document.title (for example with the setup step). */
+  documentTitle?: string;
 }) {
   return (
     <header className="ui-page-header">
       <div className="ui-page-heading">
-        <h1 tabIndex={-1}>{title}</h1>
+        <h1 tabIndex={-1} data-document-title={documentTitle}>
+          {title}
+        </h1>
         {description && <p className="ui-page-description">{description}</p>}
       </div>
       {actions && <div className="ui-page-actions">{actions}</div>}

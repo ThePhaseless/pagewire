@@ -57,6 +57,9 @@ const (
 type Options struct {
 	Fixture string // catalog fixture reported as the USB inventory; "none" (or unknown): empty
 	DataDir string // documents land in DataDir/sim-output, blobs in DataDir/sim-blobs
+	// ScanDelay holds each scanned page this long, so a scan can be cancelled
+	// while it runs (e2e tests). Zero: no delay.
+	ScanDelay time.Duration
 }
 
 // Backend is the simulated device.Backend. It implements neither
@@ -94,13 +97,21 @@ func New(o Options) *Backend {
 	go testPage() // warm the scanner page off Apply's path
 	return &Backend{
 		opts:   o,
-		inv:    catalog.Fixture(o.Fixture),
+		inv:    simulatedInventory(o.Fixture),
 		vendor: &http.Client{Transport: blobtest.Transport(files)},
 		keys:   openpgp.EntityList{key},
 	}
 }
 
 func blobURL(id string) string { return vendorURL + id + ".run" }
+
+// simulatedInventory is the fixture's inventory, flagged as simulated so the
+// UI never presents it as real hardware.
+func simulatedInventory(fixture string) device.Inventory {
+	inv := catalog.Fixture(fixture)
+	inv.Simulated = true
+	return inv
+}
 
 // SetReporter sets the controller's report handler. Call it before the first
 // non-nil Apply; a running agent keeps the handler it started with.
@@ -112,7 +123,8 @@ func (b *Backend) SetReporter(r device.ReportFunc) {
 
 // Apply starts the virtual devices for spec, swapping them when the spec hash
 // changes, or stops everything for a nil spec. It never calls the ReportFunc
-// and never waits for the agent goroutine (decision 33).
+// and never waits for the agent goroutine, so a controller holding a lock its
+// report handler also takes cannot deadlock.
 func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -134,6 +146,7 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	}
 	s := *spec
 	s.SaneBackends, s.Blobs = slices.Clone(spec.SaneBackends), slices.Clone(spec.Blobs)
+	s.AcceptedEULAs = slices.Clone(spec.AcceptedEULAs)
 	b.spec, b.hash = &s, hash
 	if b.core != nil {
 		b.core.Wake()
@@ -142,6 +155,15 @@ func (b *Backend) Apply(ctx context.Context, spec *device.Spec) error {
 	runCtx, cancel := context.WithCancel(context.Background())
 	core := agent.NewCore(podUID, b.inv)
 	core.Blobs = func() []device.BlobStatus { return b.fetchBlobs(runCtx) }
+	stager := &agent.Stager{
+		Dir: b.blobDir(), Client: b.vendor, Wake: core.Wake,
+		Blob: func(id string) (catalog.Blob, bool) {
+			cb, ok := catalog.Default().Blob(id)
+			return b.simBlob(cb), ok
+		},
+		Keys: func(string) (openpgp.EntityList, error) { return b.keys, nil },
+	}
+	core.Stage = stager.Stage
 	core.PAPPLURL = func() string {
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -205,7 +227,7 @@ func (b *Backend) startLocked(ctx context.Context, spec *device.Spec) error {
 		}
 	}
 	if spec.Scanner != "" {
-		addr, err := b.serve(ctx, func(string) http.Handler { return newScanner() })
+		addr, err := b.serve(ctx, func(string) http.Handler { return slowPages(newScanner(), b.opts.ScanDelay) })
 		if err != nil {
 			return err
 		}
@@ -262,8 +284,9 @@ func isPrinter(d device.USBDevice) bool {
 func (b *Backend) fetchBlobs(ctx context.Context) []device.BlobStatus {
 	b.mu.Lock()
 	var refs []device.BlobRef
+	var accepted []device.EULARef
 	if b.spec != nil {
-		refs = slices.Clone(b.spec.Blobs)
+		refs, accepted = slices.Clone(b.spec.Blobs), slices.Clone(b.spec.AcceptedEULAs)
 	}
 	b.mu.Unlock()
 	out := []device.BlobStatus{}
@@ -273,13 +296,20 @@ func (b *Backend) fetchBlobs(ctx context.Context) []device.BlobStatus {
 			out = append(out, device.BlobStatus{ID: ref.ID, Version: ref.Version, State: device.BlobFailed, Message: "unknown blob " + ref.ID})
 			continue
 		}
-		// The sim's own copy: never the real vendor URL or key (decision 14).
-		cb.Enabled, cb.URL = true, blobURL(cb.ID)
-		cb.Verify = catalog.Verify{PGPSignatureURL: cb.URL + ".asc"}
-		out = append(out, blobs.Fetch(ctx, cb, refs, filepath.Join(b.opts.DataDir, "sim-blobs"), blobs.Options{Client: b.vendor, Keys: b.keys}))
+		out = append(out, blobs.Fetch(ctx, b.simBlob(cb), accepted, b.blobDir(), blobs.Options{Client: b.vendor, Keys: b.keys}))
 	}
 	return out
 }
+
+// simBlob is the sim's own copy of a catalog blob: never the real vendor URL
+// or key, signature-checked against the synthetic vendor key.
+func (b *Backend) simBlob(cb catalog.Blob) catalog.Blob {
+	cb.Enabled, cb.URL = true, blobURL(cb.ID)
+	cb.Verify = catalog.Verify{PGPSignatureURL: cb.URL + ".asc"}
+	return cb
+}
+
+func (b *Backend) blobDir() string { return filepath.Join(b.opts.DataDir, "sim-blobs") }
 
 // newPrinter builds go-mfp's virtual IPP printer for the ipp-usb and sim
 // families, writing documents to out/<job-id>.bin.
@@ -309,7 +339,7 @@ func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
 		MarkerTypes:             []string{"toner"},
 		MarkerLevels:            []int{80},
 	}
-	vp := &virtualPrinter{dir: out, done: map[int]bool{}}
+	vp := &virtualPrinter{dir: out, done: map[int]bool{}, created: map[int]time.Time{}}
 	p := ipp.NewPrinter(attrs, ipp.PrinterOptions{ServerOptions: ipp.ServerOptions{
 		Hooks: ipp.ServerHooks{OnIPPRequest: vp.onRequest, OnIPPResponse: vp.onResponse},
 	}})
@@ -319,17 +349,19 @@ func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
 
 // virtualPrinter is the go-mfp printer's backend plus the hooks that make
 // its jobs complete. go-mfp (b3cc636803df) leaves every job pending-held
-// after Send-Document and gives the backend no job handle (U6's A14 finding),
-// so the hooks pass the job id in and report written jobs as completed.
+// after Send-Document, gives the backend no job handle and sends no
+// date-time-at-creation, so the hooks pass the job id in, report written jobs
+// as completed and add the creation time.
 //
 // shortcut: go-mfp still holds the job internally, so Cancel-Job on a
 // completed job succeeds and which-jobs=completed omits it; fix upstream or
 // rewrite those responses too if a client depends on them.
 type virtualPrinter struct {
-	dir  string
-	mu   sync.Mutex
-	done map[int]bool // job ids whose document was written
-	seq  int
+	dir     string
+	mu      sync.Mutex
+	done    map[int]bool      // job ids whose document was written
+	created map[int]time.Time // when each job id was first answered (Create-Job)
+	seq     int
 }
 
 // onRequest names each Send-Document after its job id: go-mfp hands
@@ -345,17 +377,33 @@ func (v *virtualPrinter) onRequest(_ *transport.ServerQuery, m *goipp.Message) *
 	return nil
 }
 
-// onResponse reports every written job as completed.
+// onResponse reports every written job as completed and stamps its creation time.
 func (v *virtualPrinter) onResponse(_ *transport.ServerQuery, m *goipp.Message) *goipp.Message {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.complete(m.Job)
-	for _, g := range m.Groups {
-		if g.Tag == goipp.TagJobGroup {
-			v.complete(g.Attrs)
+	m.Job = v.stamp(m.Job)
+	for i := range m.Groups {
+		if m.Groups[i].Tag == goipp.TagJobGroup {
+			v.complete(m.Groups[i].Attrs)
+			m.Groups[i].Attrs = v.stamp(m.Groups[i].Attrs)
 		}
 	}
 	return nil
+}
+
+// stamp adds date-time-at-creation to a job's attributes, when missing.
+func (v *virtualPrinter) stamp(attrs goipp.Attributes) goipp.Attributes {
+	id := jobID(attrs)
+	if id <= 0 || slices.ContainsFunc(attrs, func(a goipp.Attribute) bool { return a.Name == "date-time-at-creation" }) {
+		return attrs
+	}
+	t, ok := v.created[id]
+	if !ok {
+		t = time.Now()
+		v.created[id] = t
+	}
+	return append(attrs, goipp.MakeAttribute("date-time-at-creation", goipp.TagDateTime, goipp.Time{Time: t}))
 }
 
 func (v *virtualPrinter) complete(attrs goipp.Attributes) {
@@ -447,6 +495,26 @@ func newScanner() http.Handler {
 		ADFImages:   [][]byte{page, page},
 	}
 	return escl.NewAbstractServer(escl.AbstractServerOptions{Scanner: vs, BasePath: "/eSCL"})
+}
+
+// slowPages holds every page fetch (GET .../NextDocument) for d, or until
+// the client gives up; other eSCL requests pass straight through.
+func slowPages(h http.Handler, d time.Duration) http.Handler {
+	if d <= 0 {
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/NextDocument") {
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-t.C:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // testPage is an A4 page at 300 dpi (2480x3508) with eight colour bars,

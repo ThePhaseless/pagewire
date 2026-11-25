@@ -193,6 +193,8 @@ func validationMessage(fe validator.FieldError) string {
 		return "must be a PWG self-describing media name such as iso_a4_210x297mm"
 	case "nocontrol":
 		return "must not contain control characters"
+	case "startsnotwith":
+		return "must not start with " + fe.Param()
 	case "unique":
 		return "has duplicate entries"
 	}

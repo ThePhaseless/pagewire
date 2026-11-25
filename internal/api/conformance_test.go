@@ -68,9 +68,20 @@ func (f *statusFake) Current() apitypes.Status {
 
 func (f *statusFake) Subscribe() (<-chan apitypes.Status, func()) { return f.ch, func() {} }
 
-type setupFake struct{ s apitypes.Setup }
+type setupFake struct {
+	s     apitypes.Setup
+	eulas map[string]apitypes.EULA // nil: the real controller's (pending)
+}
 
 func (f setupFake) Setup() apitypes.Setup { return f.s }
+
+func (f setupFake) EULA(id string) (apitypes.EULA, bool) {
+	if f.eulas == nil {
+		return realController().EULA(id)
+	}
+	e, ok := f.eulas[id]
+	return e, ok
+}
 
 type printerFake struct {
 	mu        sync.Mutex
@@ -92,6 +103,7 @@ type submission struct {
 	name, user, format string
 	size               int
 	opts               apitypes.PrintOptions
+	head               []byte // first bytes of the document
 }
 
 func (f *printerFake) Formats(context.Context) ([]string, error) {
@@ -101,7 +113,8 @@ func (f *printerFake) Formats(context.Context) ([]string, error) {
 }
 
 func (f *printerFake) Submit(_ context.Context, name, user, format string, r io.Reader, opts apitypes.PrintOptions) (int, error) {
-	n, err := io.Copy(io.Discard, r)
+	var head bytes.Buffer
+	n, err := io.Copy(io.MultiWriter(io.Discard, &limitWriter{&head, 64}), r)
 	if err != nil {
 		// The real client returns its HTTP round trip's error, not the body's.
 		return 0, errors.New("ipp: send document failed")
@@ -112,8 +125,21 @@ func (f *printerFake) Submit(_ context.Context, name, user, format string, r io.
 		return 0, f.submitErr
 	}
 	f.nextID++
-	f.submitted = append(f.submitted, submission{name, user, format, int(n), opts})
+	f.submitted = append(f.submitted, submission{name, user, format, int(n), opts, head.Bytes()})
 	return f.nextID, nil
+}
+
+// limitWriter keeps the first n bytes written to it.
+type limitWriter struct {
+	w *bytes.Buffer
+	n int
+}
+
+func (l *limitWriter) Write(p []byte) (int, error) {
+	if room := l.n - l.w.Len(); room > 0 {
+		l.w.Write(p[:min(room, len(p))])
+	}
+	return len(p), nil
 }
 
 func (f *printerFake) Jobs(context.Context, int) ([]apitypes.Job, error) {
@@ -163,7 +189,8 @@ type scansFake struct {
 	scans    []apitypes.Scan
 	pageDir  string // page files are <pageDir>/<id>-<n>.jpg
 	dlErr    error
-	delErr   error
+	running  string // id Delete refuses with ErrRunning and Cancel cancels
+	canceled int
 }
 
 func (f *scansFake) Caps(context.Context) (apitypes.ScannerCaps, error) { return f.caps, f.capsErr }
@@ -222,13 +249,25 @@ func (f *scansFake) Download(id string) (scanning.Download, error) {
 }
 
 func (f *scansFake) Delete(id string) error {
-	if f.delErr != nil {
-		return f.delErr
-	}
 	if _, err := f.Get(id); err != nil {
 		return err
 	}
+	if id == f.running {
+		return scanning.ErrRunning
+	}
 	return nil
+}
+
+func (f *scansFake) Cancel(id string) (apitypes.Scan, error) {
+	sc, err := f.Get(id)
+	if err != nil {
+		return sc, err
+	}
+	if id != f.running {
+		return apitypes.Scan{}, scanning.ErrNotRunning
+	}
+	f.canceled++
+	return sc, nil
 }
 
 // ---- test environment ----
@@ -276,7 +315,7 @@ func newEnv(t *testing.T, mod ...func(*Deps)) *testEnv {
 			return e.lastGood
 		},
 		Status:          e.status,
-		Setup:           setupFake{emptySetup(t)},
+		Setup:           setupFake{s: emptySetup(t)},
 		Printer:         e.printer,
 		Scans:           e.scans,
 		Hub:             e.hub,
@@ -455,6 +494,8 @@ func emptySetup(*testing.T) apitypes.Setup   { return realController().Setup() }
 
 var cet = time.FixedZone("CET", 3600)
 
+var textSHA = strings.Repeat("a", 64)
+
 func populatedUSB(t *testing.T) (apitypes.Status, apitypes.Setup) {
 	t.Helper()
 	inv := catalog.Fixture("ippusb-mfp")
@@ -485,7 +526,10 @@ func populatedUSB(t *testing.T) (apitypes.Status, apitypes.Setup) {
 	}
 	setup := apitypes.Setup{
 		Backend: "k8s", USBResourceConfigured: true, Inventory: &inv, Decision: &dec,
-		EULAs:     []apitypes.SetupEULA{{ID: "hplip-plugin", Version: "3.24.4", Title: "HP", Vendor: "HP", URL: "https://example.com", Summary: "s"}},
+		EULAs: []apitypes.SetupEULA{{
+			ID: "hplip-plugin", Version: "3.24.4", Title: "HP", Vendor: "HP", Summary: "s",
+			State: apitypes.EULAAvailable, TextSHA256: &textSHA,
+		}},
 		Suggested: config.Default("MFP"),
 	}
 	return st, setup
@@ -519,6 +563,7 @@ var routeDefs = map[string]string{
 	"PUT /api/v1/config":               "ConfigResponse",
 	"PATCH /api/v1/config":             "ConfigResponse",
 	"GET /api/v1/setup":                "Setup",
+	"GET /api/v1/eulas/{id}":           "EULA",
 	"GET /api/v1/status":               "Status",
 	"GET /api/v1/events":               "",
 	"POST /api/v1/print":               "Job",
@@ -531,7 +576,7 @@ var routeDefs = map[string]string{
 	"GET /api/v1/scans/{id}":           "Scan",
 	"GET /api/v1/scans/{id}/pages/{n}": "",
 	"GET /api/v1/scans/{id}/download":  "",
-	"DELETE /api/v1/scans/{id}":        "",
+	"DELETE /api/v1/scans/{id}":        "Scan", // 202 on a running scan; 204 has no body
 	"/api/":                            "",
 	"GET /healthz":                     "",
 	"GET /readyz":                      "",
@@ -565,7 +610,7 @@ func (c *conformance) call(pattern, method, target, body string, wantStatus int,
 		validateDef(c.t, "ConfigResponse", rec.Body.Bytes()) // the 412 body is the file now on disk
 	case rec.Code >= 400:
 		validateDef(c.t, "Problem", rec.Body.Bytes())
-	case def != "":
+	case def != "" && rec.Code != http.StatusNoContent:
 		validateDef(c.t, def, rec.Body.Bytes())
 		c.checked[pattern] = true
 	}
@@ -598,7 +643,7 @@ func TestConformanceEmpty(t *testing.T) {
 	// Every route again, with nil slices and zero values in the fakes.
 	checked := runRoutes(t, realController().Current(), realController().Setup(), false)
 	for pattern, def := range routeDefs {
-		if def != "" && pattern != "GET /api/v1/jobs/{id}" && pattern != "GET /api/v1/scans/{id}" && !checked[pattern] {
+		if def != "" && pattern != "GET /api/v1/jobs/{id}" && pattern != "GET /api/v1/scans/{id}" && pattern != "DELETE /api/v1/scans/{id}" && !checked[pattern] {
 			t.Errorf("route %s (%s) never validated in the empty state", pattern, def)
 		}
 	}
@@ -628,7 +673,15 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 			Settings: apitypes.ScanSettings{Source: "platen", Resolution: 150, ColorMode: "grayscale", Format: "jpeg"}, Error: &errMsg,
 		},
 	}
-	e := newEnv(t, func(d *Deps) { d.Setup = setupFake{setup} })
+	fake := setupFake{s: setup}
+	if populated {
+		text := "licence\n"
+		fake.eulas = map[string]apitypes.EULA{"hplip-plugin": {
+			ID: "hplip-plugin", Version: "3.24.4", Title: "HP", Vendor: "HP", Summary: "s",
+			State: apitypes.EULAAvailable, TextSHA256: &textSHA, Text: &text,
+		}}
+	}
+	e := newEnv(t, func(d *Deps) { d.Setup = fake })
 	e.status.st = st
 	byID := 404
 	if populated {
@@ -645,6 +698,8 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 
 	c.call("GET /api/v1/status", "GET", "/api/v1/status", "", 200)
 	c.call("GET /api/v1/setup", "GET", "/api/v1/setup", "", 200)
+	c.call("GET /api/v1/eulas/{id}", "GET", "/api/v1/eulas/hplip-plugin", "", 200)
+	c.call("GET /api/v1/eulas/{id}", "GET", "/api/v1/eulas/no-such-eula", "", 404)
 	c.call("GET /api/v1/jobs", "GET", "/api/v1/jobs", "", 200)
 	c.call("GET /api/v1/jobs/{id}", "GET", "/api/v1/jobs/2", "", byID)
 	c.call("GET /api/v1/scanner", "GET", "/api/v1/scanner", "", 200)
@@ -652,6 +707,12 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 	c.call("GET /api/v1/scans/{id}", "GET", "/api/v1/scans/00000000000000bb", "", byID)
 	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`, 202)
 	c.call("POST /api/v1/scans", "POST", "/api/v1/scans", `{"source":"glass","resolution":300,"colorMode":"color","format":"pdf"}`, 422)
+	if populated {
+		e.scans.running = "00000000000000bb"
+		c.call("DELETE /api/v1/scans/{id}", "DELETE", "/api/v1/scans/00000000000000bb", "", 202)
+		e.scans.running = ""
+		c.call("DELETE /api/v1/scans/{id}", "DELETE", "/api/v1/scans/00000000000000bb", "", 204)
+	}
 
 	body, ct := multipartBody(t, [3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF})
 	b, _ := io.ReadAll(body)
@@ -696,7 +757,7 @@ func TestConformancePopulatedUSB(t *testing.T) {
 func TestConformancePopulatedSimulated(t *testing.T) {
 	st, setup := populatedSimulated(t)
 	runPopulated(t, st, setup)
-	e := newEnv(t, func(d *Deps) { d.Setup = setupFake{setup} })
+	e := newEnv(t, func(d *Deps) { d.Setup = setupFake{s: setup} })
 	e.status.st = st
 	for _, target := range []string{"/api/v1/status", "/api/v1/setup"} {
 		rec := e.do("GET", target, nil)

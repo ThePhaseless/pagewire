@@ -31,7 +31,8 @@ const (
 )
 
 // linkedDirs are the paths under hplip's home that the driver and device images
-// link into the blob volume (decision 14). Targets elsewhere are skipped.
+// link into the blob volume, which is the only place a runtime download can
+// land in read-only images. Targets elsewhere are skipped.
 var linkedDirs = []string{"prnt/plugins", "scan/plugins", "fax/plugins", "data/firmware"}
 
 // HPLIPArch maps a GOARCH to the $ARCH name pluginhandler.py derives from
@@ -179,6 +180,53 @@ func extractMakeself(run, dir string, maxBytes int64) error {
 		if err != nil {
 			return fmt.Errorf("HP plug-in payload: %w", err)
 		}
+	}
+}
+
+// ExtractFile returns the regular file name from the makeself payload of run,
+// without writing anything to disk. It applies extractMakeself's path rules
+// and entry limit, and fails when the file is missing, is not a regular file
+// or is over maxBytes.
+func ExtractFile(run, name string, maxBytes int64) ([]byte, error) {
+	want := path.Clean(name)
+	if path.IsAbs(name) || !filepath.IsLocal(want) {
+		return nil, fmt.Errorf("HP plug-in: unsafe path %q", name)
+	}
+	f, err := os.Open(run) //nolint:gosec // path inside the blob dir
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	off, err := payloadOffset(f)
+	if err != nil {
+		return nil, err
+	}
+	gz, err := gzip.NewReader(io.NewSectionReader(f, off, 1<<62))
+	if err != nil {
+		return nil, fmt.Errorf("HP plug-in payload: %w", err)
+	}
+	tr := tar.NewReader(gz)
+	for entries := 0; ; entries++ {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("HP plug-in payload has no %s", want)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("HP plug-in payload: %w", err)
+		}
+		if entries >= maxEntries {
+			return nil, fmt.Errorf("HP plug-in payload has more than %d entries", maxEntries)
+		}
+		if path.Clean(h.Name) != want {
+			continue
+		}
+		if h.Typeflag != tar.TypeReg {
+			return nil, fmt.Errorf("HP plug-in payload: %s is not a regular file", want)
+		}
+		if h.Size > maxBytes {
+			return nil, fmt.Errorf("HP plug-in payload: %s is over the %d byte limit", want, maxBytes)
+		}
+		return io.ReadAll(tr)
 	}
 }
 

@@ -19,7 +19,14 @@ own licences. THIRD_PARTY_NOTICES.md in the source repository
 (https://github.com/ThePhaseless/printscan) lists it per image, with each
 component's licence and where to get its source. Inside the images the
 licence texts are under /licenses (control plane), /usr/share/licenses and
-/usr/share/doc/*/copyright (device and driver images).
+/usr/share/doc/*/copyright (device and driver images). The device and driver
+images also hold this file and THIRD_PARTY_NOTICES.md in /usr/share/printscan/,
+and /usr/share/printscan/SOURCES names the image that holds their
+corresponding source.
+
+The control-plane image links libjpeg-turbo, and the device and driver images
+contain it. This software is based in part on the work of the Independent
+JPEG Group.
 
 Trademarks
 

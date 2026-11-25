@@ -191,7 +191,8 @@ func TestInitialStatus(t *testing.T) {
 		},
 		Printer: apitypes.StatusPrinter{
 			Available: false, URI: "", State: "unknown",
-			Reasons: []string{}, Formats: []string{}, Media: []string{}, Markers: []apitypes.Marker{},
+			Reasons: []string{}, Formats: []string{}, ConvertedFormats: []apitypes.FormatConversion{},
+			Media: []string{}, Markers: []apitypes.Marker{},
 		},
 		Scanner:   apitypes.StatusScanner{Available: false, URL: "", State: "unknown"},
 		Reconcile: []apitypes.ReconcileItem{},
@@ -659,12 +660,24 @@ func TestOptionalBlob(t *testing.T) {
 		t.Fatalf("blobs %+v without an accepted EULA", sp.Blobs)
 	}
 	acc := usbConfig("HP")
-	acc.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+	acc.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 	h.c.ConfigApplied(acc, "e2")
 	h.step()
 	want := []device.BlobRef{{ID: "hplip-plugin", Version: "3.24.4", Optional: true}}
-	if sp := h.b.last(t); !reflect.DeepEqual(sp.Blobs, want) {
+	sp := h.b.last(t)
+	if !reflect.DeepEqual(sp.Blobs, want) {
 		t.Fatalf("blobs %+v", sp.Blobs)
+	}
+	if want := []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}; !reflect.DeepEqual(sp.AcceptedEULAs, want) {
+		t.Fatalf("acceptedEulas %+v", sp.AcceptedEULAs)
+	}
+	// Accepting another text rolls the pod.
+	acc2 := usbConfig("HP")
+	acc2.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: strings.Repeat("b", 64)}}
+	h.c.ConfigApplied(acc2, "e3")
+	h.step()
+	if h.b.last(t).Hash == sp.Hash {
+		t.Fatal("a new accepted text sha did not change the spec hash")
 	}
 	h.b.set(running(device.Endpoints{}))
 	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
@@ -974,7 +987,7 @@ func TestSetup(t *testing.T) {
 	t.Run("accepted EULA listed", func(t *testing.T) {
 		h := newHarness(t, Options{USBAvailable: true})
 		cfg := usbConfig("P")
-		cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+		cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
 		h.c.ConfigApplied(cfg, "e")
 		h.report(t, "ippusb-mfp")
 		s := h.c.Setup()
@@ -982,6 +995,105 @@ func TestSetup(t *testing.T) {
 			t.Fatalf("eulas %+v", s.EULAs)
 		}
 	})
+	t.Run("EULA text state", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true})
+		h.report(t, "hp-legacy-mfp")
+		if e := h.c.Setup().EULAs[0]; e.State != apitypes.EULAPending || e.TextSHA256 != nil {
+			t.Fatalf("before any text: %+v", e)
+		}
+		h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
+		if e := h.c.Setup().EULAs[0]; e.State != apitypes.EULAAvailable || e.TextSHA256 == nil || *e.TextSHA256 != textSHA {
+			t.Fatalf("after the text: %+v", e)
+		}
+	})
+}
+
+// textSHA is a well-formed accepted text sha256.
+var textSHA = strings.Repeat("a", 64)
+
+// withText makes the report carry the hplip-plugin text in state.
+func withText(state string) func(*device.AgentReport) {
+	return func(r *device.AgentReport) {
+		t := device.EULAText{ID: "hplip-plugin", Version: "3.24.4", State: state}
+		switch state {
+		case device.EULAAvailable:
+			t.Text, t.TextSHA256 = "licence\n", textSHA
+		case device.EULAFailed:
+			t.Message = "download failed"
+		}
+		r.EULAs = []device.EULAText{t}
+	}
+}
+
+func TestEULA(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	if _, ok := h.c.EULA("no-such-eula"); ok {
+		t.Fatal("EULA found for an id not in the catalog")
+	}
+	e, ok := h.c.EULA("hplip-plugin")
+	if !ok || e.State != apitypes.EULAPending || e.Text != nil || e.TextSHA256 != nil || e.Version != "3.24.4" || e.Title == "" || e.Vendor != "HP" {
+		t.Fatalf("before any report: %+v, %v", e, ok)
+	}
+	h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
+	e, _ = h.c.EULA("hplip-plugin")
+	if e.State != apitypes.EULAAvailable || e.Text == nil || *e.Text != "licence\n" || e.TextSHA256 == nil || *e.TextSHA256 != textSHA {
+		t.Fatalf("available: %+v", e)
+	}
+	// A rolled pod reports pending again; the known text stays.
+	h.report(t, "hp-legacy-mfp", withText(device.EULAPending))
+	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAAvailable {
+		t.Fatalf("pending replaced the known text: %+v", e)
+	}
+	h.report(t, "hp-legacy-mfp", withText(device.EULAFailed))
+	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAFailed || e.Message != "download failed" || e.Text != nil {
+		t.Fatalf("failed: %+v", e)
+	}
+	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
+		r.EULAs = []device.EULAText{{ID: "not-in-catalog", Version: "1", State: device.EULAAvailable}}
+	})
+	h.c.mu.Lock()
+	_, stored := h.c.eulaTexts["not-in-catalog"]
+	h.c.mu.Unlock()
+	if stored {
+		t.Error("stored the text of a EULA not in the catalog")
+	}
+	// A text of another version is not this catalog's text.
+	h.report(t, "hp-legacy-mfp", func(r *device.AgentReport) {
+		r.EULAs = []device.EULAText{{ID: "hplip-plugin", Version: "1.0", State: device.EULAAvailable, Text: "old", TextSHA256: textSHA}}
+	})
+	if e, _ = h.c.EULA("hplip-plugin"); e.State != apitypes.EULAPending {
+		t.Fatalf("other version: %+v", e)
+	}
+}
+
+func TestStageEULAs(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	want := []device.EULARef{{ID: "hplip-plugin", Version: "3.24.4"}}
+	// No config: the default selector's decision offers the HP plug-in.
+	if ds := h.report(t, "hp-legacy-mfp"); !reflect.DeepEqual(ds.StageEULAs, want) {
+		t.Fatalf("no config: stageEulas %+v", ds.StageEULAs)
+	}
+	if ds := h.report(t, "ippusb-mfp"); ds.StageEULAs == nil || len(ds.StageEULAs) != 0 {
+		t.Fatalf("no EULA device: stageEulas %#v, want empty", ds.StageEULAs)
+	}
+	// An accepted EULA stays staged even when the device does not offer it.
+	cfg := usbConfig("P")
+	cfg.Licenses.AcceptedEULAs = []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
+	h.c.ConfigApplied(cfg, "e")
+	if ds := h.report(t, "ippusb-mfp"); !reflect.DeepEqual(ds.StageEULAs, want) {
+		t.Fatalf("accepted: stageEulas %+v", ds.StageEULAs)
+	}
+}
+
+func TestAcceptedMatchesIDAndVersion(t *testing.T) {
+	cat := catalog.Default()
+	acc := []config.EULARef{{ID: "hplip-plugin", Version: "3.24.4", TextSHA256: textSHA}}
+	if !accepted(cat, "hplip-plugin", acc) {
+		t.Error("an entry with a text sha256 is not accepted")
+	}
+	if accepted(cat, "hplip-plugin", []config.EULARef{{ID: "hplip-plugin", Version: "1.0", TextSHA256: textSHA}}) {
+		t.Error("another version is accepted")
+	}
 }
 
 func TestRunReactsToInputsAndStops(t *testing.T) {
@@ -1029,4 +1141,78 @@ func TestRequiredEULA(t *testing.T) {
 		t.Fatalf("spec %+v, want the usb spec without the blob", sp)
 	}
 	wantPhase(t, s, "degraded", "Accept EULA HP Linux Imaging and Printing proprietary plug-in in Settings")
+}
+
+func TestPickPrefersFamilyPort(t *testing.T) {
+	cat := catalog.Default()
+	obs := device.Observation{HostIP: "192.168.1.20"}
+	svc := func(typ, name string, port int, key string) device.DNSSDService {
+		return device.DNSSDService{Type: typ, Name: name, Port: port, TXT: map[string]string{key: "x"}}
+	}
+	// The foreign instances sort first and the first name is even preferred.
+	r := &device.AgentReport{Services: []device.DNSSDService{
+		svc(device.ServiceIPP, "AAA foreign", 631, "rp"),
+		svc(device.ServiceIPP, "ZZZ ipp-usb", device.IPPUSBMinPort+3, "rp"),
+		svc(device.ServiceUScan, "AAA foreign", 9000, "rs"),
+		svc(device.ServiceUScan, "ZZZ ipp-usb", device.IPPUSBMaxPort, "rs"),
+		svc(device.ServiceUScan, "ZZZ airsane", 8090, "rs"),
+	}}
+	ippusb, _ := cat.Printer("ipp-usb")
+	if got := printerURI(BackendK8s, ippusb, obs, r, "AAA foreign"); got != "ipp://192.168.1.20:60003/x" {
+		t.Errorf("ipp-usb printer URI %q, want the instance on the ipp-usb port", got)
+	}
+	if got := connect(r, ippusb, "AAA foreign", "", "").DNSSDName; got != "ZZZ ipp-usb" {
+		t.Errorf("connect DNS-SD name %q, want the picked printer's", got)
+	}
+	for scanner, want := range map[string]string{
+		"ipp-usb": "http://192.168.1.20:60009/x",
+		"airsane": "http://192.168.1.20:8090/x",
+	} {
+		if got := scannerURL(cat, BackendK8s, &device.Spec{Scanner: scanner}, obs, r); got != want {
+			t.Errorf("%s scanner URL %q, want %q", scanner, got, want)
+		}
+	}
+	// No instance on the family's port: name preference, then name order, as before.
+	only := &device.AgentReport{Services: []device.DNSSDService{
+		svc(device.ServiceIPP, "BBB", 631, "rp"), svc(device.ServiceIPP, "AAA", 632, "rp"),
+	}}
+	if got := printerURI(BackendK8s, ippusb, obs, only, ""); got != "ipp://192.168.1.20:632/x" {
+		t.Errorf("fallback printer URI %q, want the first by name", got)
+	}
+	// A family with no port set keeps the name preference.
+	sim, _ := cat.Printer("sim")
+	if got := printerURI(BackendK8s, sim, obs, r, "AAA foreign"); got != "ipp://192.168.1.20:631/x" {
+		t.Errorf("sim printer URI %q, want the preferred name", got)
+	}
+}
+
+func TestSanitizeName(t *testing.T) {
+	for in, want := range map[string]string{
+		"OfficeJet Pro 8710": "OfficeJet Pro 8710",
+		"--printer":          "printer",
+		" - - x":             "x",
+		"---":                defaultName,
+		"\x01-\x02":          defaultName,
+		"":                   defaultName,
+	} {
+		if got := sanitizeName(in); got != want {
+			t.Errorf("sanitizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestConvertedFormats(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	h.c.ConfigApplied(usbConfig("Printer"), "e")
+	h.b.set(running(device.Endpoints{PrinterURI: "ipp://127.0.0.1:40000/ipp/print"}))
+	h.report(t, "ippusb-mfp")
+	s := h.step()
+	// The fake printer lists only application/pdf.
+	want := []apitypes.FormatConversion{{From: "image/png", To: "application/pdf"}, {From: "image/jpeg", To: "application/pdf"}}
+	if !s.Printer.Available || !reflect.DeepEqual(s.Printer.ConvertedFormats, want) {
+		t.Fatalf("printer %+v, want convertedFormats %v", s.Printer, want)
+	}
+	if got := h.c.Current().Printer.ConvertedFormats; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Current convertedFormats %v", got)
+	}
 }

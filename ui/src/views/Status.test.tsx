@@ -24,7 +24,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-// The Status the controller returns before any input (plan: controller rules, "Initial Status").
+// The Status the controller returns before any input: no config, no device, nothing reconciled.
 const initialStatus: StatusDTO = {
   config: {
     state: "missing",
@@ -48,6 +48,7 @@ const initialStatus: StatusDTO = {
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -115,6 +116,7 @@ class FakeEventSource {
 async function renderWith(status: StatusDTO | null): Promise<EventStore> {
   const store = createEventStore({
     newEventSource: () => new FakeEventSource() as unknown as EventSource,
+    notFoundAfterMs: 30,
   });
   store.start();
   if (status) act(() => FakeEventSource.last?.emit("status", status));
@@ -139,11 +141,11 @@ describe("Status view", () => {
 
   test("renders the initial Status without errors", async () => {
     await renderWith(initialStatus);
-    expect(screen.getByText("No device workload")).toBeTruthy();
+    expect(screen.getByText("Not running")).toBeTruthy();
     expect(screen.getByText("Waiting for the printer")).toBeTruthy();
     expect(screen.getByText("Waiting for the scanner")).toBeTruthy();
-    expect(screen.getByText("No config file")).toBeTruthy();
-    expect(screen.getByText("No printer chosen yet")).toBeTruthy();
+    expect(screen.getByText("No settings file")).toBeTruthy();
+    expect(screen.getByText("No printer found yet")).toBeTruthy();
     expect(screen.queryByText("Simulated device")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     // The zero changedAt is not a real date.
@@ -151,6 +153,84 @@ describe("Status view", () => {
     expect(screen.getByRole("heading", { name: "Connect a device" })).toBeTruthy();
     expect(screen.getAllByText("Not available yet").length).toBe(2);
     expect(screen.getByText("Not advertised yet")).toBeTruthy();
+  });
+
+  test("leads with the printer and scanner, and keeps the technical facts in a disclosure", async () => {
+    await renderWith(simulatedReady);
+    const titles = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(titles.slice(0, 3)).toEqual(["Printer", "Scanner", "Recent print jobs"]);
+    const details = screen.getByRole("button", { name: "Technical details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeTruthy();
+    act(() => details.click());
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Matched rule").closest("[hidden]")).toBeNull();
+  });
+
+  test("a configured device that finds no printer says so and how to fix it", async () => {
+    await renderWith({
+      ...initialStatus,
+      config: { ...initialStatus.config, state: "applied", etag: "e1", appliedEtag: "e1" },
+      device: {
+        ...initialStatus.device,
+        phase: "probing",
+        mode: "probe",
+        inventory: { devices: [], probedAt: "2026-11-24T18:00:00Z", simulated: false },
+      },
+    });
+    expect(screen.getByText("Looking for the printer")).toBeTruthy();
+    expect(await screen.findByText("Printer not found")).toBeTruthy();
+    expect(document.body.textContent).toContain("Plug the printer in with USB, switch it on");
+  });
+
+  test("probing before the agent's first report is not Printer not found", async () => {
+    await renderWith({
+      ...initialStatus,
+      config: { ...initialStatus.config, state: "applied", etag: "e1", appliedEtag: "e1" },
+      device: {
+        ...initialStatus.device,
+        phase: "probing",
+        mode: "probe",
+        message: "Waiting for the device agent",
+      },
+    });
+    expect(screen.getByText("Waiting for the device agent")).toBeTruthy();
+    // Well past notFoundAfterMs (30 ms).
+    await act(() => new Promise((r) => setTimeout(r, 150)));
+    expect(screen.queryByText("Printer not found")).toBeNull();
+    expect(document.body.textContent).not.toContain("Plug the printer in with USB");
+  });
+
+  test("a simulated inventory is labelled simulated", async () => {
+    const usb = {
+      vendorId: "03f0",
+      productId: "2754",
+      serial: "FAKE0001",
+      manufacturer: "HP",
+      product: "OfficeJet Pro",
+      bus: 1,
+      address: 4,
+      interfaces: [],
+      deviceId: "",
+    };
+    await renderWith({
+      ...simulatedReady,
+      device: {
+        ...simulatedReady.device,
+        mode: "usb",
+        inventory: { devices: [usb], probedAt: "2026-11-24T12:00:00Z", simulated: true },
+        decision: {
+          printer: "ipp-usb",
+          scanner: "ipp-usb",
+          saneBackends: [],
+          requiredEulas: [],
+          optionalEulas: [],
+          rule: "ipp-over-usb",
+          device: usb,
+        },
+      },
+    });
+    expect(screen.getByText("HP OfficeJet Pro (simulated)")).toBeTruthy();
   });
 
   test("shows a device error prominently", async () => {

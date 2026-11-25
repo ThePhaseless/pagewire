@@ -1,0 +1,26 @@
+@layer components {
+  .eula-text {
+    max-block-size: 20rem;
+    overflow: auto;
+    padding: var(--space-3);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    background: var(--paper-sunken);
+  }
+
+  .eula-text pre {
+    margin: 0;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .eula-changed {
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-control);
+    border-inline-start: 4px solid var(--busy);
+    background: var(--busy-tint);
+    color: var(--ink);
+  }
+}

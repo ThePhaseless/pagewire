@@ -24,7 +24,9 @@ COPY --from=ui /src/ui/dist ./ui/dist
 ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -linkmode external -extldflags -static -X main.version=${VERSION}" -o /out/printscan ./cmd/printscan \
- && go tool go-licenses save ./cmd/printscan --save_path /out/licenses/go
+ && go tool go-licenses save ./cmd/printscan --save_path /out/licenses/go \
+ # go-licenses skips the standard library, which is linked into the binary too.
+ && cp "$(go env GOROOT)/LICENSE" /out/licenses/go/LICENSE-go-stdlib
 # Licence texts of the statically linked C libraries. Alpine ships no licence file for musl,
 # libpng or zlib, so libpng's and zlib's come from their headers and musl's from its release tarball.
 ADD --checksum=sha256:d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz /tmp/musl.tar.gz
@@ -38,7 +40,7 @@ RUN mkdir -p /out/licenses/c/musl /out/licenses/c/libjpeg-turbo /out/licenses/c/
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 COPY --from=go /out/printscan /printscan
 COPY --from=go /out/licenses /licenses
-COPY LICENSE NOTICE /licenses/printscan/
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/printscan/
 COPY --from=go --chown=65532:65532 /out/data /data
 USER 65532:65532
 EXPOSE 8080 8081

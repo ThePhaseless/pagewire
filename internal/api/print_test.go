@@ -2,8 +2,16 @@ package api
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"hash/crc32"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -277,4 +285,152 @@ func TestGetJobs(t *testing.T) {
 	wantProblem(t, e.do("GET", "/api/v1/jobs/0", nil), 404, "not-found")
 	e.printer.job = func(int) (apitypes.Job, error) { return apitypes.Job{}, ErrNoPrinter }
 	wantProblem(t, e.do("GET", "/api/v1/jobs/3", nil), 503, "printer-unavailable")
+}
+
+func pngFile(t *testing.T, w, h int) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := png.Encode(&b, image.NewNRGBA(image.Rect(0, 0, w, h))); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+func jpegFile(t *testing.T, w, h int) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, image.NewRGBA(image.Rect(0, 0, w, h)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// cmykJPEGFile is the header of a four-component JPEG; image/jpeg cannot encode CMYK.
+func cmykJPEGFile() string {
+	b := []byte{0xff, 0xd8, 0xff, 0xc0, 0, 20, 8, 0, 8, 0, 8, 4}
+	for id := range byte(4) {
+		b = append(b, id+1, 0x11, 0)
+	}
+	return string(append(b, 0xff, 0xda, 0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 0, 63, 0))
+}
+
+// pngHeaderFile is a PNG signature and IHDR (8-bit RGBA, w x h), no pixels.
+func pngHeaderFile(w, h uint32) string {
+	ihdr := binary.BigEndian.AppendUint32(nil, w)
+	ihdr = binary.BigEndian.AppendUint32(ihdr, h)
+	ihdr = append(ihdr, 8, 6, 0, 0, 0)
+	b := append([]byte("\x89PNG\r\n\x1a\n"), 0, 0, 0, 13)
+	b = append(append(b, "IHDR"...), ihdr...)
+	return string(binary.BigEndian.AppendUint32(b, crc32.ChecksumIEEE(append([]byte("IHDR"), ihdr...))))
+}
+
+func TestPrintConverts(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	cases := []struct {
+		name, file string
+		formats    []string
+		want       string // format submitted
+		magic      string
+	}{
+		{"png to jpeg", pngFile(t, 30, 20), []string{printing.FormatPDF, printing.FormatJPEG}, printing.FormatJPEG, "\xff\xd8\xff"},
+		{"png to pdf", pngFile(t, 30, 20), []string{printing.FormatPDF}, printing.FormatPDF, "%PDF-"},
+		{"jpeg to pdf", jpegFile(t, 30, 20), []string{printing.FormatPDF, "image/urf"}, printing.FormatPDF, "%PDF-"},
+		{"jpeg streamed", jpegFile(t, 30, 20), []string{printing.FormatJPEG}, printing.FormatJPEG, "\xff\xd8\xff"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.printer.formats = tc.formats
+			code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "photo", tc.file})
+			if code != 202 {
+				t.Fatalf("%d %s", code, body)
+			}
+			sub := e.printer.submitted[0]
+			if sub.format != tc.want || !bytes.HasPrefix(sub.head, []byte(tc.magic)) {
+				t.Fatalf("submitted %s starting %q, want %s", sub.format, sub.head, tc.want)
+			}
+		})
+	}
+	if left, _ := filepath.Glob(filepath.Join(tmp, "printscan-print-*")); len(left) != 0 {
+		t.Fatalf("temp files left behind: %v", left)
+	}
+}
+
+func TestPrintConversionRefusals(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	for name, tc := range map[string]struct {
+		file    string
+		formats []string
+		code    int
+		typ     string
+		detail  string
+	}{
+		"cmyk jpeg":     {cmykJPEGFile(), []string{printing.FormatPDF}, 415, "unsupported-format", "This JPEG uses a colour format the printer path cannot embed. Save it as an RGB JPEG or a PDF."},
+		"broken png":    {"\x89PNG\r\n\x1a\nnot really", []string{printing.FormatPDF}, 400, "invalid-image", ""},
+		"broken jpeg":   {"\xff\xd8\xffnot really", []string{printing.FormatPDF}, 400, "invalid-image", ""},
+		"oversized png": {pngHeaderFile(20000, 20000), []string{printing.FormatJPEG}, 413, "image-too-large", "20000 x 20000"},
+		"text":          {"hello\n", []string{printing.FormatPDF}, 415, "unsupported-format", printing.FormatPDF},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.printer.formats = tc.formats
+			b, ct := multipartBody(t, [3]string{"options", "", goodOptions}, [3]string{"file", "x", tc.file})
+			p := wantProblem(t, e.do("POST", "/api/v1/print", b, "Content-Type", ct), tc.code, tc.typ)
+			if !strings.Contains(p.Detail, tc.detail) {
+				t.Fatalf("detail %q lacks %q", p.Detail, tc.detail)
+			}
+			if len(e.printer.submitted) != 0 {
+				t.Fatal("submitted a refused file")
+			}
+		})
+	}
+	if left, _ := filepath.Glob(filepath.Join(tmp, "printscan-print-*")); len(left) != 0 {
+		t.Fatalf("temp files left behind: %v", left)
+	}
+}
+
+func TestConversionBusy(t *testing.T) {
+	rec := httptest.NewRecorder()
+	conversionError(rec, printing.ErrBusy)
+	wantProblem(t, rec, 429, "too-many-jobs")
+}
+
+func TestPrintWatcherLimit(t *testing.T) {
+	e := newEnv(t)
+	e.printer.job = scripted("processing") // never finishes: every watcher stays
+	for i := range maxJobWatchers {
+		if code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF}); code != 202 {
+			t.Fatalf("print %d: %d %s", i+1, code, body)
+		}
+	}
+	code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF})
+	if code != 429 || !bytes.Contains(body, []byte("too-many-jobs")) {
+		t.Fatalf("print %d: %d %s, want 429 too-many-jobs", maxJobWatchers+1, code, body)
+	}
+	if n := len(e.printer.submitted); n != maxJobWatchers {
+		t.Fatalf("%d jobs submitted, want %d", n, maxJobWatchers)
+	}
+	// Finished watchers free their slots.
+	e.printer.mu.Lock()
+	e.printer.job = scripted("completed")
+	e.printer.mu.Unlock()
+	waitFor(t, "a free watcher slot", func() bool {
+		code, _ := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF})
+		return code == 202
+	})
+	if maxJobWatchers != 32 {
+		t.Fatalf("maxJobWatchers = %d, want 32", maxJobWatchers)
+	}
+}
+
+func TestPrinterErrorDetailIsGeneric(t *testing.T) {
+	e := newEnv(t)
+	e.printer.formatErr = errors.New("dial tcp 10.1.2.3:631: connection refused")
+	b, ct := multipartBody(t, [3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF})
+	p := wantProblem(t, e.do("POST", "/api/v1/print", b, "Content-Type", ct), 503, "printer-unavailable")
+	if strings.Contains(p.Detail, "10.1.2.3") {
+		t.Fatalf("detail %q leaks the raw error", p.Detail)
+	}
 }

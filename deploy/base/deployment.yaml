@@ -32,7 +32,13 @@ spec:
         # named "printscan" in this Deployment and runs the device pod's probe, agent
         # and fetch-blobs containers from it. Renaming it falls back to a registry tag.
         - name: printscan
-          image: ghcr.io/thephaseless/printscan:0.0.0
+          # Use main until the first release, then a version tag pinned by digest
+          # (<version>@sha256:<digest>); kustomization.yaml sets the same tag.
+          image: ghcr.io/thephaseless/printscan:main
+          # main moves with every push, and the device pod already pulls it Always, so
+          # both run the same agent protocol. Drop this once the image is pinned as
+          # <version>@sha256:<digest>.
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8080
@@ -47,6 +53,24 @@ spec:
               value: printscan
             - name: TZ
               value: Etc/UTC
+            # Keep this about 50 MiB below resources.limits.memory (256Mi), so the Go GC
+            # collects before the container is OOM-killed. Change both together.
+            - name: GOMEMLIMIT
+              value: 200MiB
+            # Host names the UI and API answer to, comma-separated; other Host headers
+            # get 421. Unset or empty: no check on Kubernetes. "*" turns the check off.
+            # - name: PRINTSCAN_ALLOWED_HOSTS
+            #   value: printscan.example.com
+            # Shared secret the auth proxy adds to every request. When set, /api/ requests
+            # without the header get 401. Create the Secret yourself.
+            # - name: PRINTSCAN_PROXY_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: printscan-proxy-secret
+            #       key: secret
+            # Header that carries it; this is the default.
+            # - name: PRINTSCAN_PROXY_SECRET_HEADER
+            #   value: X-Printscan-Proxy-Secret
           livenessProbe:
             httpGet:
               path: /healthz

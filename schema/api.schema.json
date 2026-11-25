@@ -62,8 +62,8 @@
           "type": "string",
           "maxLength": 63,
           "minLength": 1,
-          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
-          "description": "Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."
+          "pattern": "^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."
         },
         "location": {
           "type": "string",
@@ -281,6 +281,69 @@
         "scanner"
       ]
     },
+    "EULA": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "available",
+            "failed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "textSha256": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "title",
+        "vendor",
+        "summary",
+        "state",
+        "message",
+        "textSha256",
+        "text"
+      ]
+    },
     "EULARef": {
       "properties": {
         "id": {
@@ -288,6 +351,11 @@
         },
         "version": {
           "type": "string"
+        },
+        "textSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex sha256 of the accepted licence text. Settings writes it when you accept; required in acceptedEulas."
         }
       },
       "additionalProperties": false,
@@ -319,6 +387,22 @@
         "line",
         "column",
         "message"
+      ]
+    },
+    "FormatConversion": {
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "from",
+        "to"
       ]
     },
     "Inventory": {
@@ -394,7 +478,7 @@
           },
           "type": "array",
           "uniqueItems": true,
-          "description": "Each {id, version} must exist in the catalog; duplicates are rejected."
+          "description": "Each {id, version} must exist in the catalog and appear once; textSha256 is required."
         }
       },
       "additionalProperties": false,
@@ -854,14 +938,29 @@
         "vendor": {
           "type": "string"
         },
-        "url": {
-          "type": "string"
-        },
         "summary": {
           "type": "string"
         },
         "required": {
           "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "available",
+            "failed"
+          ]
+        },
+        "textSha256": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -871,9 +970,10 @@
         "version",
         "title",
         "vendor",
-        "url",
         "summary",
-        "required"
+        "required",
+        "state",
+        "textSha256"
       ]
     },
     "Status": {
@@ -1047,6 +1147,12 @@
           },
           "type": "array"
         },
+        "convertedFormats": {
+          "items": {
+            "$ref": "#/$defs/FormatConversion"
+          },
+          "type": "array"
+        },
         "media": {
           "items": {
             "type": "string"
@@ -1068,6 +1174,7 @@
         "state",
         "reasons",
         "formats",
+        "convertedFormats",
         "media",
         "markers"
       ]
@@ -1109,7 +1216,10 @@
           "pattern": "^[0-9a-f]{4}$"
         },
         "serial": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 126,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+          "description": "USB serial number, at most 126 characters, no control characters."
         }
       },
       "additionalProperties": false,

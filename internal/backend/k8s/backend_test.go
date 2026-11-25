@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -103,7 +104,7 @@ func TestApply(t *testing.T) {
 		t.Fatalf("token %q %v", tok, err)
 	}
 
-	// Idempotent second apply, then a spec change: owner fetched once, Secret created once and kept.
+	// Idempotent second apply, then a spec change: owner fetched once, Secret applied once and kept.
 	if err := b.Apply(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +114,8 @@ func TestApply(t *testing.T) {
 	if n := count(c, "get", "deployments"); n != 1 {
 		t.Errorf("owner fetched %d times", n)
 	}
-	if n := count(c, "create", "secrets"); n != 1 {
-		t.Errorf("secret created %d times", n)
+	if n := count(c, "patch", "secrets"); n != 1 || count(c, "create", "secrets") != 0 {
+		t.Errorf("secret applied %d times, actions %v", n, c.Actions())
 	}
 	if count(c, "patch", "deployments") != 3 || count(c, "patch", "configmaps") != 3 {
 		t.Errorf("want 3 applies each, actions %v", c.Actions())
@@ -154,7 +155,7 @@ func TestApplyNilWithoutOwner(t *testing.T) {
 // assertNothingCreated checks that no write was recorded and no device object exists.
 func assertNothingCreated(t *testing.T, c *fake.Clientset) {
 	t.Helper()
-	if n := count(c, "create", "secrets") + count(c, "patch", "deployments") + count(c, "patch", "configmaps"); n != 0 {
+	if n := count(c, "create", "secrets") + count(c, "patch", "secrets") + count(c, "patch", "deployments") + count(c, "patch", "configmaps"); n != 0 {
 		t.Errorf("%d objects written", n)
 	}
 	ctx := context.Background()
@@ -293,7 +294,7 @@ func TestRestartPod(t *testing.T) {
 	if len(left.Items) != 1 || left.Items[0].Name != "other" {
 		t.Errorf("pods left: %v", left.Items)
 	}
-	// A13: per-name deletes are recorded as "delete", DeleteCollection as "delete-collection".
+	// Per-name deletes are recorded as "delete", DeleteCollection as "delete-collection".
 	if n := count(c, "delete", "pods"); n != 2 {
 		t.Errorf("%d delete actions", n)
 	}
@@ -305,5 +306,92 @@ func TestRestartPod(t *testing.T) {
 func TestAgentTokenMissing(t *testing.T) {
 	if _, err := New(fake.NewClientset(), backendParams()).AgentToken(context.Background()); err == nil {
 		t.Error("want error without the Secret")
+	}
+}
+
+func tokenSecret(tok string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: TokenSecretName, Namespace: ns},
+		Data:       map[string][]byte{TokenSecretKey: []byte(tok)},
+	}
+}
+
+func TestAgentTokenEmpty(t *testing.T) {
+	if _, err := New(fake.NewClientset(tokenSecret("")), backendParams()).AgentToken(context.Background()); err == nil {
+		t.Error("want error for an empty token")
+	}
+}
+
+// An existing Secret without a token counts as missing and gets one; one with a
+// token is kept.
+func TestEnsureTokenFillsEmptySecret(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		secret *corev1.Secret
+		keep   bool
+	}{
+		"empty key":   {tokenSecret(""), false},
+		"no data":     {&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: TokenSecretName, Namespace: ns}}, false},
+		"token there": {tokenSecret("kept"), true},
+	} {
+		c := fake.NewClientset(ownerDeployment(), tc.secret)
+		b := New(c, backendParams())
+		if err := b.Apply(ctx, goldenSpecs["probe"]); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		s, err := c.CoreV1().Secrets(ns).Get(ctx, TokenSecretName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok := string(s.Data[TokenSecretKey])
+		if tc.keep && tok != "kept" || !tc.keep && len(tok) != 64 {
+			t.Errorf("%s: token %q", name, tok)
+		}
+		if got, err := b.AgentToken(ctx); err != nil || got != tok {
+			t.Errorf("%s: AgentToken %q %v, want %q", name, got, err, tok)
+		}
+		if n := count(c, "create", "secrets"); n != 0 {
+			t.Errorf("%s: %d plain creates", name, n)
+		}
+	}
+}
+
+// AgentToken reads the Secret at most once per tokenTTL, failures included.
+func TestAgentTokenCache(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientset()
+	b := New(c, backendParams())
+	now := time.Unix(1000, 0)
+	b.now = func() time.Time { return now }
+
+	for range 3 {
+		if _, err := b.AgentToken(ctx); err == nil {
+			t.Fatal("want error without the Secret")
+		}
+	}
+	if n := count(c, "get", "secrets"); n != 1 {
+		t.Errorf("%d GETs for cached failures", n)
+	}
+	if _, err := c.CoreV1().Secrets(ns).Create(ctx, tokenSecret("one"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(tokenTTL)
+	for range 3 {
+		if tok, err := b.AgentToken(ctx); err != nil || tok != "one" {
+			t.Fatalf("token %q %v", tok, err)
+		}
+	}
+	if n := count(c, "get", "secrets"); n != 2 {
+		t.Errorf("%d GETs, want 2", n)
+	}
+	if _, err := c.CoreV1().Secrets(ns).Update(ctx, tokenSecret("two"), metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tok, _ := b.AgentToken(ctx); tok != "one" {
+		t.Errorf("re-read before the TTL: %q", tok)
+	}
+	now = now.Add(tokenTTL)
+	if tok, _ := b.AgentToken(ctx); tok != "two" {
+		t.Errorf("not re-read after the TTL: %q", tok)
 	}
 }

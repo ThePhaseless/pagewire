@@ -22,7 +22,7 @@ const (
 // a default (see Default).
 type Config struct {
 	APIVersion string      `yaml:"apiVersion" json:"apiVersion" validate:"required,eq=printscan/v1" jsonschema:"required"`
-	Name       string      `yaml:"name" json:"name" validate:"required,max=63,nocontrol" jsonschema:"required,minLength=1,maxLength=63,pattern=^[^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"Required, 1 to 63 characters, no control characters. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."`
+	Name       string      `yaml:"name" json:"name" validate:"required,max=63,nocontrol,startsnotwith=-" jsonschema:"required,minLength=1,maxLength=63,pattern=^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."`
 	Location   string      `yaml:"location" json:"location" validate:"max=127,nocontrol" jsonschema:"maxLength=127,pattern=^[^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"printer-location, 0 to 127 characters."`
 	Device     Device      `yaml:"device" json:"device"`
 	Print      PrintConfig `yaml:"print" json:"print"`
@@ -42,7 +42,7 @@ type Device struct {
 type USB struct {
 	VendorID  string `yaml:"vendorId" json:"vendorId" validate:"hex4" jsonschema:"pattern=^[0-9a-f]{4}$"`
 	ProductID string `yaml:"productId" json:"productId" validate:"hex4" jsonschema:"pattern=^[0-9a-f]{4}$"`
-	Serial    string `yaml:"serial" json:"serial"`
+	Serial    string `yaml:"serial" json:"serial" validate:"max=126,nocontrol" jsonschema:"maxLength=126,pattern=^[^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"USB serial number, at most 126 characters, no control characters."`
 }
 
 // PrintConfig holds print defaults and limits.
@@ -75,13 +75,16 @@ type ScanDefaults struct {
 
 // Licenses records accepted vendor EULAs.
 type Licenses struct {
-	AcceptedEULAs []EULARef `yaml:"acceptedEulas" json:"acceptedEulas" validate:"unique,dive" jsonschema:"uniqueItems=true" jsonschema_description:"Each {id, version} must exist in the catalog; duplicates are rejected."`
+	AcceptedEULAs []EULARef `yaml:"acceptedEulas" json:"acceptedEulas" validate:"unique,dive" jsonschema:"uniqueItems=true" jsonschema_description:"Each {id, version} must exist in the catalog and appear once; textSha256 is required."`
 }
 
-// EULARef names one EULA version.
+// EULARef names one EULA version and, in acceptedEulas, the sha256 of the
+// licence text the user accepted. The blob is installed only while the text
+// in the vendor archive still has that sha256.
 type EULARef struct {
-	ID      string `yaml:"id" json:"id" validate:"required"`
-	Version string `yaml:"version" json:"version" validate:"required"`
+	ID         string `yaml:"id" json:"id" validate:"required"`
+	Version    string `yaml:"version" json:"version" validate:"required"`
+	TextSHA256 string `yaml:"textSha256,omitempty" json:"textSha256,omitempty" jsonschema:"pattern=^[0-9a-f]{64}$" jsonschema_description:"Lowercase hex sha256 of the accepted licence text. Settings writes it when you accept; required in acceptedEulas."`
 }
 
 // Default returns the config the wizard starts from: every default filled in,

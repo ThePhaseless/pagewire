@@ -4,7 +4,7 @@ import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api, ConflictError, ProblemError, problemMessage } from "../api/client";
 import { EventsContext, useStatus } from "../api/events";
 import { type ConflictChange, ConflictDialog } from "../components/ConflictDialog";
-import { EulaAccept } from "../components/EulaAccept";
+import { acceptedSha, EulaAccept, withAccepted } from "../components/EulaAccept";
 import {
   Button,
   Card,
@@ -29,6 +29,7 @@ import {
   type Status,
 } from "../gen/api";
 import { changedPaths, diff, valueAt } from "../lib/mergepatch";
+import { type Blocker, useNavigationBlocker } from "../router";
 import { strings } from "../strings";
 import { settingsStrings as s } from "./Settings.strings";
 import "./Settings.css";
@@ -60,7 +61,7 @@ function display(path: string, v: unknown): string {
   if (v === undefined || v === null || v === "") return s.notSet;
   if (Array.isArray(v))
     return v.length
-      ? v.map((r) => (typeof r === "object" ? Object.values(r).join(" ") : String(r))).join(", ")
+      ? v.map((r) => (typeof r === "object" ? `${r.id} ${r.version}` : String(r))).join(", ")
       : s.none;
   if (typeof v === "object") return Object.values(v).filter(Boolean).join(" · ");
   return valueLabels[path]?.[String(v)] ?? String(v);
@@ -117,6 +118,20 @@ export function Settings() {
   const dirty = Object.keys(patch).length > 0;
 
   live.current = { dirty, etag: resp?.etag };
+
+  // Unsaved edits: ask before another page replaces the form, and before the tab unloads.
+  const [leave, setLeave] = useState<(() => void) | null>(null);
+  const block = useCallback<Blocker>((proceed) => {
+    setLeave(() => proceed);
+    return true;
+  }, []);
+  useNavigationBlocker(dirty ? block : null);
+  useEffect(() => {
+    if (!dirty) return;
+    const onUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [dirty]);
   useEffect(
     () =>
       store.on("config", (e) => {
@@ -200,11 +215,25 @@ export function Settings() {
         file: display(path, valueAt(conflict.current.config, path)),
       }))
     : [];
+  // What the other edit changed that you did not touch: saving keeps those values.
+  const mine = new Set(changes.map((c) => c.path));
+  const alsoChanged: ConflictChange[] =
+    conflict && base && conflict.current.config
+      ? changedPaths(diff(base, conflict.current.config))
+          .filter((path) => !mine.has(path))
+          .map((path) => ({
+            path,
+            label: s.paths[path] ?? path,
+            mine: display(path, valueAt(draft, path)),
+            file: display(path, valueAt(conflict.current.config, path)),
+          }))
+      : [];
 
   const dialog = conflict && draft && (
     <ConflictDialog
       current={conflict.current}
       changes={changes}
+      alsoChanged={alsoChanged}
       busy={saving}
       onKeepMine={() => {
         const { current, patch: p } = conflict;
@@ -289,11 +318,6 @@ export function Settings() {
     <div className="settings-view">
       <PageHeader title={strings.nav.settings} description={s.description} />
 
-      {fileChanged && (
-        <p className="settings-banner" role="status">
-          {s.fileChanged}
-        </p>
-      )}
       {highlight.length > 0 && (
         <div className="settings-banner settings-review" role="status">
           <p>{s.reviewNote}</p>
@@ -362,7 +386,11 @@ export function Settings() {
         </InlineError>
       )}
 
-      <div className="settings-actions">
+      <div className="settings-actions" data-sticky={dirty || undefined}>
+        <div className="settings-actions-status" role="status">
+          {dirty && <p className="settings-unsaved">{s.unsaved}</p>}
+          {fileChanged && <p>{s.fileChanged}</p>}
+        </div>
         <Button onPress={reset} isDisabled={!dirty && !fileChanged && highlight.length === 0}>
           {s.reset}
         </Button>
@@ -376,6 +404,31 @@ export function Settings() {
         </Button>
       </div>
       {dialog}
+      <Dialog
+        role="alertdialog"
+        isOpen={leave !== null}
+        onOpenChange={(open) => !open && setLeave(null)}
+        title={s.leave.title}
+      >
+        {(close) => (
+          <>
+            <p>{s.leave.body}</p>
+            <div className="settings-dialog-actions">
+              <Button onPress={close}>{s.leave.stay}</Button>
+              <Button
+                variant="danger"
+                onPress={() => {
+                  const go = leave;
+                  close();
+                  go?.();
+                }}
+              >
+                {s.leave.confirm}
+              </Button>
+            </div>
+          </>
+        )}
+      </Dialog>
     </div>
   );
 }
@@ -615,13 +668,11 @@ function Licences({
   errors: FieldError[];
 }) {
   const eulas = setup?.eulas ?? [];
-  const accepted = (id: string, version: string) =>
-    draft.licenses.acceptedEulas.some((r) => r.id === id && r.version === version);
-  const setAccepted = (id: string, version: string, on: boolean) =>
-    update((c) => {
-      const rest = c.licenses.acceptedEulas.filter((r) => !(r.id === id && r.version === version));
-      return { ...c, licenses: { acceptedEulas: on ? [...rest, { id, version }] : rest } };
-    });
+  const setAccepted = (id: string, version: string, sha: string | null) =>
+    update((c) => ({
+      ...c,
+      licenses: { acceptedEulas: withAccepted(c.licenses.acceptedEulas, id, version, sha) },
+    }));
   return (
     <>
       {eulas.length === 0 && <p>{s.noLicences}</p>}
@@ -633,8 +684,8 @@ function Licences({
           <div key={`${e.id}@${e.version}`} className="settings-eula">
             <EulaAccept
               eula={e}
-              isAccepted={accepted(e.id, e.version)}
-              onChange={(on) => setAccepted(e.id, e.version, on)}
+              accepted={acceptedSha(draft.licenses.acceptedEulas, e.id, e.version)}
+              onChange={(sha) => setAccepted(e.id, e.version, sha)}
             />
             {blob && (
               <p className="settings-blob" data-state={blob.state}>

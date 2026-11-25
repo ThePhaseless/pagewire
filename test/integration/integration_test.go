@@ -358,7 +358,13 @@ func scanOnePage(ctx context.Context, t *testing.T, s scanning.Scanner) {
 		t.Fatalf("empty page: %v", b)
 	}
 	var pdf bytes.Buffer
-	if err := scanning.WriteJPEGPDF(&pdf, pages, res); err != nil {
+	page := func(i int) (io.ReadSeekCloser, error) {
+		return struct {
+			io.ReadSeeker
+			io.Closer
+		}{bytes.NewReader(pages[i]), io.NopCloser(nil)}, nil
+	}
+	if err := scanning.WriteJPEGPDF(&pdf, len(pages), page, res); err != nil {
 		t.Fatalf("pdf: %v", err)
 	}
 	if !bytes.HasPrefix(pdf.Bytes(), []byte("%PDF-")) {

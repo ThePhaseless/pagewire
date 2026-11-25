@@ -4,12 +4,14 @@ import {
   type Config,
   type ConfigResponse,
   ConfigResponseSchema,
+  EULASchema,
   type FieldError,
   type Job,
   JobSchema,
   type PrintOptions,
   type Problem,
   ProblemSchema,
+  type Scan,
   ScannerCapsSchema,
   ScanSchema,
   type ScanSettings,
@@ -152,6 +154,8 @@ export const api = {
       headers: { "If-Match": quoteEtag(etag) },
     }),
   getSetup: () => json(SetupSchema, "/setup"),
+  /** A vendor licence and its text, read by the device agent from the verified archive. */
+  getEula: (id: string) => json(EULASchema, `/eulas/${encodeURIComponent(id)}`),
   getStatus: () => json(StatusSchema, "/status"),
   getJobs: () => json(z.array(JobSchema), "/jobs"),
   getJob: (id: number) => json(JobSchema, `/jobs/${id}`),
@@ -161,7 +165,15 @@ export const api = {
     json(ScanSchema, "/scans", { method: "POST", body: settings }),
   getScans: () => json(z.array(ScanSchema), "/scans"),
   getScan: (id: string) => json(ScanSchema, `/scans/${encodeURIComponent(id)}`),
-  deleteScan: (id: string) => empty(`/scans/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /**
+   * DELETE /scans/{id}: cancels a running scan (202, the scan as it is now; a `scan` event brings
+   * the canceled state) or deletes a finished one (204, null).
+   */
+  deleteScan: async (id: string): Promise<Scan | null> => {
+    const res = await send(`/scans/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) throw await problemFrom(res);
+    return res.status === 202 ? parse(ScanSchema, await res.json()) : null;
+  },
   scanPageUrl: (id: string, n: number) => `${API}/scans/${encodeURIComponent(id)}/pages/${n}`,
   scanDownloadUrl: (id: string) => `${API}/scans/${encodeURIComponent(id)}/download`,
 };

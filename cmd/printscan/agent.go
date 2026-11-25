@@ -5,17 +5,29 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strings"
 
 	"github.com/ThePhaseless/printscan/internal/agent"
 	"github.com/ThePhaseless/printscan/internal/config"
 	"github.com/ThePhaseless/printscan/internal/device"
 )
 
+const agentUsage = `usage: printscan agent probe|fetch|run [flags]
+
+commands:
+  probe  write the USB inventory as JSON
+  fetch  download, verify and install accepted vendor blobs
+  run    report to the control plane and apply the desired state
+
+Run "printscan agent <command> --help" for its flags.
+`
+
 // agentCmd runs `agent probe|fetch|run` (the Agent CLI contract).
 func agentCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: printscan agent probe|fetch|run [flags]")
+		return errors.New(strings.TrimSpace(agentUsage))
 	}
+
 	fl := flag.NewFlagSet("agent "+args[0], flag.ContinueOnError)
 	switch args[0] {
 	case "probe":
@@ -38,7 +50,7 @@ func agentCmd(ctx context.Context, args []string) error {
 		var c agent.FetchConfig
 		fl.StringVar(&c.Dir, "dir", "", "blob volume")
 		fl.Var((*strList)(&c.Blobs), "blob", "blob to install, <id>@<version> (repeatable)")
-		fl.Var((*strList)(&c.Accept), "accept", "accepted EULA, <id>@<version> (repeatable)")
+		fl.Var((*strList)(&c.Accept), "accept", "accepted EULA, <id>@<version>@<sha256 of the accepted licence text> (repeatable)")
 		fl.Var((*strList)(&c.Optional), "optional", "blob id whose failure is not fatal (repeatable)")
 		fl.StringVar(&c.StatusOut, "status-out", device.BlobStatusFile, "blob status JSON output file")
 		if err := parseAgentFlags(fl, args[1:]); err != nil {
@@ -55,6 +67,7 @@ func agentCmd(ctx context.Context, args []string) error {
 		fl.StringVar(&c.PodUID, "pod-uid", "", "this pod's UID")
 		fl.StringVar(&c.InventoryFile, "inventory", "", "inventory JSON from agent probe")
 		fl.StringVar(&c.BlobStatusFile, "blob-status", "", "blob status JSON from agent fetch, re-read every cycle")
+		fl.StringVar(&c.BlobDir, "blob-dir", "", "blob volume where vendor archives are staged to show their licence text; empty: licence texts report failed")
 		fl.StringVar(&c.SysRoot, "sys-root", "/sys", "sysfs root")
 		fl.StringVar(&c.PAPPLURL, "pappl-url", "", "PAPPL system URI, e.g. ipp://127.0.0.1:8001/ipp/system")
 		fl.StringVar(&c.DBusAddress, "dbus-address", device.DBusAddress, "D-Bus system bus for Avahi; empty disables DNS-SD browsing")

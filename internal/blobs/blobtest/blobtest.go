@@ -75,6 +75,10 @@ src=86-hpmud-hp_laserjet_1018.rules
 trg=$RULESDIR/86-hpmud-hp_laserjet_1018.rules
 `
 
+// License is the licence text at ./license.txt in Archive, the path the
+// catalog's hplip-plugin EULA names.
+const License = "synthetic licence\n"
+
 // Archive returns a makeself-style .run file whose payload holds Spec, an
 // arch-independent firmware file, a udev rule, and the lj, bb_soapht and
 // fax_marvell libraries built for goarch only. A goarch HPLIP has no name for
@@ -84,7 +88,7 @@ func Archive(goarch string) []byte {
 		{"./plugin.spec", Spec},
 		{"./hp_laserjet_1018.fw.gz", "synthetic firmware"},
 		{"./86-hpmud-hp_laserjet_1018.rules", "# synthetic udev rule\n"},
-		{"./license.txt", "synthetic licence\n"},
+		{"./license.txt", License},
 	}
 	if arch, ok := blobs.HPLIPArch(goarch); ok {
 		for _, lib := range []string{"lj", "bb_soapht", "fax_marvell"} {

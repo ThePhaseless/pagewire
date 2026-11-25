@@ -15,6 +15,8 @@
     --ink-faint: oklch(0.53 0.015 255);
     --rule: oklch(0.89 0.008 250);
     --rule-strong: oklch(0.8 0.012 250);
+    /* Borders that identify a control: at least 3:1 against paper, raised paper and problem tint. */
+    --control-border: oklch(0.6 0.015 250);
 
     --accent: oklch(0.5 0.15 250);
     --accent-hover: oklch(0.45 0.15 250);
@@ -73,6 +75,10 @@
     --rail-width-wide: 15rem;
     --tabbar-height: 4rem;
     --content-max: 72rem;
+    /* Extra bottom space while a toast is showing; base.css sets it. */
+    --toast-reserve: 0px;
+    /* Height of a sticky action bar while one is shown (Settings with unsaved edits). */
+    --bar-reserve: 0px;
 
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --dur-fast: 120ms;
@@ -96,6 +102,7 @@
       --ink-faint: oklch(0.68 0.015 250);
       --rule: oklch(0.3 0.02 255);
       --rule-strong: oklch(0.4 0.02 255);
+      --control-border: oklch(0.57 0.02 255);
 
       --accent: oklch(0.72 0.13 245);
       --accent-hover: oklch(0.78 0.12 245);

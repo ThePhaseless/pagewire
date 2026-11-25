@@ -49,6 +49,10 @@ type Core struct {
 	PAPPLURL  func() string              // nil or "": a desired Queue is reported as MsgNoPAPPLURL
 	Browse    Browser                    // nil: no DNS-SD browsing
 	Interval  time.Duration              // wait between successful cycles; 0: 5 s
+	// Stage is called every cycle with the desired StageEULAs (nil before the
+	// first DesiredState) and returns their current texts; nil: none reported.
+	// It must not block on downloads (Stager.Stage does not).
+	Stage func(ctx context.Context, refs []device.EULARef) []device.EULAText
 
 	minBackoff time.Duration
 	maxBackoff time.Duration
@@ -114,12 +118,12 @@ func (c *Core) Loop(ctx context.Context, report device.ReportFunc) {
 	}
 }
 
-// cycle checks presence, re-reads blob statuses, browses DNS-SD and
-// reconciles the desired PAPPL queue, in that order.
+// cycle checks presence, re-reads blob statuses, collects staged EULA texts,
+// browses DNS-SD and reconciles the desired PAPPL queue, in that order.
 func (c *Core) cycle(ctx context.Context) device.AgentReport {
 	r := device.AgentReport{
 		PodUID: c.PodUID, Inventory: c.Inventory, DevicePresent: true,
-		Services: []device.DNSSDService{}, Blobs: []device.BlobStatus{},
+		Services: []device.DNSSDService{}, Blobs: []device.BlobStatus{}, EULAs: []device.EULAText{},
 	}
 	if r.Inventory.Devices == nil {
 		r.Inventory.Devices = []device.USBDevice{}
@@ -133,8 +137,14 @@ func (c *Core) cycle(ctx context.Context) device.AgentReport {
 		}
 	}
 	types := device.BrowseTypes
+	var stage []device.EULARef
 	if c.desired != nil {
-		r.AppliedHash, types = c.desired.Hash, c.desired.Browse
+		r.AppliedHash, types, stage = c.desired.Hash, c.desired.Browse, c.desired.StageEULAs
+	}
+	if c.Stage != nil {
+		if e := c.Stage(ctx, stage); e != nil {
+			r.EULAs = e
+		}
 	}
 	if c.Browse != nil && len(types) > 0 {
 		s, err := c.Browse(ctx, types)
@@ -183,6 +193,7 @@ type Config struct {
 	PodUID          string        // --pod-uid
 	InventoryFile   string        // --inventory; "": empty inventory, always present
 	BlobStatusFile  string        // --blob-status, re-read every cycle; "": no blob reporting
+	BlobDir         string        // --blob-dir, where EULA texts are staged; "": every EULA fails with MsgNoBlobVolume
 	SysRoot         string        // --sys-root; "": /sys
 	PAPPLURL        string        // --pappl-url
 	DBusAddress     string        // --dbus-address; "": no DNS-SD browsing
@@ -240,6 +251,8 @@ func newRun(cfg Config) (*Core, device.ReportFunc, error) {
 			return b
 		}
 	}
+	stager := &Stager{Dir: cfg.BlobDir, Wake: core.Wake}
+	core.Stage = stager.Stage
 	if cfg.PAPPLURL != "" {
 		core.PAPPLURL = func() string { return cfg.PAPPLURL }
 	}

@@ -92,8 +92,11 @@ func noNetwork(t *testing.T) *http.Client {
 	})}
 }
 
-func accepted(t *testing.T) []device.BlobRef {
-	return []device.BlobRef{{ID: id, Version: version(t)}}
+// licenseSHA is the text sha256 of blobtest.License, the value acceptance records.
+var licenseSHA = blobs.TextSHA256([]byte(blobtest.License))
+
+func accepted(t *testing.T) []device.EULARef {
+	return []device.EULARef{{ID: id, Version: version(t), TextSHA256: licenseSHA}}
 }
 
 type fixture struct {
@@ -110,7 +113,7 @@ func setup(t *testing.T, goarch string) fixture {
 	return fixture{key: key, v: newVendor(t, a, blobtest.Sign(key, a)), dir: filepath.Join(t.TempDir(), "blobs")}
 }
 
-func (f fixture) fetch(t *testing.T, b catalog.Blob, acc []device.BlobRef, goarch string) device.BlobStatus {
+func (f fixture) fetch(t *testing.T, b catalog.Blob, acc []device.EULARef, goarch string) device.BlobStatus {
 	t.Helper()
 	return blobs.Fetch(context.Background(), b, acc, f.dir, blobs.Options{
 		Client: f.v.srv.Client(), Keys: openpgp.EntityList{f.key}, GOARCH: goarch,
@@ -130,10 +133,10 @@ func wantState(t *testing.T, st device.BlobStatus, state, msgPart string) {
 func TestNotAccepted(t *testing.T) {
 	f := setup(t, "arm64")
 	b := f.v.blob(t)
-	for name, acc := range map[string][]device.BlobRef{
+	for name, acc := range map[string][]device.EULARef{
 		"none":          nil,
-		"wrong version": {{ID: id, Version: "0.0.1"}},
-		"other blob":    {{ID: "other", Version: version(t)}},
+		"wrong version": {{ID: id, Version: "0.0.1", TextSHA256: licenseSHA}},
+		"other EULA":    {{ID: "other", Version: version(t), TextSHA256: licenseSHA}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := blobs.Fetch(context.Background(), b, acc, f.dir, blobs.Options{
@@ -147,11 +150,20 @@ func TestNotAccepted(t *testing.T) {
 	}
 }
 
-func TestAcceptedMatchesIgnoringOptional(t *testing.T) {
-	for _, opt := range []bool{false, true} {
-		f := setup(t, "arm64")
-		st := f.fetch(t, f.v.blob(t), []device.BlobRef{{ID: id, Version: version(t), Optional: opt}}, "arm64")
-		wantState(t, st, device.BlobInstalled, "")
+// TestAcceptedMatchesEULA uses a blob whose id differs from its EULA's, so
+// matching accepted refs on the blob id would fail it.
+func TestAcceptedMatchesEULA(t *testing.T) {
+	f := setup(t, "arm64")
+	b := f.v.blob(t)
+	b.ID = "renamed-blob"
+	opt := blobs.Options{Client: f.v.srv.Client(), Keys: openpgp.EntityList{f.key}, GOARCH: "arm64"}
+	st := blobs.Fetch(context.Background(), b, []device.EULARef{{ID: "renamed-blob", Version: version(t), TextSHA256: licenseSHA}}, f.dir, opt)
+	if st.State != device.BlobMissing {
+		t.Errorf("accepted ref named after the blob id: %+v, want missing", st)
+	}
+	st = blobs.Fetch(context.Background(), b, accepted(t), f.dir, opt)
+	if st.State != device.BlobInstalled || st.ID != "renamed-blob" {
+		t.Errorf("accepted ref named after the EULA: %+v, want installed", st)
 	}
 }
 
@@ -219,11 +231,19 @@ func TestSuccessLayout(t *testing.T) {
 				}
 				return nil
 			})
+			if txt, err := os.ReadFile(filepath.Join(root, ".printscan-text-sha256")); err != nil || strings.TrimSpace(string(txt)) != licenseSHA { //nolint:gosec // test temp dir
+				t.Errorf(".printscan-text-sha256 = %q (%v), want %s", txt, err, licenseSHA)
+			}
+			// The verified archive stays staged for the next start; nothing else.
 			entries, _ := os.ReadDir(f.dir)
 			for _, e := range entries {
-				if e.Name() != id {
+				if e.Name() != id && e.Name() != ".staging" {
 					t.Errorf("leftover %s in blob dir", e.Name())
 				}
+			}
+			staged, _ := os.ReadDir(filepath.Join(f.dir, ".staging", id, version(t)))
+			if len(staged) != 1 || staged[0].Name() != "plugin.run" {
+				t.Errorf("staging dir holds %v, want only plugin.run", staged)
 			}
 		})
 	}
@@ -265,6 +285,7 @@ func noNewlinePayload(t *testing.T) []byte {
 		for _, f := range []struct{ name, body string }{
 			{"./plugin.spec", "[products]\np=lj\n[lj]\nsrc=lj-$ARCH.so\ntrg=$HOMEDIR/prnt/plugins/lj-$ARCH.so\n"},
 			{"./lj-arm64.so", fmt.Sprint("lib ", i)},
+			{"./license.txt", blobtest.License},
 		} {
 			_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: f.name, Mode: 0o644, Size: int64(len(f.body))})
 			_, _ = tw.Write([]byte(f.body))
@@ -389,6 +410,7 @@ func malicious(t *testing.T, key *openpgp.Entity, evil tar.Header) []byte {
 	}
 	write(tar.Header{Typeflag: tar.TypeReg, Name: "./plugin.spec"}, blobtest.Spec)
 	write(tar.Header{Typeflag: tar.TypeReg, Name: "./lj-arm64.so"}, "lib")
+	write(tar.Header{Typeflag: tar.TypeReg, Name: "./license.txt"}, blobtest.License)
 	write(evil, "evil")
 	_ = tw.Close()
 	_ = gz.Close()

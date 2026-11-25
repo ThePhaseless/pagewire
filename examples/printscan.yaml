@@ -15,7 +15,7 @@ device:
   mode: usb                       # usb | simulated (test printer and SANE test scanner, no USB resource)
   usb:                            # optional selector when several USB devices are visible; only with mode usb (default: none)
     vendorId: "03f0"              # 4 lowercase hex digits
-    productId: "2b17"             # 4 lowercase hex digits
+    productId: "2754"             # 4 lowercase hex digits (03f0:2754 is the sim's default device)
     serial: ""                    # optional
   driver: auto                    # auto | ipp-usb | ps | hplip | gutenprint | ghostscript
   scanner: auto                   # auto | ipp-usb | airsane | none
@@ -37,6 +37,12 @@ scan:
   retentionDays: 7                # 0 (keep forever) to 3650
 
 licenses:
-  acceptedEulas:                  # each {id, version} must exist in the catalog; duplicates are rejected (default [])
-    - id: hplip-plugin
-      version: "3.24.4"
+  # Vendor licences you accepted (default []). Accept them in the wizard or in
+  # Settings, which show the vendor's own licence text and record its sha256.
+  # Each {id, version} must exist in the catalog and appear once. The blob is
+  # installed only while the vendor's text still has the recorded sha256.
+  acceptedEulas: []
+  # acceptedEulas:
+  #   - id: hplip-plugin
+  #     version: "3.24.4"
+  #     textSha256: <sha256 of the licence text, shown in Settings>

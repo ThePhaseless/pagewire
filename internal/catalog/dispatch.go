@@ -53,7 +53,8 @@ func (c *Catalog) Decide(inv device.Inventory, sel config.Device) (device.Decisi
 		Rule:          r.Name,
 		Device:        &d,
 	}
-	// The rule's EULAs stay with an override: the plan gives no rule for moving them.
+	// The rule's EULAs stay with a driver override: they belong to the matched
+	// device (the HP plug-in serves its scanner and firmware too), not the driver.
 	if sel.Driver != "" && sel.Driver != config.Auto {
 		dec.Printer = sel.Driver
 	}

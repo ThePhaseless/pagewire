@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # Lint test/integration too; CI runs one golangci-lint step.
+  build-tags:
+    - integration
+
 linters:
   default: standard
   enable:
@@ -20,11 +25,15 @@ linters:
           deny:
             - pkg: os/exec
               desc: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
+            - pkg: golang.org/x/sys/execabs
+              desc: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
     forbidigo:
       forbid:
-        - pattern: ^os\.StartProcess$
+        - pattern: ^(os|syscall)\.StartProcess$
           msg: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
         - pattern: ^(syscall|unix)\.(Exec|ForkExec)$
+          msg: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
+        - pattern: ^(syscall|unix)\.SYS_EXECVE(AT)?$
           msg: "printscan never runs commands: use IPP, eSCL, D-Bus or the Kubernetes API"
       analyze-types: true
   exclusions:

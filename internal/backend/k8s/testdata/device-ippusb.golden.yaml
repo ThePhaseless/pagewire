@@ -9,7 +9,7 @@ metadata:
   annotations:
     ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
     ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
-    printscan.dev/spec-hash: 30dd1ae3120817981731b80c7d298808da9a57af381db7fd836342633f0426f2
+    printscan.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
     reloader.stakater.com/auto: "false"
   ownerReferences:
   - apiVersion: apps/v1
@@ -30,7 +30,7 @@ spec:
         app.kubernetes.io/name: printscan-device
       annotations:
         printscan.dev/config-hash: 2a267da95715153768ef8607c02e9577bf23e6836338cbe4e2a678677b04f157
-        printscan.dev/spec-hash: 30dd1ae3120817981731b80c7d298808da9a57af381db7fd836342633f0426f2
+        printscan.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
     spec:
       volumes:
       - name: run-printscan
@@ -42,6 +42,9 @@ spec:
       - name: agent-token
         secret:
           secretName: printscan-agent-token
+      - name: blobs
+        persistentVolumeClaim:
+          claimName: printscan-blobs
       - name: ipp-usb-conf
         configMap:
           name: printscan-device
@@ -164,6 +167,8 @@ spec:
         - /run/printscan/inventory.json
         - --blob-status
         - /run/printscan/blobs.json
+        - --blob-dir
+        - /blobs
         env:
         - name: POD_UID
           valueFrom:
@@ -186,6 +191,8 @@ spec:
           mountPath: /run/printscan
         - name: run-dbus
           mountPath: /run/dbus
+        - name: blobs
+          mountPath: /blobs
         imagePullPolicy: IfNotPresent
         securityContext:
           capabilities:

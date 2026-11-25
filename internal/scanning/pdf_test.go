@@ -2,9 +2,11 @@ package scanning
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,11 +39,36 @@ func jpegBytes(t testing.TB, w, h int, gray bool) []byte {
 	return b.Bytes()
 }
 
+// memPage is an in-memory page that records whether it was closed.
+type memPage struct {
+	*bytes.Reader
+	open *int
+}
+
+func (p memPage) Close() error { *p.open--; return nil }
+
+// memPages serves pages from memory and fails the test when two are open at once.
+func memPages(t *testing.T, pages [][]byte) (func(int) (io.ReadSeekCloser, error), *int) {
+	t.Helper()
+	open := new(int)
+	return func(i int) (io.ReadSeekCloser, error) {
+		if *open != 0 {
+			t.Errorf("page %d opened while %d page(s) are still open", i, *open)
+		}
+		*open++
+		return memPage{bytes.NewReader(pages[i]), open}, nil
+	}, open
+}
+
 func TestWriteJPEGPDF(t *testing.T) {
 	var out bytes.Buffer
 	pages := [][]byte{jpegBytes(t, 300, 150, false), jpegBytes(t, 40, 20, true)}
-	if err := WriteJPEGPDF(&out, pages, 150); err != nil {
+	open, n := memPages(t, pages)
+	if err := WriteJPEGPDF(&out, len(pages), open, 150); err != nil {
 		t.Fatal(err)
+	}
+	if *n != 0 {
+		t.Errorf("%d page(s) left open", *n)
 	}
 	pdf := out.String()
 
@@ -99,11 +126,60 @@ func TestWriteJPEGPDFRejects(t *testing.T) {
 		"no pages": {nil, 300},
 		"zero dpi": {[][]byte{page}, 0},
 		"not jpeg": {[][]byte{[]byte("not a jpeg")}, 300},
+		"cmyk":     {[][]byte{cmykJPEG(t)}, 300},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := WriteJPEGPDF(&bytes.Buffer{}, tc.pages, tc.dpi); err == nil {
+			open, _ := memPages(t, tc.pages)
+			if err := WriteJPEGPDF(&bytes.Buffer{}, len(tc.pages), open, tc.dpi); err == nil {
 				t.Fatal("expected an error")
 			}
 		})
 	}
+	t.Run("rotation not a quarter turn", func(t *testing.T) {
+		open, _ := memPages(t, [][]byte{page})
+		if err := WriteRotatedJPEGPDF(&bytes.Buffer{}, 1, open, 300, 45); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+	t.Run("open fails", func(t *testing.T) {
+		boom := errors.New("boom")
+		err := WriteJPEGPDF(&bytes.Buffer{}, 1, func(int) (io.ReadSeekCloser, error) { return nil, boom }, 300)
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want boom", err)
+		}
+	})
+}
+
+func TestJPEGSupported(t *testing.T) {
+	for _, tc := range []struct {
+		img  []byte
+		want bool
+	}{
+		{jpegBytes(t, 8, 8, false), true},
+		{jpegBytes(t, 8, 8, true), true},
+		{cmykJPEG(t), false},
+	} {
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(tc.img))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := JPEGSupported(cfg.ColorModel); got != tc.want {
+			t.Errorf("JPEGSupported(%T) = %v, want %v", cfg.ColorModel, got, tc.want)
+		}
+	}
+}
+
+// cmykJPEG returns the header of an 8x8 four-component (CMYK) JPEG, enough
+// for jpeg.DecodeConfig; image/jpeg cannot encode CMYK.
+func cmykJPEG(t testing.TB) []byte {
+	t.Helper()
+	b := []byte{0xff, 0xd8, 0xff, 0xc0, 0, 20, 8, 0, 8, 0, 8, 4}
+	for id := range byte(4) {
+		b = append(b, id+1, 0x11, 0)
+	}
+	b = append(b, 0xff, 0xda, 0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 0, 63, 0)
+	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(b)); err != nil || cfg.ColorModel != color.CMYKModel {
+		t.Fatalf("cmykJPEG: DecodeConfig = %+v, %v; want a CMYK config", cfg, err)
+	}
+	return b
 }

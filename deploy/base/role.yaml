@@ -3,33 +3,41 @@ kind: Role
 metadata:
   name: printscan
   namespace: printing
+# Every rule names its objects except pods. The "printscan" resourceName is the owner
+# Deployment: if you change PRINTSCAN_K8S_OWNER, change it here too (two rules).
+# internal/backend/k8s/policy_test.go checks every client call against this file.
 rules:
-  # The device Deployment printscan-device (server-side apply, so patch) and the
-  # owner lookup of this control plane's own Deployment.
+  # Owner lookup of this control plane's own Deployment (PRINTSCAN_K8S_OWNER), and
+  # reads of the device Deployment.
   - apiGroups: [apps]
     resources: [deployments]
-    verbs: [get, list, watch, create, patch, delete]
-  # The device Deployment's ownerReference sets blockOwnerDeletion on the owner
-  # Deployment, which needs update on its finalizers subresource.
+    resourceNames: [printscan, printscan-device]
+    verbs: [get]
+  # The device Deployment. Server-side apply is a PATCH by name that may create
+  # the object, so it needs both patch and create on that name.
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [printscan-device]
+    verbs: [create, patch, delete]
+  # The device Deployment, ConfigMap and token Secret set blockOwnerDeletion in their
+  # ownerReference to the owner Deployment, which needs update on its finalizers.
   - apiGroups: [apps]
     resources: [deployments/finalizers]
+    resourceNames: [printscan]
     verbs: [update]
-  # The device ConfigMap printscan-device (ipp-usb, SANE and AirSane settings).
+  # The device ConfigMap (ipp-usb, SANE and AirSane settings), server-side applied.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, watch, create, patch, delete]
-  # The agent token Secret.
+    resourceNames: [printscan-device]
+    verbs: [get, create, patch, delete]
+  # The agent token Secret, server-side applied by name.
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [printscan-agent-token]
-    verbs: [get, patch]
-  # create cannot be scoped by resourceNames (the name is not known at authorization
-  # time), so it applies to any Secret in this namespace.
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [create]
-  # Observe lists the device pod; RestartPod lists the device pods and deletes them
-  # one by one by name, so deletecollection is not granted.
+    verbs: [get, create, patch]
+  # Device pods get generated names, so these cannot be scoped by resourceNames.
+  # Observe and RestartPod list them by label; RestartPod deletes them one by one by
+  # name, so neither deletecollection nor get or watch is granted.
   - apiGroups: [""]
     resources: [pods]
-    verbs: [get, list, watch, delete]
+    verbs: [list, delete]

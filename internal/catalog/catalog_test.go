@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -51,8 +52,15 @@ func TestIntegrity(t *testing.T) {
 	}
 	for _, e := range c.EULAs {
 		eulas = append(eulas, e.ID)
-		if e.Version == "" || e.Vendor == "" || e.Title == "" || e.URL == "" || e.Summary == "" {
+		if e.Version == "" || e.Vendor == "" || e.Title == "" || e.Summary == "" {
 			t.Errorf("EULA %s has empty metadata: %+v", e.ID, e)
+		}
+		// The text is shown from the verified vendor archive, never from the repo.
+		if e.Text.Blob == "" || e.Text.Path == "" {
+			t.Errorf("EULA %s has no text {blob, path}", e.ID)
+		}
+		if b, ok := c.Blob(e.Text.Blob); !ok || b.EULA != e.ID {
+			t.Errorf("EULA %s: text.blob %q is not a blob under this EULA", e.ID, e.Text.Blob)
 		}
 	}
 	for _, b := range c.Blobs {
@@ -60,11 +68,22 @@ func TestIntegrity(t *testing.T) {
 		if !slices.Contains(eulas, b.EULA) {
 			t.Errorf("blob %s: unknown EULA %q", b.ID, b.EULA)
 		}
+		// blobs.Fetch checks the accepted text in the archive it installs.
+		if e, ok := c.EULA(b.EULA); ok && e.Text.Blob != b.ID {
+			t.Errorf("blob %s: its EULA's text is in blob %q; Fetch reads it from the installed blob", b.ID, e.Text.Blob)
+		}
 		if !b.Enabled && b.DisabledMessage == "" {
 			t.Errorf("disabled blob %s has no disabledMessage", b.ID)
 		}
 		if b.Enabled && b.Verify.PGPKey == "" && b.Verify.SHA256 == "" {
 			t.Errorf("enabled blob %s has no verification", b.ID)
+		}
+		if b.Verify.SHA256 != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(b.Verify.SHA256) {
+			t.Errorf("blob %s: sha256 %q is not 64 lowercase hex", b.ID, b.Verify.SHA256)
+		}
+		// A signature alone is not enough: HP signs with DSA-1024 over SHA-1.
+		if b.Enabled && b.Verify.PGPSignatureURL != "" && b.Verify.SHA256 == "" {
+			t.Errorf("enabled blob %s has a signature but no pinned sha256", b.ID)
 		}
 		if b.Enabled && b.Verify.PGPKey != "" {
 			keys, err := c.BlobKey(b.ID)

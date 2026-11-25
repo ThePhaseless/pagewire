@@ -15,7 +15,7 @@ afterAll(() => {
 });
 
 describe("build", () => {
-  test("empties outdir except .keep and writes the app (A16: no inline script or style)", async () => {
+  test("empties outdir except .keep and writes the app with no inline script or style", async () => {
     const out = tmp();
     writeFileSync(join(out, ".keep"), "");
     writeFileSync(join(out, "old.js"), "stale");

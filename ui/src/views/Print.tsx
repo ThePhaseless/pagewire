@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Text } from "react-aria-components";
 import { api, problemMessage, uploadPrint } from "../api/client";
-import { useJobs, useStatus } from "../api/events";
+import { useConnected, useJobs, usePrinterNotFound, useStatus } from "../api/events";
 import {
   Button,
   Card,
@@ -84,16 +84,32 @@ export function formatAccepted(detected: string, supported: string[]): boolean {
 
 const formatName = (mime: string) => t.formats[mime] ?? mime;
 
+const PWG_MEDIA = /^([a-z0-9-]+)_([a-z0-9.-]+)_([0-9.]+)x([0-9.]+)(mm|in)$/;
+
+/** "iso_a4_210x297mm" → "A4"; anything unparsable is shown as is. */
+function mediaName(pwg: string): string {
+  const [, cls = "", name = ""] = PWG_MEDIA.exec(pwg) ?? [];
+  if (!name) return pwg;
+  return cls === "iso" || cls === "jis"
+    ? name.toUpperCase()
+    : name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 /** "iso_a4_210x297mm" → "A4 (210 × 297 mm)"; anything unparsable is shown as is. */
 export function mediaLabel(pwg: string): string {
-  const m = /^([a-z0-9-]+)_([a-z0-9.-]+)_([0-9.]+)x([0-9.]+)(mm|in)$/.exec(pwg);
-  if (!m) return pwg;
-  const [, cls = "", name = "", w = "", h = "", unit = ""] = m;
-  const pretty =
-    cls === "iso" || cls === "jis"
-      ? name.toUpperCase()
-      : name.charAt(0).toUpperCase() + name.slice(1);
-  return t.options.mediaSize(pretty, w, h, unit);
+  const [, , , w = "", h = "", unit = ""] = PWG_MEDIA.exec(pwg) ?? [];
+  return unit ? t.options.mediaSize(mediaName(pwg), w, h, unit) : pwg;
+}
+
+const OFFICE = /\.(docx?|odt|rtf|pages|xlsx?|ods|numbers|pptx?|odp|key)$/i;
+const PHOTO = /\.(heic|heif|webp|avif|gif|tiff?|bmp|dng|raw|png|jpe?g)$/i;
+
+/** How to turn a refused file into a printable one, judged by its name and detected format. */
+export function helpFor(name: string, detected: string | null | undefined): string | null {
+  if (OFFICE.test(name)) return t.help.document;
+  if (PHOTO.test(name) || detected?.startsWith("image/")) return t.help.photo;
+  if (detected === "text/plain") return t.help.text;
+  return null;
 }
 
 const jobTone: Record<Job["state"], Tone> = {
@@ -222,9 +238,15 @@ function JobList({ available }: { available: boolean }) {
 
 export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } = {}) {
   const status = useStatus();
+  const connected = useConnected();
+  const notFound = usePrinterNotFound();
   const printer = status?.printer;
   const available = printer?.available ?? false;
-  const formats = printer?.formats ?? [];
+  // What the printer takes as is, plus what printscan converts for it.
+  const formats = [
+    ...(printer?.formats ?? []),
+    ...(printer?.convertedFormats ?? []).map((c) => c.from),
+  ];
   const config = usePrintConfig(status?.config.etag, status?.config.state);
   const maxUploadMiB = config?.print.maxUploadMiB ?? fallback.maxUploadMiB;
 
@@ -268,7 +290,8 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
     (i) => i.format !== undefined && problemFor(i, formats, maxUploadMiB) === null,
   );
   const checking = items.some((i) => i.format === undefined);
-  const canPrint = available && copiesValid && !sending && !checking && printable.length > 0;
+  // Not `sending`: the button shows pending instead, so keyboard focus stays on it.
+  const canPrint = available && connected && copiesValid && !checking && printable.length > 0;
 
   async function printAll() {
     setSending(true);
@@ -314,7 +337,8 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
                 </LinkButton>
               }
             >
-              {status.device.message || t.unavailable.waiting}
+              <p>{status.device.message || t.unavailable.waiting}</p>
+              {notFound && <p>{strings.plugInHint}</p>}
             </EmptyState>
           )}
         </Card>
@@ -335,10 +359,10 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
             }}
           >
             <Icon name="upload" size={28} className="print-drop-icon" />
-            <Text slot="label" className="print-drop-label">
+            <Text slot="label" className="print-drop-label print-drop-hint">
               {t.files.drop}
             </Text>
-            <span className="print-subtle">{t.files.or}</span>
+            <span className="print-subtle print-drop-hint">{t.files.or}</span>
             <FileTrigger allowsMultiple onSelect={(list) => addFiles(Array.from(list ?? []))}>
               <Button variant="secondary" isDisabled={!available}>
                 {t.files.choose}
@@ -358,6 +382,8 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
             <ul className="print-list">
               {items.map((item) => {
                 const problem = item.error ?? problemFor(item, formats, maxUploadMiB);
+                const refused = item.format != null && !formatAccepted(item.format, formats);
+                const help = refused ? helpFor(item.file.name, item.format) : null;
                 return (
                   <li
                     key={item.key}
@@ -379,6 +405,7 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
                           <span className="tabular">({t.files.size(item.file.size)})</span>
                         </span>
                       )}
+                      {help && <span className="print-subtle">{help}</span>}
                     </span>
                     <Button
                       variant="quiet"
@@ -395,13 +422,6 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
               })}
             </ul>
           )}
-
-          <div className="print-submit">
-            <Button variant="primary" isDisabled={!canPrint} onPress={() => void printAll()}>
-              <Icon name="print" size={18} />
-              {t.submit(printable.length, copiesValid ? options.copies : 1)}
-            </Button>
-          </div>
         </Card>
 
         <Card title={t.options.title} className="print-options">
@@ -447,6 +467,25 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
             }))}
           />
         </Card>
+      </div>
+
+      <div className="print-submit">
+        <p className="print-subtle">
+          {t.summary(
+            copiesValid ? options.copies : 1,
+            mediaName(options.media),
+            t.options.sides[options.sides].toLowerCase(),
+          )}
+        </p>
+        <Button
+          variant="primary"
+          isDisabled={!canPrint && !sending}
+          isPending={sending}
+          onPress={() => void printAll()}
+        >
+          <Icon name="print" size={18} />
+          {t.submit(printable.length, items.length, copiesValid ? options.copies : 1)}
+        </Button>
       </div>
 
       <JobList available={available} />

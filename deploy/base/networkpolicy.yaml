@@ -9,22 +9,25 @@ spec:
       app.kubernetes.io/name: printscan
   policyTypes: [Ingress]
   ingress:
-    # Web UI and API from the ingress controller's namespace only.
+    # Web UI and API from the ingress controller's namespace only. Set the name of
+    # the namespace your ingress controller runs in.
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: traefik
+              kubernetes.io/metadata.name: ingress-controller  # CHANGE ME
       ports:
         - port: 8080
           protocol: TCP
     # Agent reports. The agent runs in the hostNetwork device pod, so its traffic does
     # not come from a pod IP that a podSelector could match. Depending on the CNI it
-    # arrives with the node's LAN address (192.168.1.0/24 here) or with the node's
-    # address inside the pod network (example pod CIDR 10.244.0.0/16). Both are listed;
-    # check which one your CNI uses and drop the other.
+    # arrives with the node's LAN address or with the node's address inside the pod
+    # network (example pod CIDR 10.244.0.0/16). Both are listed; check which one your
+    # CNI uses and drop the other. 192.0.2.0/24 is a documentation range that matches
+    # nothing: replace it with your nodes' LAN subnet, or narrow it to the USB node's
+    # address as a /32.
     - from:
         - ipBlock:
-            cidr: 192.168.1.0/24
+            cidr: 192.0.2.0/24  # CHANGE ME
         - ipBlock:
             cidr: 10.244.0.0/16
       ports:

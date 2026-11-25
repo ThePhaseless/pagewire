@@ -7,3 +7,4 @@ ui/e2e/artifacts/
 .cache/
 *.test
 coverage.*
+.worktrees/

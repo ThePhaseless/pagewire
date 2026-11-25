@@ -3,7 +3,9 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    inline-size: 100%;
     max-inline-size: 48rem;
+    margin-inline: auto;
   }
 
   .setup-view .ui-page-header {
@@ -16,7 +18,8 @@
     font-weight: var(--weight-medium);
   }
 
-  /* Progress: one bar segment per step; under 40rem only the current step keeps its label. */
+  /* Progress: one bar segment per step. Labels wrap; under 40rem only the current step keeps its
+     label, and its segment grows to fit it. */
   .setup-view .setup-steps {
     list-style: none;
     padding: 0;
@@ -65,12 +68,14 @@
   }
 
   .setup-view .setup-step-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-inline-size: 0;
   }
 
   @media (width < 40rem) {
+    .setup-view .setup-steps li[aria-current="step"] {
+      flex-grow: 4;
+    }
+
     .setup-view .setup-steps li:not([aria-current="step"]) .setup-step-label {
       position: absolute;
       inline-size: 1px;

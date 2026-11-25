@@ -147,7 +147,7 @@ describe("generate", () => {
     );
   });
 
-  test("date-time accepts Z, offsets and fractional seconds (A10)", async () => {
+  test("date-time accepts Z, offsets and fractional seconds", async () => {
     const dt = evalExpr({ type: "string", format: "date-time" });
     for (const ok of [
       "2026-11-24T17:00:00Z",

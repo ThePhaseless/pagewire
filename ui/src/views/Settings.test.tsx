@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createEventStore, type EventStore, EventsContext } from "../api/events";
 import type { Config, ConfigResponse, Setup as SetupDTO, Status } from "../gen/api";
+import { navigate } from "../router";
 import { Settings } from "./Settings";
 
+const SHA = "c".repeat(64);
 const HPLIP = { id: "hplip-plugin", version: "3.24.4" };
+const HPLIP_ACCEPTED = { ...HPLIP, textSha256: SHA };
 
 function config(over: Partial<Config> = {}): Config {
   return {
@@ -30,7 +33,7 @@ function config(over: Partial<Config> = {}): Config {
       defaults: { source: "platen", resolution: 300, colorMode: "color", format: "pdf" },
       retentionDays: 7,
     },
-    licenses: { acceptedEulas: [HPLIP] },
+    licenses: { acceptedEulas: [HPLIP_ACCEPTED] },
     ...over,
   };
 }
@@ -61,7 +64,8 @@ const setup: SetupDTO = {
       ...HPLIP,
       title: "HP Linux Imaging and Printing proprietary plug-in",
       vendor: "HP",
-      url: "https://example.com/licence",
+      state: "available",
+      textSha256: SHA,
       summary: "Needed by some HP printers.",
       required: false,
     },
@@ -92,6 +96,7 @@ const status = (blobs: Status["device"]["blobs"]): Status => ({
     state: "unknown",
     reasons: [],
     formats: [],
+    convertedFormats: [],
     media: [],
     markers: [],
   },
@@ -123,6 +128,8 @@ type Call = { method: string; url: string; headers: Record<string, string>; body
 let calls: Call[];
 let getConfig: () => Response;
 let writes: Array<() => Response>;
+// The sha256 of the licence text the agent reports now.
+let eulaSha: string;
 const realFetch = globalThis.fetch;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -132,6 +139,7 @@ const problem = (status: number, type: string, errors: unknown[] = []) =>
 beforeEach(() => {
   calls = [];
   writes = [];
+  eulaSha = SHA;
   getConfig = () => json(applied("e1"));
   globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
@@ -143,6 +151,17 @@ beforeEach(() => {
       body: init.body ? JSON.parse(String(init.body)) : undefined,
     });
     if (url.endsWith("/api/v1/setup")) return json(setup);
+    if (url.endsWith("/api/v1/eulas/hplip-plugin"))
+      return json({
+        ...HPLIP,
+        title: "HP Linux Imaging and Printing proprietary plug-in",
+        vendor: "HP",
+        summary: "Needed by some HP printers.",
+        state: "available",
+        message: "",
+        textSha256: eulaSha,
+        text: `Licence ${eulaSha.slice(0, 4)}`,
+      });
     if (url.endsWith("/api/v1/config") && method === "GET") return getConfig();
     if (url.endsWith("/api/v1/config")) {
       const next = writes.shift();
@@ -254,6 +273,47 @@ describe("Settings form", () => {
     await press(button("Reset"));
     expect(field("Name").value).toBe("Living room printer");
   });
+
+  test("unsaved edits keep Reset and Save in a sticky bar that says so", async () => {
+    await mount();
+    const bar = () => button("Save").closest(".settings-actions") as HTMLElement;
+    expect(bar().hasAttribute("data-sticky")).toBe(false);
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    await type("Name", "Office");
+    expect(bar().hasAttribute("data-sticky")).toBe(true);
+    expect(within(bar()).getByText("Unsaved changes")).toBeTruthy();
+    FakeEventSource.last.emit("config", { etag: "e9" });
+    expect(await within(bar()).findByText(/The file changed on disk/)).toBeTruthy();
+  });
+
+  test("leaving with unsaved edits asks first, on links and on page unload", async () => {
+    window.history.replaceState(null, "", "/settings");
+    try {
+      await mount();
+      const unload = () => {
+        const e = new Event("beforeunload", { cancelable: true });
+        window.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      expect(unload()).toBe(false);
+      await type("Name", "Office");
+      expect(unload()).toBe(true);
+
+      act(() => navigate("/print"));
+      let dialog = await screen.findByRole("alertdialog", { name: "Leave without saving?" });
+      expect(window.location.pathname).toBe("/settings");
+      await press(button("Keep editing", dialog));
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      expect(field("Name").value).toBe("Office");
+
+      act(() => navigate("/print"));
+      dialog = await screen.findByRole("alertdialog", { name: "Leave without saving?" });
+      await press(button("Leave", dialog));
+      expect(window.location.pathname).toBe("/print");
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
 });
 
 describe("412 with a valid file", () => {
@@ -269,12 +329,17 @@ describe("412 with a valid file", () => {
 
   test("lists each changed field and Keep mine re-sends the patch with the new ETag", async () => {
     const dialog = await conflict();
-    const row = within(dialog).getByRole("listitem");
+    const row = within(dialog).getAllByRole("listitem")[0] as HTMLElement;
     expect(row.textContent).toContain("Name");
     expect(row.textContent).toContain("Yours");
     expect(row.textContent).toContain("Office");
     expect(row.textContent).toContain("In the file now");
     expect(row.textContent).toContain("Kitchen");
+    // Fields only the other edit changed are listed too.
+    const also = within(dialog).getByRole("list", { name: "Also changed in the file" });
+    expect(also.textContent).toContain("Location");
+    expect(also.textContent).toContain("Hall");
+    expect(also.textContent).not.toContain("Name");
 
     writes.push(() => json(applied("e3", { ...theirs, name: "Office" })));
     await press(button("Keep mine", dialog));
@@ -295,9 +360,9 @@ describe("412 with a valid file", () => {
     expect((button("Save") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  test("Review loads the file's values and marks your edits", async () => {
+  test("Show the file's values loads them and marks your edits", async () => {
     const dialog = await conflict();
-    await press(button("Review", dialog));
+    await press(button("Show the file's values", dialog));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(field("Name").value).toBe("Kitchen");
     expect(document.body.textContent).toContain("Name: Office");
@@ -345,7 +410,7 @@ describe("412 with an invalid file", () => {
     const dialog = await conflict();
     await press(button("Cancel", dialog));
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.getByRole("heading", { name: "The config file has errors" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "The settings file has errors" })).toBeTruthy();
     expect(writesOf("PUT")).toHaveLength(0);
   });
 });
@@ -419,7 +484,9 @@ describe("invalid file", () => {
   test("shows the errors and a download link, without restore when there is no last good", async () => {
     getConfig = () => json(invalid("e5"));
     await mount();
-    expect(await screen.findByRole("heading", { name: "The config file has errors" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "The settings file has errors" }),
+    ).toBeTruthy();
     expect(document.body.textContent).toContain("Line 3, column 1");
     const link = screen.getByRole("link", { name: "Download the file" });
     expect(link.getAttribute("href")).toBe("/api/v1/config/raw");
@@ -461,7 +528,7 @@ describe("licences", () => {
     );
     expect(await screen.findByText("Download failed: HP plug-in has no arm64 build")).toBeTruthy();
     const box = screen.getByRole("checkbox", {
-      name: /I have read and accept/,
+      name: /I accept the HP .* licence shown above/,
     }) as HTMLInputElement;
     expect(box.checked).toBe(true);
     act(() => {
@@ -472,19 +539,38 @@ describe("licences", () => {
     expect(writesOf("PATCH")[0]?.body).toEqual({ licenses: { acceptedEulas: [] } });
   });
 
-  test("accepting sends the EULA id and version", async () => {
+  test("accepting sends the EULA id, version and the sha256 of the text shown", async () => {
     getConfig = () => json(applied("e1", config({ licenses: { acceptedEulas: [] } })));
     await mount();
-    const box = (await screen.findByRole("checkbox", {
-      name: /I have read and accept/,
-    })) as HTMLInputElement;
+    await screen.findByRole("region", { name: /licence text/ });
+    const box = screen.getByRole("checkbox", {
+      name: /I accept the HP .* licence shown above/,
+    }) as HTMLInputElement;
     expect(box.checked).toBe(false);
     act(() => {
       fireEvent.click(box);
     });
     writes.push(() => json(applied("e2")));
     await press(button("Save"));
-    expect(writesOf("PATCH")[0]?.body).toEqual({ licenses: { acceptedEulas: [HPLIP] } });
+    expect(writesOf("PATCH")[0]?.body).toEqual({ licenses: { acceptedEulas: [HPLIP_ACCEPTED] } });
+  });
+
+  test("a changed licence text asks again and accepting replaces the old entry", async () => {
+    eulaSha = "d".repeat(64);
+    await mount();
+    await screen.findByText(/licence text has changed since you accepted it/);
+    const box = screen.getByRole("checkbox", {
+      name: /I accept the HP .* licence shown above/,
+    }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    act(() => {
+      fireEvent.click(box);
+    });
+    writes.push(() => json(applied("e2")));
+    await press(button("Save"));
+    expect(writesOf("PATCH")[0]?.body).toEqual({
+      licenses: { acceptedEulas: [{ ...HPLIP, textSha256: eulaSha }] },
+    });
   });
 });
 

@@ -1,9 +1,9 @@
 // The Scan page: settings limited to what the scanner offers, a Scan button, live pages as
 // thumbnails with a full-size preview, the download, and the scan history with delete.
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { Button as AriaButton } from "react-aria-components";
 import { api, ProblemError, problemMessage } from "../api/client";
-import { EventsContext, useStatus } from "../api/events";
+import { EventsContext, useConnected, usePrinterNotFound, useStatus } from "../api/events";
 import {
   Button,
   Card,
@@ -150,18 +150,26 @@ function useCaps(available: boolean) {
   return { caps: available ? caps : null, error: available ? error : null, retry };
 }
 
-/** GET /scans once and after every SSE reconnect, with `scan` events merged by id. */
+/**
+ * GET /scans once, after every SSE reconnect and on retry, with `scan` events merged by id. A scan
+ * this page saw running that ends completed or failed is announced in a toast.
+ */
 function useScans() {
   const store = useContext(EventsContext);
   const [scans, setScans] = useState<ScanDTO[]>([]);
   const [error, setError] = useState<unknown>(null);
+  const [attempt, setAttempt] = useState(0);
+  // The last state seen per scan id, to tell a scan finishing from one loaded finished.
+  const seen = useRef(new Map<string, ScanDTO["state"]>());
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is a refetch trigger
   useEffect(() => {
     let live = true;
     const load = () =>
       api.getScans().then(
         (list) => {
           if (!live) return;
+          for (const s of list) seen.current.set(s.id, s.state);
           setScans(mergeScans([], list));
           setError(null);
         },
@@ -171,15 +179,38 @@ function useScans() {
       );
     void load();
     const offReconnect = store.onReconnect(() => void load());
-    const offScan = store.on("scan", (s) => setScans((prev) => mergeScans(prev, [s])));
+    const offScan = store.on("scan", (s) => {
+      const before = seen.current.get(s.id);
+      seen.current.set(s.id, s.state);
+      if (before === "scanning" && s.state === "completed")
+        toast({ title: t.ready(s.pages), tone: "ok" });
+      if (before === "scanning" && s.state === "failed")
+        toast({ title: t.failed, description: s.error ?? undefined, tone: "problem" });
+      setScans((prev) => mergeScans(prev, [s]));
+    });
     return () => {
       live = false;
       offReconnect();
       offScan();
     };
-  }, [store]);
+  }, [store, attempt]);
 
-  return { scans, setScans, error };
+  /** Adds or updates scans this page got from its own requests. */
+  const add = (list: ScanDTO[]) => {
+    for (const s of list) if (!seen.current.has(s.id)) seen.current.set(s.id, s.state);
+    // A scan event may already have brought a newer state of the same scan.
+    setScans((prev) =>
+      mergeScans(
+        prev,
+        list.filter((s) => !prev.some((p) => p.id === s.id)),
+      ),
+    );
+  };
+  const retry = () => {
+    setError(null);
+    setAttempt((n) => n + 1);
+  };
+  return { scans, setScans, add, error, retry };
 }
 
 function Thumbnails({ scan }: { scan: ScanDTO }) {
@@ -211,18 +242,28 @@ function Thumbnails({ scan }: { scan: ScanDTO }) {
         title={preview === null ? "" : t.result.pageOf(preview, scan.pages)}
       >
         {preview !== null && (
-          <img
-            className="scan-preview"
-            src={api.scanPageUrl(scan.id, preview)}
-            alt={t.result.page(preview)}
-          />
+          <>
+            <img
+              className="scan-preview"
+              src={api.scanPageUrl(scan.id, preview)}
+              alt={t.result.page(preview)}
+            />
+            <div className="scan-dialog-actions">
+              <Button isDisabled={preview <= 1} onPress={() => setPreview(preview - 1)}>
+                {t.result.previous}
+              </Button>
+              <Button isDisabled={preview >= scan.pages} onPress={() => setPreview(preview + 1)}>
+                {t.result.next}
+              </Button>
+            </div>
+          </>
         )}
       </Dialog>
     </>
   );
 }
 
-function Result({ scan }: { scan: ScanDTO | undefined }) {
+function Result({ scan, onCancel }: { scan: ScanDTO | undefined; onCancel: (id: string) => void }) {
   if (!scan) {
     return (
       <Card title={t.result.title} className="scan-result">
@@ -237,19 +278,23 @@ function Result({ scan }: { scan: ScanDTO | undefined }) {
       title={t.result.title}
       className="scan-result"
       actions={
-        scan.state === "completed" && (
+        scan.state === "completed" ? (
           <LinkButton variant="secondary" href={api.scanDownloadUrl(scan.id)} download>
             <Icon name="download" size={18} />
             {downloadLabel(scan)}
           </LinkButton>
+        ) : (
+          scan.state === "scanning" && <Button onPress={() => onCancel(scan.id)}>{t.cancel}</Button>
         )
       }
     >
       <p className="scan-subtle">
-        {t.result.meta(
-          formatTime(scan.createdAt),
-          t.history.summary(scan.pages, t.options.format[scan.format]),
-        )}
+        {scan.state === "scanning"
+          ? formatTime(scan.createdAt)
+          : t.result.meta(
+              formatTime(scan.createdAt),
+              t.history.summary(scan.pages, t.options.format[scan.format]),
+            )}
       </p>
       {scan.state === "scanning" && <ProgressBar label={t.scanning(scan.pages)} />}
       {scan.state === "failed" && (
@@ -265,10 +310,12 @@ function Result({ scan }: { scan: ScanDTO | undefined }) {
 
 export function Scan() {
   const status = useStatus();
+  const connected = useConnected();
+  const notFound = usePrinterNotFound();
   const available = status?.scanner.available ?? false;
   const config = useConfig(status?.config.etag, status?.config.state);
   const { caps, error: capsError, retry: retryCaps } = useCaps(available);
-  const { scans, setScans, error: listError } = useScans();
+  const { scans, setScans, add, error: listError, retry: retryList } = useScans();
 
   const [overrides, setOverrides] = useState<Partial<ScanSettings>>({});
   const want: ScanSettings = { ...fallback, ...config?.scan.defaults, ...overrides };
@@ -283,9 +330,10 @@ export function Scan() {
 
   const busy =
     starting || status?.scanner.state === "processing" || scans.some((s) => s.state === "scanning");
+  // Not `busy`: the button shows pending instead, so keyboard focus stays on it.
   const canScan =
     available &&
-    !busy &&
+    connected &&
     o !== null &&
     o.sources.length > 0 &&
     o.resolutions.length > 0 &&
@@ -297,8 +345,7 @@ export function Scan() {
     setStartError(null);
     try {
       const s = await api.startScan(settings);
-      // A scan event may already have brought a newer state of this scan.
-      setScans((prev) => (prev.some((p) => p.id === s.id) ? prev : mergeScans(prev, [s])));
+      add([s]);
       setSelectedId(s.id);
     } catch (err) {
       setStartError(
@@ -311,11 +358,24 @@ export function Scan() {
 
   async function remove(id: string) {
     try {
-      await api.deleteScan(id);
-      setScans((prev) => prev.filter((s) => s.id !== id));
-      toast({ title: t.confirmDelete.deleted, tone: "ok" });
+      const running = await api.deleteScan(id);
+      // A scan that was still running is canceled instead, and stays listed.
+      if (running) add([running]);
+      else {
+        setScans((prev) => prev.filter((s) => s.id !== id));
+        toast({ title: t.confirmDelete.deleted, tone: "ok" });
+      }
     } catch (err) {
       toast({ title: t.confirmDelete.failed, description: problemMessage(err), tone: "problem" });
+    }
+  }
+
+  async function cancel(id: string) {
+    try {
+      // 202: the `scan` event brings the canceled state.
+      await api.deleteScan(id);
+    } catch (err) {
+      toast({ title: t.cancelFailed, description: problemMessage(err), tone: "problem" });
     }
   }
 
@@ -337,7 +397,8 @@ export function Scan() {
                 </LinkButton>
               }
             >
-              {status.device.message || t.unavailable.waiting}
+              <p>{status.device.message || t.unavailable.waiting}</p>
+              {notFound && <p>{strings.plugInHint}</p>}
             </EmptyState>
           )}
         </Card>
@@ -385,19 +446,34 @@ export function Scan() {
           />
           {startError && <InlineError>{startError}</InlineError>}
           <div className="scan-submit">
-            <Button variant="primary" isDisabled={!canScan} onPress={() => void start()}>
+            <Button
+              variant="primary"
+              isDisabled={!canScan && !busy}
+              isPending={busy}
+              onPress={() => void start()}
+            >
               <Icon name="scan" size={18} />
               {t.submit}
             </Button>
           </div>
         </Card>
 
-        <Result scan={shown} />
+        <Result scan={shown} onCancel={(id) => void cancel(id)} />
       </div>
 
       <Card title={t.history.title} className="scan-history">
         {config && <p className="scan-subtle">{t.history.retention(config.scan.retentionDays)}</p>}
-        {listError ? <InlineError>{t.history.loadFailed}</InlineError> : null}
+        {listError ? (
+          <InlineError action={<Button onPress={retryList}>{strings.buttons.retry}</Button>}>
+            {t.history.loadFailed}
+          </InlineError>
+        ) : (
+          scans.length === 0 && (
+            <EmptyState icon="scan" title={t.history.empty}>
+              {t.history.emptyBody}
+            </EmptyState>
+          )
+        )}
         {scans.length > 0 && (
           <ul className="scan-list" aria-label={t.history.title}>
             {scans.map((s) => {
@@ -407,7 +483,9 @@ export function Scan() {
                   <span className="scan-row-main">
                     <span className="tabular">{when}</span>
                     <span className="scan-subtle">
-                      {t.history.summary(s.pages, t.options.format[s.format])}
+                      {s.state === "scanning"
+                        ? t.scanning(s.pages)
+                        : t.history.summary(s.pages, t.options.format[s.format])}
                     </span>
                   </span>
                   <StatusBadge tone={stateTone[s.state]} pulse={s.state === "scanning"}>
