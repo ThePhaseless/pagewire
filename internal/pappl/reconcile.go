@@ -24,7 +24,10 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 
 	dev := Device{URI: want.DeviceURI}
 	if dev.URI == "" {
-		dev.URI = settledURI(printers, want, inv)
+		dev.URI = settledURI(printers, want, inv, c.picked(want))
+		if u := printerDevice(inv); dev.URI != "" && u != nil {
+			dev.DeviceID = u.DeviceID
+		}
 	}
 	if dev.URI == "" {
 		devs, err := c.FindDevices(ctx)
@@ -32,7 +35,9 @@ func Reconcile(ctx context.Context, c *Client, want device.QueueSpec, inv device
 			return failed(err.Error())
 		}
 		var ok bool
-		if dev, ok = pickDevice(devs, want.Schemes, inv); !ok {
+		dev, ok = pickDevice(devs, want.Schemes, inv)
+		c.setPicked(want, dev.URI)
+		if !ok {
 			r := device.QueueResult{State: device.QueuePending, Message: "printer not listed by the printer application yet"}
 			if p := byName(printers, want.Name); p != nil {
 				r.PrinterURI = p.URI // keep the existing queue usable through a transient miss
@@ -176,20 +181,46 @@ func create(ctx context.Context, c *Client, want device.QueueSpec, dev Device, u
 	return errText(err)
 }
 
-// settledURI returns the device URI of the queue named want.Name when it is on
-// the preferred scheme and, where the inventory knows a serial, on that serial.
-// Reconcile then leaves Find-Devices unasked: each call makes the application
-// run every CUPS backend and claim the printer's USB interface, so asking on
-// every cycle competes with the job that is printing.
-func settledURI(printers []Printer, want device.QueueSpec, inv device.Inventory) string {
+// settledURI returns the device URI of the queue named want.Name when it is a
+// CUPS backend URI on the inventory printer's serial (none matches none), and
+// either on the preferred scheme or on picked, this client's last Find-Devices
+// choice for want. Reconcile then leaves Find-Devices unasked: each call makes
+// the application run every CUPS backend and claim the printer's USB
+// interface, so asking on every cycle competes with the job that is printing.
+func settledURI(printers []Printer, want device.QueueSpec, inv device.Inventory, picked string) string {
 	p := byName(printers, want.Name)
-	if p == nil || len(want.Schemes) == 0 || scheme(p.DeviceURI) != want.Schemes[0] {
+	if p == nil || len(want.Schemes) == 0 || !strings.HasPrefix(p.DeviceURI, "cups:") {
 		return ""
 	}
-	if u := printerDevice(inv); u != nil && u.Serial != "" && !strings.EqualFold(serialOf(p.DeviceURI), u.Serial) {
+	if scheme(p.DeviceURI) != want.Schemes[0] && p.DeviceURI != picked {
+		return ""
+	}
+	if u := printerDevice(inv); u != nil && !strings.EqualFold(serialOf(p.DeviceURI), u.Serial) {
 		return ""
 	}
 	return p.DeviceURI
+}
+
+// picked returns the device URI the last Find-Devices offered for want's name
+// and schemes, or "". The inventory is constant for the agent's life, so a
+// listing that offered nothing better than a lesser scheme stays settled.
+func (c *Client) picked(want device.QueueSpec) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.picks[pickKey(want)]
+}
+
+func (c *Client) setPicked(want device.QueueSpec, uri string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.picks == nil {
+		c.picks = map[string]string{}
+	}
+	c.picks[pickKey(want)] = uri
+}
+
+func pickKey(want device.QueueSpec) string {
+	return want.Name + "\x00" + strings.Join(want.Schemes, "\x00")
 }
 
 // pickDevice chooses the Find-Devices entry for the inventory's printer. The

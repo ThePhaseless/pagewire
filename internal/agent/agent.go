@@ -54,12 +54,13 @@ type Core struct {
 	// It must not block on downloads (Stager.Stage does not).
 	Stage func(ctx context.Context, refs []device.EULARef) []device.EULAText
 
-	minBackoff time.Duration
-	maxBackoff time.Duration
-	after      func(time.Duration) <-chan time.Time
-	wake       chan struct{}
-	desired    *device.DesiredState
-	failing    map[string]bool
+	minBackoff  time.Duration
+	maxBackoff  time.Duration
+	papplClient *pappl.Client // reused while PAPPLURL stays the same: it remembers the last Find-Devices choice
+	after       func(time.Duration) <-chan time.Time
+	wake        chan struct{}
+	desired     *device.DesiredState
+	failing     map[string]bool
 }
 
 // NewCore returns a Core reporting inv as pod podUID every 5 s.
@@ -170,7 +171,10 @@ func (c *Core) reconcile(ctx context.Context, q device.QueueSpec) device.QueueRe
 	}
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
-	return pappl.Reconcile(ctx, pappl.New(url), q, c.Inventory)
+	if c.papplClient == nil || c.papplClient.URI() != url {
+		c.papplClient = pappl.New(url)
+	}
+	return pappl.Reconcile(ctx, c.papplClient, q, c.Inventory)
 }
 
 // problem logs a recurring failure only when it starts and when it ends, so a

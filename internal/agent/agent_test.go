@@ -454,6 +454,24 @@ func TestQueueReconcile(t *testing.T) {
 	}
 }
 
+// The agent keeps one PAPPL client, so a queue settled on the only listed,
+// lesser scheme asks Find-Devices once, not every cycle.
+func TestQueueLesserSchemeAsksFindDevicesOnce(t *testing.T) {
+	fake, url := newPAPPL(t)
+	q := queue("iso_a4_210x297mm")
+	q.Schemes = []string{"hp", "usb"}
+	p := newPlane(device.DesiredState{Queue: q})
+	core := NewCore("pod", hpInventory())
+	core.PAPPLURL = func() string { return url }
+	start(t, core, p.report)
+	for range 3 {
+		waitReport(t, p.reports, "queue ok", func(r device.AgentReport) bool { return r.Queue != nil && r.Queue.State == device.QueueOK })
+	}
+	if n := fake.FindDevicesCalls(); n != 1 {
+		t.Errorf("Find-Devices calls = %d, want 1", n)
+	}
+}
+
 func TestQueueReconcileError(t *testing.T) {
 	_, url := newPAPPL(t)
 	q := queue("iso_a4_210x297mm")

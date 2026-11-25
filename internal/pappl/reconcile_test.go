@@ -143,6 +143,65 @@ func TestQueueOnLesserSchemeRediscovers(t *testing.T) {
 	}
 }
 
+// An hplip queue whose hp backend never lists the printer settles on usb:
+// the listing offered nothing better, and it stays the same for the agent's life.
+func TestQueueOnOnlyListedLesserSchemeSettles(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices()[:1], Drivers: hpDrivers})
+	w := want("P")
+	w.Schemes = []string{"hp", "usb"}
+	for range 4 {
+		mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	}
+	if n := fake.FindDevicesCalls(); n != 1 {
+		t.Errorf("Find-Devices calls = %d, want 1", n)
+	}
+}
+
+// A driver change on a settled queue recreates it with the inventory's device ID.
+func TestSettledRecreateSendsDeviceID(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})
+	w := want("P")
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	w.Driver, w.DriverPinned = "hp_laserjet_1020", true
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	if p := onlyPrinter(t, fake); p.Driver != w.Driver || p.DeviceID != hpID {
+		t.Errorf("printer = %+v, want driver %s and device ID %q", p, w.Driver, hpID)
+	}
+	if n := fake.FindDevicesCalls(); n != 1 {
+		t.Errorf("Find-Devices calls = %d, want 1", n)
+	}
+}
+
+// Without an inventory serial, a queue on another printer's serial is not settled.
+func TestQueueOnOtherSerialRediscoversWithoutInventorySerial(t *testing.T) {
+	devs := []papplfake.Device{
+		{URI: "cups:usb://HP/LaserJet%201022?serial=OTHER", DeviceID: "MFG:HP;MDL:LaserJet 1022;CLS:PRINTER;"},
+		{URI: "cups:usb://HP/LaserJet%201020", DeviceID: hpID},
+	}
+	fake, c := newSystem(t, papplfake.Options{Devices: devs, Drivers: hpDrivers})
+	w := want("P")
+	w.DeviceURI, w.Driver = devs[0].URI, "hp_laserjet_1020"
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("", hpID)))
+	mustOK(t, pappl.Reconcile(ctx(t), c, want("P"), inv("", hpID)))
+	if p := onlyPrinter(t, fake); p.DeviceURI != devs[1].URI {
+		t.Errorf("device uri = %q, want %q", p.DeviceURI, devs[1].URI)
+	}
+}
+
+// A queue on PAPPL's own usb:// URI is not settled: the retrofit apps print
+// through the CUPS backends only.
+func TestQueueOnPAPPLOwnURIRediscovers(t *testing.T) {
+	own := "usb://HP/LaserJet%201020?serial=ABC123"
+	fake, c := newSystem(t, papplfake.Options{Schemes: []string{"cups", "usb"}, Devices: hpDevices(), Drivers: hpDrivers})
+	w := want("P")
+	w.DeviceURI, w.Driver = own, "hp_laserjet_1020"
+	mustOK(t, pappl.Reconcile(ctx(t), c, w, inv("ABC123", hpID)))
+	mustOK(t, pappl.Reconcile(ctx(t), c, want("P"), inv("ABC123", hpID)))
+	if p := onlyPrinter(t, fake); p.DeviceURI != hpDevices()[0].URI {
+		t.Errorf("device uri = %q, want %q", p.DeviceURI, hpDevices()[0].URI)
+	}
+}
+
 // PAPPL lists its own usb:// entry for the same printer beside the CUPS
 // backend's. The retrofit apps print through the CUPS backends only, and a
 // second matching entry made the queue flip between the two URIs.

@@ -69,6 +69,9 @@ RUN git init -q . \
  # set BACKEND_DIR and FILTER_DIR, which pappl-retrofit reads at start-up.
  && grep -q '"/usr/lib/%s/backend"' pappl-retrofit/pappl-retrofit.c \
  && grep -q 'getenv("BACKEND_DIR")' pappl-retrofit/pappl-retrofit.c \
+ # pagewire's Find-Devices asks for type other-local, which lists the "cups"
+ # scheme only because pappl-retrofit registers it for every device type.
+ && grep -q 'papplDeviceAddScheme("cups", PAPPL_DEVTYPE_ALL' pappl-retrofit/pappl-retrofit.c \
  # The legacy target ships legacy-printer-app, which build-app.sh deletes from the others.
  && grep -q 'PR_COPTIONS_NO_PAPPL_BACKENDS' legacy/legacy-printer-app.c \
  && grep -q 'PR_COPTIONS_CUPS_BACKENDS' legacy/legacy-printer-app.c

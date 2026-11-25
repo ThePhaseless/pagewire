@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/OpenPrinting/goipp"
@@ -39,8 +40,10 @@ const (
 )
 
 // DeviceTypeCustomLocal is the smi55357-device-type keyword for
-// PAPPL_DEVTYPE_CUSTOM_LOCAL: only schemes the application added itself, which
-// for the retrofit apps is "cups" (the CUPS backends).
+// PAPPL_DEVTYPE_CUSTOM_LOCAL. PAPPL lists the schemes whose registered type
+// shares a bit with it: pappl-retrofit registers "cups" (the CUPS backends)
+// with PAPPL_DEVTYPE_ALL, so it is listed, while PAPPL's own usb, snmp and
+// dnssd schemes are not.
 const DeviceTypeCustomLocal = "other-local"
 
 // Qualities maps print-quality keywords to their IPP enum values.
@@ -79,8 +82,14 @@ type Device struct{ URI, Info, DeviceID string }
 // Driver is one Find-Drivers entry.
 type Driver struct{ Name, Description string }
 
-// Client talks to one PAPPL system service.
-type Client struct{ uri string }
+// Client talks to one PAPPL system service. It remembers Reconcile's last
+// Find-Devices choice per queue, so reuse one Client for the agent's life.
+type Client struct {
+	uri string
+
+	mu    sync.Mutex
+	picks map[string]string // queue key -> device URI; see Reconcile
+}
 
 // New returns a client for the system URI, e.g. ipp://127.0.0.1:8001/ipp/system.
 // It makes no request.

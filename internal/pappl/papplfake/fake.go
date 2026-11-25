@@ -245,13 +245,6 @@ func (s *System) createPrinter(req, rsp *goipp.Message, fail failFunc) *goipp.Me
 		return fail(goipp.StatusErrorNotPossible, "Printer name '%s' already exists.", name)
 	}
 	deviceID := pappl.First(req.Printer, "printer-device-id")
-	if deviceID == "" {
-		for _, d := range s.opts.Devices {
-			if d.URI == uri {
-				deviceID = d.DeviceID
-			}
-		}
-	}
 	// The retrofit apps accept any named driver, listed or not (pappl-retrofit 1.0b3).
 	ok := driver != "auto"
 	for _, d := range s.opts.Drivers {
