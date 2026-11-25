@@ -18,9 +18,9 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/backend/docker"
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/backend/docker"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 // dockerSimContainers are the device containers of simulated mode, in plan order.
@@ -41,7 +41,7 @@ func TestDockerBackend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Minute)
 	defer cancel()
 
-	base := os.Getenv("PRINTSCAN_URL")
+	base := os.Getenv("PAGEWIRE_URL")
 	if base == "" {
 		base = "http://127.0.0.1:8080"
 	}
@@ -54,7 +54,7 @@ func TestDockerBackend(t *testing.T) {
 	dockerWaitHealthz(ctx, t, base)
 	code, body, _ := dockerHTTP(ctx, t, http.MethodPut, base+"/api/v1/config",
 		map[string]string{"If-None-Match": "*", "Content-Type": "application/json"},
-		`{"apiVersion":"printscan/v1","name":"printscan-it-docker","device":{"mode":"simulated"}}`)
+		`{"apiVersion":"pagewire/v1","name":"pagewire-it-docker","device":{"mode":"simulated"}}`)
 	if code != http.StatusCreated {
 		t.Fatalf("PUT config: %d %s (a config already exists? run compose down -v first)", code, body)
 	}
@@ -138,7 +138,7 @@ func TestDockerBackend(t *testing.T) {
 		}
 		code, body, _ = dockerHTTP(ctx, t, http.MethodPatch, base+"/api/v1/config",
 			map[string]string{"If-Match": hdr.Get("ETag"), "Content-Type": "application/merge-patch+json"},
-			`{"name":"printscan-it-docker-2"}`)
+			`{"name":"pagewire-it-docker-2"}`)
 		if code != http.StatusOK {
 			t.Fatalf("PATCH config: %d %s", code, body)
 		}

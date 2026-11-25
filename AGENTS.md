@@ -1,6 +1,6 @@
-# printscan agent guide
+# pagewire agent guide
 
-printscan is a self-hosted print and scan service for one USB multifunction printer. A Go control plane (`cmd/printscan`) serves a React UI (`ui/`), reads one YAML file and renders a device pod through the Kubernetes API (the `k8s` backend), runs the same workload as containers through the Docker Engine API (the `docker` backend, Docker or rootful Podman), or runs in-process virtual devices (the `sim` backend). `README.md` describes the product; this file holds the rules that keep the code consistent.
+pagewire is a self-hosted print and scan service for one USB multifunction printer. A Go control plane (`cmd/pagewire`) serves a React UI (`ui/`), reads one YAML file and renders a device pod through the Kubernetes API (the `k8s` backend), runs the same workload as containers through the Docker Engine API (the `docker` backend, Docker or rootful Podman), or runs in-process virtual devices (the `sim` backend). `README.md` describes the product; this file holds the rules that keep the code consistent.
 
 ## Setup and commands
 
@@ -15,8 +15,8 @@ Without them every Go build and test fails at the cgo step. Run tools through `m
 | What | Command |
 |---|---|
 | Go vet, lint, test | `mise x -- go vet <dirs>`, `mise x -- golangci-lint run <dirs>`, `mise x -- go test -race -count=1 <dirs>` |
-| Validate configs | `mise x -- go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml` |
-| Run locally | `mise x -- go run ./cmd/printscan serve --backend=sim --data-dir .cache/data --config .cache/data/printscan.yaml` |
+| Validate configs | `mise x -- go run ./cmd/pagewire validate examples/pagewire.yaml examples/simulated.yaml` |
+| Run locally | `mise x -- go run ./cmd/pagewire serve --backend=sim --data-dir .cache/data --config .cache/data/pagewire.yaml` |
 | UI | in `ui/`: `bun install --frozen-lockfile`, then `bun run gen`, `typecheck`, `lint`, `test`, `build`, `e2e` |
 | Manifests | `mise x -- kustomize build deploy/base \| mise x -- kubeconform -strict -summary -kubernetes-version 1.37.0 -` and `mise x -- kube-linter lint deploy/base internal/backend/k8s/testdata` |
 | Workflows | `mise x -- actionlint` |
@@ -26,7 +26,7 @@ Without them every Go build and test fails at the cgo step. Run tools through `m
 
 ## Never shell out
 
-No Go file imports `os/exec` or `golang.org/x/sys/execabs`, or calls `os.StartProcess`, `syscall.StartProcess`, `syscall`/`unix` `Exec` or `ForkExec`, or uses `SYS_EXECVE`; depguard and forbidigo in `.golangci.yml` fail the lint (test/integration included, through `run.build-tags`). A CI step also fails when a dependency beyond the known three (godbus, client-go's exec auth plugin, gnostic-models) imports `os/exec` into `./cmd/printscan`. Talk to daemons over IPP, eSCL, D-Bus, the Kubernetes API or the Docker Engine API. Daemons are containers in the rendered pod spec (on docker, containers created from the same plan), or in-process virtual devices in `sim`. No Go test spawns a process. The browser e2e harness (`ui/e2e/harness.ts`) builds and starts the binary; it is test infrastructure, outside this rule. Check with:
+No Go file imports `os/exec` or `golang.org/x/sys/execabs`, or calls `os.StartProcess`, `syscall.StartProcess`, `syscall`/`unix` `Exec` or `ForkExec`, or uses `SYS_EXECVE`; depguard and forbidigo in `.golangci.yml` fail the lint (test/integration included, through `run.build-tags`). A CI step also fails when a dependency beyond the known three (godbus, client-go's exec auth plugin, gnostic-models) imports `os/exec` into `./cmd/pagewire`. Talk to daemons over IPP, eSCL, D-Bus, the Kubernetes API or the Docker Engine API. Daemons are containers in the rendered pod spec (on docker, containers created from the same plan), or in-process virtual devices in `sim`. No Go test spawns a process. The browser e2e harness (`ui/e2e/harness.ts`) builds and starts the binary; it is test infrastructure, outside this rule. Check with:
 
 ```sh
 grep -rn --include='*.go' --exclude-dir=node_modules --exclude-dir=.cache '"os/exec"' .
@@ -40,7 +40,7 @@ The contracts are code, and the generated files follow them:
 
 | Contract | Source | Generated |
 |---|---|---|
-| Config file `printscan/v1` | `internal/config/config.go` | `schema/config.schema.json`, `ui/src/gen/config.ts` |
+| Config file `pagewire/v1` | `internal/config/config.go` | `schema/config.schema.json`, `ui/src/gen/config.ts` |
 | REST DTOs | `internal/apitypes/apitypes.go` | `schema/api.schema.json`, `ui/src/gen/api.ts` |
 | Device, Backend, agent protocol | `internal/device/*.go` | none |
 | Printer families, rules, EULAs, blobs | `internal/catalog/catalog.yaml` | none |
@@ -68,8 +68,8 @@ Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) chan
 - **Effective config.** `controller.Config()` is the only source of config values outside the config path: the applied config, else the last-known-good while the file is invalid, else `config.Default("Printer")`. Read it per use (the upload limit per request, scan retention per janitor run), so edits apply without a restart.
 - **Printer URI, one rule for every backend.** PAPPL families: the controller takes port and path from the agent's latest `QueueResult.PrinterURI` and joins them with `Observation.HostIP` (the node IP in k8s; in docker `--host-ip`, else the default route's source address, re-read per `Observe`; 127.0.0.1 in sim). `sim` leaves `Endpoints.PrinterURI` empty for PAPPL families. `ipp-usb` and `sim` families: `Observation.Endpoints.PrinterURI` in sim, `pickIPP` over browsed `_ipp._tcp` services in k8s and docker.
 - **Pod hash.** `device.Spec` holds exactly what the renderer and `sim.Apply` read, and its hash is `device.SpecHash` (nil and empty slices hash alike). Anything else stays out of `Spec`: PAPPL queue settings travel in `DesiredState.Queue` and the agent applies them on its next cycle, so they never roll the pod. `BlobRef.Optional` is a renderer input and stays in.
-- **Self image.** The device pod's `probe`, `agent` and `fetch-blobs` containers run the image of the container named `printscan` (`k8s.SelfContainer`) in the owner Deployment. Only without that container does it fall back to the registry tag or the `printscan=` override. The name in `deploy/base/deployment.yaml` is load-bearing. On docker the self image is the image ID of the container named by `--docker-container` (`docker.DefaultContainer`, `printscan`, pinned by `container_name` in `compose.docker.yaml`); when that container is not found it falls back the same way.
-- **Docker backend.** `internal/backend/docker` translates `k8s.Plan`, so it never renders on its own; change the workload in `render.go` and both backends follow. `Apply` only records intent and changes no backend state when it fails. `Run` is the worker that pulls, probes and starts containers; it does nothing before the first successful `Apply`, so a restarted control plane never tears down a running workload. `Observe` lists containers and never waits on the worker. The workload hash (spec hash, planned containers, config files) decides between adopting what runs and rolling out. The backend only stops or removes objects labelled `dev.printscan.managed-by=printscan`.
+- **Self image.** The device pod's `probe`, `agent` and `fetch-blobs` containers run the image of the container named `pagewire` (`k8s.SelfContainer`) in the owner Deployment. Only without that container does it fall back to the registry tag or the `pagewire=` override. The name in `deploy/base/deployment.yaml` is load-bearing. On docker the self image is the image ID of the container named by `--docker-container` (`docker.DefaultContainer`, `pagewire`, pinned by `container_name` in `compose.docker.yaml`); when that container is not found it falls back the same way.
+- **Docker backend.** `internal/backend/docker` translates `k8s.Plan`, so it never renders on its own; change the workload in `render.go` and both backends follow. `Apply` only records intent and changes no backend state when it fails. `Run` is the worker that pulls, probes and starts containers; it does nothing before the first successful `Apply`, so a restarted control plane never tears down a running workload. `Observe` lists containers and never waits on the worker. The workload hash (spec hash, planned containers, config files) decides between adopting what runs and rolling out. The backend only stops or removes objects labelled `dev.pagewire.managed-by=pagewire`.
 - **Job events.** The print handler watches each job it submitted until a terminal state and publishes a `job` SSE event per state or reasons change; DELETE publishes the canceled job. LAN jobs are not watched; the UI's `useJobs()` refetches on printer-state change and SSE reconnect.
 
 ## Tests
@@ -80,7 +80,7 @@ Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) chan
 - `mise x -- go vet -tags integration,docker ./test/integration/...` compiles the Docker backend integration test, which plain `go vet ./...` skips.
 - UI copy lives in `ui/src/strings.ts` (shared) and `*.strings.ts` beside each view or component; components hard-code no user-visible text.
 - `ui/src/gen` is generated: Biome skips it, `tsc` still type-checks it.
-- `bun test` preloads happy-dom unless `PRINTSCAN_E2E=1`; `bun run e2e` sets it. `ui/e2e/harness.ts` throws at load if a `window` global exists.
+- `bun test` preloads happy-dom unless `PAGEWIRE_E2E=1`; `bun run e2e` sets it. `ui/e2e/harness.ts` throws at load if a `window` global exists.
 - e2e console rule: any `console` error or `pageerror` fails the scenario, CSP violations included. `consoleAllowlist` stays empty. The one built-in exclusion is Chromium's "Failed to load resource: the server responded with a status of" line for `/api/v1/` URLs; each scenario instead declares its expected 4xx and 5xx API responses with `expectApiStatus`, and any other fails. Fix a CSP violation in the file at fault; the CSP is never loosened to make a test pass.
 
 ## Images and CI
@@ -88,7 +88,7 @@ Dependency manifests (`go.mod`, `go.sum`, `ui/package.json`, `ui/bun.lock`) chan
 - The device and driver Dockerfiles end with a `sources` stage, so every build names its target: `--target device`, or `ps`, `hplip`, `gutenprint`, `ghostscript`. CI matrix entries do too.
 - Every `FROM` naming an external image is `tag@sha256:<multi-arch index digest>` (from `docker buildx imagetools inspect`). Only `FROM scratch`, earlier stage names, `${PUSHED_IMAGE}` in the `pushed-amd64`/`pushed-arm64` stages and `lists-${SOURCES_LISTS}` go without.
 - Upstream sources built in the Dockerfiles are pinned by commit: `ARG X=<40-hex sha> # renovate: datasource=github-tags depName=<owner/repo> currentValue=<tag>`. Renovate's regex manager reads that comment, so keep its shape.
-- Each device and driver final stage writes `ghcr.io/thephaseless/<its image>:${VERSION#v}-sources` to `/usr/share/printscan/SOURCES` and to the `dev.printscan.sources` label, and copies `NOTICE` and `THIRD_PARTY_NOTICES.md` beside it.
+- Each device and driver final stage writes `ghcr.io/thephaseless/<its image>:${VERSION#v}-sources` to `/usr/share/pagewire/SOURCES` and to the `dev.pagewire.sources` label, and copies `NOTICE` and `THIRD_PARTY_NOTICES.md` beside it.
 - The control-plane `Dockerfile` links cgo statically through `/usr/local/bin/pkg-config-static` (`exec pkgconf --static "$@"`) with `ENV PKG_CONFIG` pointing at it: cmd/go reads only the first word of `$PKG_CONFIG`, so `--static` cannot go into the variable.
 - The `sources` CI job runs for every push (branch or tag), reads the package lists from the images the same run pushed (`SOURCES_LISTS=pushed`, `PUSHED_IMAGE=...:sha-<commit>`), and sets `meta-flavor: latest=false`; only the image build moves `latest`. `concurrency.cancel-in-progress` is true only for pull requests, so a pushing run never stops between images and their sources. `test/consistency` asserts these CI and Dockerfile rules; change the test with the rule.
 - `ui/dist/.keep` stays committed so Go builds without a UI build; `bun run build` keeps it.

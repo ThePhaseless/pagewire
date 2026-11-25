@@ -20,15 +20,15 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/config/store"
-	"github.com/ThePhaseless/printscan/internal/controller"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/printing"
-	"github.com/ThePhaseless/printscan/internal/scanning"
-	"github.com/ThePhaseless/printscan/internal/schema"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config/store"
+	"github.com/ThePhaseless/pagewire/internal/controller"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
 // The production types the server wires in must keep satisfying its interfaces.
@@ -294,7 +294,7 @@ func newEnv(t *testing.T, mod ...func(*Deps)) *testEnv {
 	t.Helper()
 	e := &testEnv{
 		t:       t,
-		path:    filepath.Join(t.TempDir(), "printscan.yaml"),
+		path:    filepath.Join(t.TempDir(), "pagewire.yaml"),
 		status:  &statusFake{st: emptyStatus(t), ch: make(chan apitypes.Status, 1)},
 		printer: &printerFake{formats: []string{printing.FormatPDF, printing.FormatJPEG}},
 		scans:   &scansFake{pageDir: t.TempDir()},
@@ -441,7 +441,7 @@ func compiled(t *testing.T, def string) *jsonschema.Schema {
 		schemaErr = c.AddResource(schema.APIID, doc)
 		for _, item := range []string{"Job", "Scan"} {
 			arr := map[string]any{"type": "array", "items": map[string]any{"$ref": schema.APIID + "#/$defs/" + item}}
-			if err := c.AddResource("https://printscan.invalid/"+item+"-array.json", arr); err != nil {
+			if err := c.AddResource("https://pagewire.invalid/"+item+"-array.json", arr); err != nil {
 				schemaErr = err
 			}
 		}
@@ -452,7 +452,7 @@ func compiled(t *testing.T, def string) *jsonschema.Schema {
 	}
 	url := schema.APIID + "#/$defs/" + def
 	if item, ok := strings.CutSuffix(def, "[]"); ok {
-		url = "https://printscan.invalid/" + item + "-array.json"
+		url = "https://pagewire.invalid/" + item + "-array.json"
 	}
 	schemaMu.Lock()
 	defer schemaMu.Unlock()
@@ -719,7 +719,7 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 	c.call("POST /api/v1/print", "POST", "/api/v1/print", string(b), 202, "Content-Type", ct)
 
 	// Config: applied without device.usb, PUT and PATCH success, both 412s, invalid.
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"printscan/v1","name":"Office","device":{"mode":"simulated"}}`, 201,
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"Office","device":{"mode":"simulated"}}`, 201,
 		"If-None-Match", "*")
 	body1 := c.call("GET /api/v1/config", "GET", "/api/v1/config", "", 200)
 	if bytes.Contains(body1, []byte(`"usb"`)) {
@@ -728,10 +728,10 @@ func runRoutes(t *testing.T, st apitypes.Status, setup apitypes.Setup, populated
 	stale := e.etag()
 	c.call("PATCH /api/v1/config", "PATCH", "/api/v1/config", `{"location":"Hall"}`, 200,
 		"If-Match", quote(stale), "Content-Type", "application/merge-patch+json")
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"printscan/v1","name":"Office 2"}`, 200, "If-Match", quote(e.etag()))
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"printscan/v1","name":"x"}`, 412, "If-Match", quote(stale))
-	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"printscan/v1","name":"x","bogus":1}`, 422, "If-Match", quote(e.etag()))
-	e.writeFile("apiVersion: printscan/v1\nname: [\n")
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"Office 2"}`, 200, "If-Match", quote(e.etag()))
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"x"}`, 412, "If-Match", quote(stale))
+	c.call("PUT /api/v1/config", "PUT", "/api/v1/config", `{"apiVersion":"pagewire/v1","name":"x","bogus":1}`, 422, "If-Match", quote(e.etag()))
+	e.writeFile("apiVersion: pagewire/v1\nname: [\n")
 	rec := e.do("PATCH", "/api/v1/config", strings.NewReader(`{"name":"y"}`), "If-Match", quote(stale), "Content-Type", "application/merge-patch+json")
 	if rec.Code != 412 {
 		t.Fatalf("412 against invalid file: %d %s", rec.Code, rec.Body)

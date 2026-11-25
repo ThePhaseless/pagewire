@@ -8,14 +8,14 @@ import (
 
 	"github.com/invopop/jsonschema"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
 )
 
 // Schema $id values.
 const (
-	ConfigID = "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/config.schema.json"
-	APIID    = "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/api.schema.json"
+	ConfigID = "https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json"
+	APIID    = "https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/api.schema.json"
 )
 
 // apiRoot lists every API DTO; each reachable type becomes a $defs entry

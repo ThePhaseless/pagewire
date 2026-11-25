@@ -1,20 +1,20 @@
 kind: Deployment
 apiVersion: apps/v1
 metadata:
-  name: printscan-device
+  name: pagewire-device
   namespace: printing
   labels:
-    app.kubernetes.io/managed-by: printscan
-    app.kubernetes.io/name: printscan-device
+    app.kubernetes.io/managed-by: pagewire
+    app.kubernetes.io/name: pagewire-device
   annotations:
     ignore-check.kube-linter.io/host-network: the device pod advertises the printer and scanner over mDNS and serves them on the node's LAN address
     ignore-check.kube-linter.io/run-as-non-root: USB containers run as uid 0 with every capability dropped because device-plugin nodes are root:root 0664
-    printscan.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
+    pagewire.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
     reloader.stakater.com/auto: "false"
   ownerReferences:
   - apiVersion: apps/v1
     kind: Deployment
-    name: printscan
+    name: pagewire
     uid: 00000000-0000-0000-0000-000000000001
     controller: true
     blockOwnerDeletion: true
@@ -22,18 +22,18 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: printscan-device
+      app.kubernetes.io/name: pagewire-device
   template:
     metadata:
       labels:
-        app.kubernetes.io/managed-by: printscan
-        app.kubernetes.io/name: printscan-device
+        app.kubernetes.io/managed-by: pagewire
+        app.kubernetes.io/name: pagewire-device
       annotations:
-        printscan.dev/config-hash: 2a267da95715153768ef8607c02e9577bf23e6836338cbe4e2a678677b04f157
-        printscan.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
+        pagewire.dev/config-hash: 2a267da95715153768ef8607c02e9577bf23e6836338cbe4e2a678677b04f157
+        pagewire.dev/spec-hash: 30a901f0b833b4b9bdb6a435bb1b6b7dea6fd85cd895819f419bfae3616ff493
     spec:
       volumes:
-      - name: run-printscan
+      - name: run-pagewire
         emptyDir: {}
       - name: run-dbus
         emptyDir: {}
@@ -41,13 +41,13 @@ spec:
         emptyDir: {}
       - name: agent-token
         secret:
-          secretName: printscan-agent-token
+          secretName: pagewire-agent-token
       - name: blobs
         persistentVolumeClaim:
-          claimName: printscan-blobs
+          claimName: pagewire-blobs
       - name: ipp-usb-conf
         configMap:
-          name: printscan-device
+          name: pagewire-device
           items:
           - key: ipp-usb.conf
             path: ipp-usb.conf
@@ -57,14 +57,14 @@ spec:
         emptyDir: {}
       initContainers:
       - name: probe
-        image: ghcr.io/thephaseless/printscan:0.0.0-test
+        image: ghcr.io/thephaseless/pagewire:0.0.0-test
         command:
-        - /printscan
+        - /pagewire
         args:
         - agent
         - probe
         - --out
-        - /run/printscan/inventory.json
+        - /run/pagewire/inventory.json
         resources:
           limits:
             cpu: 200m
@@ -75,8 +75,8 @@ spec:
             devic.es/printer: "1"
             memory: 16Mi
         volumeMounts:
-        - name: run-printscan
-          mountPath: /run/printscan
+        - name: run-pagewire
+          mountPath: /run/pagewire
         imagePullPolicy: IfNotPresent
         securityContext:
           capabilities:
@@ -87,11 +87,11 @@ spec:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
       - name: dbus
-        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
         command:
         - /usr/bin/dbus-daemon
         args:
-        - --config-file=/etc/printscan/dbus.conf
+        - --config-file=/etc/pagewire/dbus.conf
         - --nofork
         - --nopidfile
         resources:
@@ -116,7 +116,7 @@ spec:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
       - name: avahi
-        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
         command:
         - /usr/sbin/avahi-daemon
         args:
@@ -124,7 +124,7 @@ spec:
         - --no-chroot
         - --no-rlimits
         - -f
-        - /etc/printscan/avahi-daemon.conf
+        - /etc/pagewire/avahi-daemon.conf
         resources:
           limits:
             cpu: 100m
@@ -149,24 +149,24 @@ spec:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
       - name: agent
-        image: ghcr.io/thephaseless/printscan:0.0.0-test
+        image: ghcr.io/thephaseless/pagewire:0.0.0-test
         command:
-        - /printscan
+        - /pagewire
         args:
         - agent
         - run
         - --control-plane-url
-        - http://printscan.printing.svc:8081
+        - http://pagewire.printing.svc:8081
         - --token-file
-        - /var/run/printscan/token
+        - /var/run/pagewire/token
         - --pod-uid
         - $(POD_UID)
         - --dbus-address
         - unix:path=/run/dbus/system_bus_socket
         - --inventory
-        - /run/printscan/inventory.json
+        - /run/pagewire/inventory.json
         - --blob-status
-        - /run/printscan/blobs.json
+        - /run/pagewire/blobs.json
         - --blob-dir
         - /blobs
         env:
@@ -185,10 +185,10 @@ spec:
         volumeMounts:
         - name: agent-token
           readOnly: true
-          mountPath: /var/run/printscan
-        - name: run-printscan
+          mountPath: /var/run/pagewire
+        - name: run-pagewire
           readOnly: true
-          mountPath: /run/printscan
+          mountPath: /run/pagewire
         - name: run-dbus
           mountPath: /run/dbus
         - name: blobs
@@ -205,7 +205,7 @@ spec:
           allowPrivilegeEscalation: false
       containers:
       - name: ipp-usb
-        image: ghcr.io/thephaseless/printscan-device:0.0.0-test
+        image: ghcr.io/thephaseless/pagewire-device:0.0.0-test
         command:
         - /usr/local/sbin/ipp-usb
         args:

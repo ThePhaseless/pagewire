@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "printscan-ui",
+      "name": "pagewire-ui",
       "dependencies": {
         "@fontsource-variable/figtree": "5.3.0",
         "react": "19.3.1",

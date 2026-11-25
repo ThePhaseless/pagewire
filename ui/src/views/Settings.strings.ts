@@ -5,10 +5,10 @@ const d = setupStrings.defaults;
 
 export const settingsStrings = {
   description:
-    "Change the printer's name, driver and defaults. Saving updates printscan's settings file.",
+    "Change the printer's name, driver and defaults. Saving updates pagewire's settings file.",
   loadFailed: "Could not load the settings.",
   missing: {
-    title: "printscan is not set up yet",
+    title: "pagewire is not set up yet",
     body: "Finish setup to create the settings file.",
     action: "Go to setup",
   },
@@ -117,14 +117,14 @@ export const settingsStrings = {
     "The file changed on disk. Saving shows you the differences; Reset loads the file's version.",
   invalid: {
     title: "The settings file has errors",
-    withLastGood: "printscan keeps using the last working settings until the file is fixed.",
-    withoutLastGood: "printscan has no earlier working settings to fall back on. Fix the file.",
+    withLastGood: "pagewire keeps using the last working settings until the file is fixed.",
+    withoutLastGood: "pagewire has no earlier working settings to fall back on. Fix the file.",
     location: (line: number, column: number) => `Line ${line}, column ${column}`,
     download: "Download the file",
     restore: "Restore last working settings",
     restoreTitle: "Restore the last working settings?",
     restoreBody:
-      "printscan rewrites the file with the last settings that worked. Your edits to the file and its comments will be lost.",
+      "pagewire rewrites the file with the last settings that worked. Your edits to the file and its comments will be lost.",
     restoreConfirm: "Restore",
     restoreFailed: "Could not restore the settings",
   },
@@ -142,7 +142,7 @@ export const settingsStrings = {
     invalidBody: "Someone edited the file while you were editing here, and it now has errors:",
     replace: "Replace the file with my settings",
     replaceWarning:
-      "printscan writes your settings as a new file. The comments and layout of the file on disk will be lost.",
+      "pagewire writes your settings as a new file. The comments and layout of the file on disk will be lost.",
     replaceConfirm: "Replace the file",
     back: "Back",
   },

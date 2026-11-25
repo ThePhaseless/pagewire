@@ -16,7 +16,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const testHostIP = "192.0.2.10"
@@ -69,7 +69,7 @@ func newTestBackend(f *fakeEngine, p Params) *Backend {
 
 func newFakeWithSelf() *fakeEngine {
 	f := newFake()
-	f.addContainer("printscan", "sha256:self", nil, container.StateRunning)
+	f.addContainer("pagewire", "sha256:self", nil, container.StateRunning)
 	return f
 }
 
@@ -226,20 +226,20 @@ func TestFirstRollout(t *testing.T) {
 		}
 	}
 	for _, v := range []string{RunVolume, DBusVolume, ConfigVolume, TokenVolume, BlobVolume} {
-		before("VolumeCreate "+v, "ContainerCreate printscan-device-probe")
+		before("VolumeCreate "+v, "ContainerCreate pagewire-device-probe")
 	}
-	before("ContainerCreate printscan-device-airsane", "ContainerCreate "+SeedContainer)
+	before("ContainerCreate pagewire-device-airsane", "ContainerCreate "+SeedContainer)
 	before("ContainerCreate "+SeedContainer, "CopyToContainer "+SeedContainer+":"+seedConfigDir)
 	before("CopyToContainer "+SeedContainer+":"+seedConfigDir, "CopyToContainer "+SeedContainer+":"+seedTokenDir)
 	before("CopyToContainer "+SeedContainer+":"+seedTokenDir, "ContainerRemove "+SeedContainer)
-	before("ContainerRemove "+SeedContainer, "ContainerStart printscan-device-probe")
-	before("ContainerStart printscan-device-probe", "ContainerWait printscan-device-probe")
-	before("ContainerWait printscan-device-probe", "ContainerStart printscan-device-dbus")
-	before("ContainerStart printscan-device-avahi", "ContainerInspect printscan-device-avahi")
-	before("ContainerInspect printscan-device-avahi", "ContainerStart printscan-device-agent")
-	before("ContainerStart printscan-device-agent", "ContainerStart printscan-device-fetch-blobs")
-	before("ContainerWait printscan-device-fetch-blobs", "ContainerStart printscan-device-printer-app")
-	before("ContainerStart printscan-device-printer-app", "ContainerStart printscan-device-airsane")
+	before("ContainerRemove "+SeedContainer, "ContainerStart pagewire-device-probe")
+	before("ContainerStart pagewire-device-probe", "ContainerWait pagewire-device-probe")
+	before("ContainerWait pagewire-device-probe", "ContainerStart pagewire-device-dbus")
+	before("ContainerStart pagewire-device-avahi", "ContainerInspect pagewire-device-avahi")
+	before("ContainerInspect pagewire-device-avahi", "ContainerStart pagewire-device-agent")
+	before("ContainerStart pagewire-device-agent", "ContainerStart pagewire-device-fetch-blobs")
+	before("ContainerWait pagewire-device-fetch-blobs", "ContainerStart pagewire-device-printer-app")
+	before("ContainerStart pagewire-device-printer-app", "ContainerStart pagewire-device-airsane")
 
 	cfg := f.volume(ConfigVolume).files
 	for _, name := range []string{"ipp-usb.conf", "dll.conf", "options.conf", "ignore.conf", "access.conf"} {
@@ -293,7 +293,7 @@ func TestHealthGate(t *testing.T) {
 				if o.Phase != device.PhasePending || !strings.Contains(o.Message, "avahi: not healthy") {
 					t.Errorf("observation %+v, want Pending with avahi: not healthy", o)
 				}
-				if countCalls(f, "ContainerStart printscan-device-agent") != 0 {
+				if countCalls(f, "ContainerStart pagewire-device-agent") != 0 {
 					t.Error("the agent started before avahi was healthy")
 				}
 				return
@@ -335,7 +335,7 @@ func TestFailedFirstApply(t *testing.T) {
 		p.Resync = 20 * time.Millisecond
 		b := newTestBackend(f, p)
 		runBackend(t, b)
-		f.setErr("ContainerInspect printscan", errors.New("engine down"))
+		f.setErr("ContainerInspect pagewire", errors.New("engine down"))
 		if err := b.Apply(t.Context(), usbSpec()); err == nil || !strings.Contains(err.Error(), "engine down") {
 			t.Fatalf("Apply = %v, want the inspect error", err)
 		}
@@ -373,7 +373,7 @@ func checkAdoptsAfterFailure(t *testing.T, f *fakeEngine, b *Backend) {
 	if m := mutations(f); len(m) > 0 {
 		t.Fatalf("worker changed the workload after a failed Apply: %q", m)
 	}
-	f.setErr("ContainerInspect printscan", nil)
+	f.setErr("ContainerInspect pagewire", nil)
 	mustApply(t, b, usbSpec())
 	waitFor(t, "adoption", func() bool { return observe(t, b).Phase == device.PhaseRunning })
 	time.Sleep(100 * time.Millisecond)
@@ -424,12 +424,12 @@ func TestUpgradeRolls(t *testing.T) {
 		p := testParams(t)
 		rolledOut(t, f, p, usbSpec())
 		f.mu.Lock()
-		f.containers["printscan"].opts.Config.Image = "sha256:new"
+		f.containers["pagewire"].opts.Config.Image = "sha256:new"
 		f.mu.Unlock()
 		b := newTestBackend(f, p)
 		mustApply(t, b, usbSpec())
 		converge(t, b)
-		if countCalls(f, "ContainerCreate printscan-device-agent") != 1 || countCalls(f, "ContainerRemove printscan-device-agent") != 1 {
+		if countCalls(f, "ContainerCreate pagewire-device-agent") != 1 || countCalls(f, "ContainerRemove pagewire-device-agent") != 1 {
 			t.Errorf("new self image did not roll the workload: %q", mutations(f))
 		}
 		r, _ := f.ContainerInspect(t.Context(), Prefix+"agent", client.ContainerInspectOptions{})
@@ -445,7 +445,7 @@ func TestUpgradeRolls(t *testing.T) {
 		b := newTestBackend(f, p)
 		mustApply(t, b, usbSpec())
 		converge(t, b)
-		if countCalls(f, "ContainerCreate printscan-device-printer-app") != 1 {
+		if countCalls(f, "ContainerCreate pagewire-device-printer-app") != 1 {
 			t.Errorf("new tag did not roll the workload: %q", mutations(f))
 		}
 		wantPhase(t, b, device.PhaseRunning)
@@ -463,10 +463,10 @@ func TestSpecChangeAndOwnership(t *testing.T) {
 	mustApply(t, b, simSpec())
 	converge(t, b)
 	wantPhase(t, b, device.PhaseRunning)
-	if countCalls(f, "ContainerRemove printscan-device-printer-app") != 1 || slices.Contains(f.names(), Prefix+"printer-app") {
+	if countCalls(f, "ContainerRemove pagewire-device-printer-app") != 1 || slices.Contains(f.names(), Prefix+"printer-app") {
 		t.Error("old printer-app not removed")
 	}
-	if countCalls(f, "ContainerCreate printscan-device-sim-printer") != 1 {
+	if countCalls(f, "ContainerCreate pagewire-device-sim-printer") != 1 {
 		t.Error("sim-printer not created")
 	}
 	if got := f.anonVolumes(); got != 2 || anonBefore == 2 { // sim-printer and airsane /tmp
@@ -507,7 +507,7 @@ func TestBlobsSurviveRemove(t *testing.T) {
 	mustApply(t, b, nil)
 	converge(t, b)
 	wantPhase(t, b, device.PhaseAbsent)
-	if names := f.names(); !slices.Equal(names, []string{"printscan"}) {
+	if names := f.names(); !slices.Equal(names, []string{"pagewire"}) {
 		t.Errorf("containers left: %v", names)
 	}
 	for _, v := range rolloutVolumes() {
@@ -652,7 +652,7 @@ func TestRestartPodPendingNotAbsent(t *testing.T) {
 	close(release)
 	waitClosed(t, done, "converge")
 	wantPhase(t, b, device.PhaseRunning)
-	if countCalls(f, "ContainerStart printscan-device-probe") != 1 {
+	if countCalls(f, "ContainerStart pagewire-device-probe") != 1 {
 		t.Error("RestartPod did not run the probe again")
 	}
 }
@@ -696,12 +696,12 @@ func TestUSBGate(t *testing.T) {
 	})
 	t.Run("rollout errors show through", func(t *testing.T) {
 		f := newFakeWithSelf()
-		f.setErr("ImagePull ghcr.io/thephaseless/printscan-device:1.2.3", errors.New("registry down"))
+		f.setErr("ImagePull ghcr.io/thephaseless/pagewire-device:1.2.3", errors.New("registry down"))
 		b := newTestBackend(f, testParams(t))
 		mustApply(t, b, ippusbSpec())
 		converge(t, b)
 		o := wantPhase(t, b, device.PhasePending)
-		if o.Unschedulable || o.Message != "pull ghcr.io/thephaseless/printscan-device:1.2.3: registry down" {
+		if o.Unschedulable || o.Message != "pull ghcr.io/thephaseless/pagewire-device:1.2.3: registry down" {
 			t.Errorf("observation %+v", o)
 		}
 
@@ -761,11 +761,11 @@ func TestPulls(t *testing.T) {
 
 	// A missing image is pulled; a pull error shows in Observe.
 	f2 := newFakeWithSelf()
-	f2.setErr("ImagePull ghcr.io/thephaseless/printscan-device:1.2.3", errors.New("denied"))
+	f2.setErr("ImagePull ghcr.io/thephaseless/pagewire-device:1.2.3", errors.New("denied"))
 	b2 := newTestBackend(f2, testParams(t))
 	mustApply(t, b2, simSpec())
 	converge(t, b2)
-	if o := wantPhase(t, b2, device.PhasePending); o.Message != "pull ghcr.io/thephaseless/printscan-device:1.2.3: denied" {
+	if o := wantPhase(t, b2, device.PhasePending); o.Message != "pull ghcr.io/thephaseless/pagewire-device:1.2.3: denied" {
 		t.Errorf("message %q", o.Message)
 	}
 }
@@ -792,7 +792,7 @@ func TestSelfImage(t *testing.T) {
 			t.Errorf("%s runs %q", n, got[Prefix+n])
 		}
 	}
-	if got[Prefix+"dbus"] != "ghcr.io/thephaseless/printscan-device:1.2.3" {
+	if got[Prefix+"dbus"] != "ghcr.io/thephaseless/pagewire-device:1.2.3" {
 		t.Errorf("dbus runs %q", got[Prefix+"dbus"])
 	}
 	f.mu.Lock()
@@ -807,13 +807,13 @@ func TestSelfImage(t *testing.T) {
 	b2 := newTestBackend(f2, testParams(t))
 	mustApply(t, b2, simSpec())
 	converge(t, b2)
-	if got := images(f2)[Prefix+"agent"]; got != "ghcr.io/thephaseless/printscan:1.2.3" {
+	if got := images(f2)[Prefix+"agent"]; got != "ghcr.io/thephaseless/pagewire:1.2.3" {
 		t.Errorf("fallback agent image %q", got)
 	}
 
 	// Any other error fails Apply and changes nothing.
 	f3 := newFakeWithSelf()
-	f3.setErr("ContainerInspect printscan", errors.New("boom"))
+	f3.setErr("ContainerInspect pagewire", errors.New("boom"))
 	b3 := newTestBackend(f3, testParams(t))
 	if err := b3.Apply(t.Context(), simSpec()); err == nil {
 		t.Fatal("Apply succeeded")
@@ -957,7 +957,7 @@ func TestRestartPodSurvivesFailedConverge(t *testing.T) {
 	converge(t, b)
 	f.setErr("ContainerList ", nil)
 	converge(t, b)
-	if countCalls(f, "ContainerStart printscan-device-probe") != 1 {
+	if countCalls(f, "ContainerStart pagewire-device-probe") != 1 {
 		t.Errorf("RestartPod lost after a failed converge: %q", mutations(f))
 	}
 	wantPhase(t, b, device.PhaseRunning)
@@ -977,7 +977,7 @@ func TestRestartPodBeforeFirstApply(t *testing.T) {
 	}
 	mustApply(t, b, simSpec())
 	converge(t, b)
-	if countCalls(f, "ContainerStart printscan-device-probe") != 1 {
+	if countCalls(f, "ContainerStart pagewire-device-probe") != 1 {
 		t.Errorf("RestartPod before Apply did not roll out after it: %q", mutations(f))
 	}
 }

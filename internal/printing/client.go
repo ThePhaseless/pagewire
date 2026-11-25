@@ -1,4 +1,4 @@
-// Package printing is the IPP client printscan uses to print and to read
+// Package printing is the IPP client pagewire uses to print and to read
 // printer and job state, plus document format detection and negotiation.
 package printing
 
@@ -18,7 +18,7 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // PrintOptions are the job options of a web print (POST /api/v1/print).
@@ -44,7 +44,7 @@ func (e *IPPError) Error() string {
 	return "ipp: " + e.Status.String()
 }
 
-// Attributes is the printer state printscan shows in Status.
+// Attributes is the printer state pagewire shows in Status.
 type Attributes struct {
 	State   string // idle | processing | stopped | unknown
 	Reasons []string

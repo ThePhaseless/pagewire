@@ -17,13 +17,13 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
 )
 
 // NewKey returns a fresh Ed25519 signing entity. It panics only if key
 // generation fails, which with crypto/rand cannot happen in practice.
 func NewKey() *openpgp.Entity {
-	e, err := openpgp.NewEntity("printscan synthetic vendor", "", "vendor@printscan.invalid",
+	e, err := openpgp.NewEntity("pagewire synthetic vendor", "", "vendor@pagewire.invalid",
 		&packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
 	if err != nil {
 		panic("blobtest: generate key: " + err.Error())
@@ -45,7 +45,7 @@ func Sign(e *openpgp.Entity, data []byte) []byte {
 // and each section names a payload file (src), its target (trg) and an
 // optional symlink (link), with $VARIABLES substituted.
 const Spec = `[plugin]
-name=printscan synthetic plug-in
+name=pagewire synthetic plug-in
 
 [products]
 hp-laserjet_1018=lj,fw-1018,rules-1018
@@ -122,7 +122,7 @@ func Makeself(payload []byte) []byte {
 		`CRCsum="0000000000"`,
 		`MD5="00000000000000000000000000000000"`,
 		`TMPROOT=${TMPDIR:=/tmp}`,
-		`label="printscan synthetic HPLIP plug-in"`,
+		`label="pagewire synthetic HPLIP plug-in"`,
 		`script="./hplip-plugin-install"`,
 		`targetdir="plugin_tmp"`,
 		fmt.Sprintf(`filesizes="%d"`, len(payload)),

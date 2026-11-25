@@ -1,4 +1,4 @@
-# printscan device image: dbus, avahi, ipp-usb, AirSane, the SANE backends and
+# pagewire device image: dbus, avahi, ipp-usb, AirSane, the SANE backends and
 # ippeveprinter. Always build with an explicit target:
 #   docker buildx build -f images/device/Dockerfile --target device .
 #   docker buildx build -f images/device/Dockerfile --target sources -o type=local,dest=out .
@@ -80,7 +80,7 @@ COPY --from=ipp-usb /src/LICENSE /usr/share/licenses/ipp-usb/LICENSE
 COPY --from=ipp-usb /out/LICENSE.go /out/LICENSE.goipp /usr/share/licenses/ipp-usb/
 COPY --from=airsane /out/airsaned /usr/local/bin/airsaned
 COPY --from=airsane /src/LICENSE /usr/share/licenses/airsane/LICENSE
-COPY images/device/dbus.conf images/device/avahi-daemon.conf /etc/printscan/
+COPY images/device/dbus.conf images/device/avahi-daemon.conf /etc/pagewire/
 # HP plug-in paths point into the blob PVC, where the plug-in is installed after
 # the user accepts HP's licence; the image never contains it. mkdir the parents,
 # remove whatever is at each link path, then link, so no link lands inside a directory.
@@ -96,33 +96,33 @@ RUN mkdir -p /usr/share/hplip/prnt /usr/share/hplip/scan /usr/share/hplip/fax /u
  && if ldd /usr/local/sbin/ipp-usb /usr/local/bin/airsaned | grep 'not found'; then exit 1; fi
 # Last RUN that touches packages: the source packages the sources target downloads
 # as the corresponding source of this image.
-RUN mkdir -p /usr/share/printscan \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
- && test -s /usr/share/printscan/source-packages.txt
-COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+RUN mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
 ARG VERSION
-ARG IMAGE=printscan-device
+ARG IMAGE=pagewire-device
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
-RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
-LABEL dev.printscan.sources="${SOURCES_REF}"
-LABEL dev.printscan.uid.messagebus="${MESSAGEBUS_UID}" \
-      dev.printscan.uid.avahi="${AVAHI_UID}" \
-      dev.printscan.uid.nonroot="${NONROOT_UID}"
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL dev.pagewire.sources="${SOURCES_REF}"
+LABEL dev.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
+      dev.pagewire.uid.avahi="${AVAHI_UID}" \
+      dev.pagewire.uid.nonroot="${NONROOT_UID}"
 EXPOSE 8090 8631 60000-60009
 
 # Package lists for the sources target, chosen by SOURCES_LISTS.
 FROM scratch AS lists-local
-COPY --from=device /usr/share/printscan/source-packages.txt /lists/device.txt
+COPY --from=device /usr/share/pagewire/source-packages.txt /lists/device.txt
 
 # The pushed stages only COPY, so the arm64 one needs no emulation.
 FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
 FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
 
 FROM scratch AS lists-pushed
-COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/amd64.txt
-COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/arm64.txt
+COPY --from=pushed-amd64 /usr/share/pagewire/source-packages.txt /lists/amd64.txt
+COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/arm64.txt
 
 FROM lists-${SOURCES_LISTS} AS lists
 

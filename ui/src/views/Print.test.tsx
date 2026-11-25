@@ -101,7 +101,7 @@ const ready: Status = {
 };
 
 const config: Config = {
-  apiVersion: "printscan/v1",
+  apiVersion: "pagewire/v1",
   name: "Living room printer",
   location: "",
   device: { mode: "simulated", driver: "auto", scanner: "auto" },
@@ -282,7 +282,7 @@ describe("Print view", () => {
     );
     expect(within(row("photo.jpg")).getByText(/does not accept PNG files/)).toBeTruthy();
     expect(
-      within(row("notes.docx")).getByText(/not a document format printscan can send/),
+      within(row("notes.docx")).getByText(/not a document format pagewire can send/),
     ).toBeTruthy();
     expect(row("notes.docx").textContent).toContain(
       "Open it in Word or Google Docs, choose Print > Save as PDF, then add the PDF here.",
@@ -422,7 +422,7 @@ describe("Print view", () => {
     ).toBeTruthy();
   });
 
-  test("printing is off while the connection to printscan is down", async () => {
+  test("printing is off while the connection to pagewire is down", async () => {
     const { container } = await renderPrint(ready, fakeUpload().upload, false);
     await pick(container, [new File(["%PDF-1.7\n"], "a.pdf")]);
     await waitFor(() => expect(within(row("a.pdf")).getByText(/Ready to print/)).toBeTruthy());

@@ -23,8 +23,8 @@ COPY . .
 COPY --from=ui /src/ui/dist ./ui/dist
 ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -linkmode external -extldflags -static -X main.version=${VERSION}" -o /out/printscan ./cmd/printscan \
- && go tool go-licenses save ./cmd/printscan --save_path /out/licenses/go \
+    CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -linkmode external -extldflags -static -X main.version=${VERSION}" -o /out/pagewire ./cmd/pagewire \
+ && go tool go-licenses save ./cmd/pagewire --save_path /out/licenses/go \
  # go-licenses skips the standard library, which is linked into the binary too.
  && cp "$(go env GOROOT)/LICENSE" /out/licenses/go/LICENSE-go-stdlib
 # Licence texts of the statically linked C libraries. Alpine ships no licence file for musl,
@@ -38,12 +38,12 @@ RUN mkdir -p /out/licenses/c/musl /out/licenses/c/libjpeg-turbo /out/licenses/c/
  && for f in musl/COPYRIGHT libjpeg-turbo/LICENSE.md libjpeg-turbo/README.ijg libpng/LICENSE zlib/LICENSE; do test -s "/out/licenses/c/$f" || { echo "empty licence file $f" >&2; exit 1; }; done
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
-COPY --from=go /out/printscan /printscan
+COPY --from=go /out/pagewire /pagewire
 COPY --from=go /out/licenses /licenses
-COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/printscan/
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/pagewire/
 COPY --from=go --chown=65532:65532 /out/data /data
 USER 65532:65532
 EXPOSE 8080 8081
-HEALTHCHECK CMD ["/printscan", "healthcheck"]
-ENTRYPOINT ["/printscan"]
+HEALTHCHECK CMD ["/pagewire", "healthcheck"]
+ENTRYPOINT ["/pagewire"]
 CMD ["serve"]

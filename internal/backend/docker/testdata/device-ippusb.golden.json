@@ -17,7 +17,7 @@
         "agent",
         "probe",
         "--out",
-        "/run/printscan/inventory.json"
+        "/run/pagewire/inventory.json"
       ],
       "Healthcheck": {
         "Test": [
@@ -28,12 +28,12 @@
       "Volumes": null,
       "WorkingDir": "",
       "Entrypoint": [
-        "/printscan"
+        "/pagewire"
       ],
       "Labels": {
-        "dev.printscan.container": "probe",
-        "dev.printscan.init": "true",
-        "dev.printscan.managed-by": "printscan"
+        "dev.pagewire.container": "probe",
+        "dev.pagewire.init": "true",
+        "dev.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -116,8 +116,8 @@
       "Mounts": [
         {
           "Type": "volume",
-          "Source": "printscan-device-run",
-          "Target": "/run/printscan",
+          "Source": "pagewire-device-run",
+          "Target": "/run/pagewire",
           "VolumeOptions": {
             "NoCopy": true
           }
@@ -147,7 +147,7 @@
       "StdinOnce": false,
       "Env": [],
       "Cmd": [
-        "--config-file=/etc/printscan/dbus.conf",
+        "--config-file=/etc/pagewire/dbus.conf",
         "--nofork",
         "--nopidfile"
       ],
@@ -156,16 +156,16 @@
           "NONE"
         ]
       },
-      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
       "Volumes": null,
       "WorkingDir": "",
       "Entrypoint": [
         "/usr/bin/dbus-daemon"
       ],
       "Labels": {
-        "dev.printscan.container": "dbus",
-        "dev.printscan.init": "false",
-        "dev.printscan.managed-by": "printscan"
+        "dev.pagewire.container": "dbus",
+        "dev.pagewire.init": "false",
+        "dev.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -246,7 +246,7 @@
       "Mounts": [
         {
           "Type": "volume",
-          "Source": "printscan-device-dbus",
+          "Source": "pagewire-device-dbus",
           "Target": "/run/dbus",
           "VolumeOptions": {
             "NoCopy": true
@@ -276,7 +276,7 @@
         "--no-chroot",
         "--no-rlimits",
         "-f",
-        "/etc/printscan/avahi-daemon.conf"
+        "/etc/pagewire/avahi-daemon.conf"
       ],
       "Healthcheck": {
         "Test": [
@@ -289,16 +289,16 @@
         "StartPeriod": 30000000000,
         "Retries": 3
       },
-      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
       "Volumes": null,
       "WorkingDir": "",
       "Entrypoint": [
         "/usr/sbin/avahi-daemon"
       ],
       "Labels": {
-        "dev.printscan.container": "avahi",
-        "dev.printscan.init": "false",
-        "dev.printscan.managed-by": "printscan"
+        "dev.pagewire.container": "avahi",
+        "dev.pagewire.init": "false",
+        "dev.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -382,7 +382,7 @@
       "Mounts": [
         {
           "Type": "volume",
-          "Source": "printscan-device-dbus",
+          "Source": "pagewire-device-dbus",
           "Target": "/run/dbus",
           "VolumeOptions": {
             "NoCopy": true
@@ -411,17 +411,17 @@
         "agent",
         "run",
         "--control-plane-url",
-        "http://printscan.printing.svc:8081",
+        "http://pagewire.printing.svc:8081",
         "--token-file",
-        "/var/run/printscan/token",
+        "/var/run/pagewire/token",
         "--pod-uid",
         "docker-30a901f0b833",
         "--dbus-address",
         "unix:path=/run/dbus/system_bus_socket",
         "--inventory",
-        "/run/printscan/inventory.json",
+        "/run/pagewire/inventory.json",
         "--blob-status",
-        "/run/printscan/blobs.json",
+        "/run/pagewire/blobs.json",
         "--blob-dir",
         "/blobs"
       ],
@@ -434,12 +434,12 @@
       "Volumes": null,
       "WorkingDir": "",
       "Entrypoint": [
-        "/printscan"
+        "/pagewire"
       ],
       "Labels": {
-        "dev.printscan.container": "agent",
-        "dev.printscan.init": "false",
-        "dev.printscan.managed-by": "printscan"
+        "dev.pagewire.container": "agent",
+        "dev.pagewire.init": "false",
+        "dev.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -520,8 +520,8 @@
       "Mounts": [
         {
           "Type": "volume",
-          "Source": "printscan-device-token",
-          "Target": "/var/run/printscan",
+          "Source": "pagewire-device-token",
+          "Target": "/var/run/pagewire",
           "ReadOnly": true,
           "VolumeOptions": {
             "NoCopy": true
@@ -529,8 +529,8 @@
         },
         {
           "Type": "volume",
-          "Source": "printscan-device-run",
-          "Target": "/run/printscan",
+          "Source": "pagewire-device-run",
+          "Target": "/run/pagewire",
           "ReadOnly": true,
           "VolumeOptions": {
             "NoCopy": true
@@ -538,7 +538,7 @@
         },
         {
           "Type": "volume",
-          "Source": "printscan-device-dbus",
+          "Source": "pagewire-device-dbus",
           "Target": "/run/dbus",
           "VolumeOptions": {
             "NoCopy": true
@@ -546,7 +546,7 @@
         },
         {
           "Type": "volume",
-          "Source": "printscan-blobs",
+          "Source": "pagewire-blobs",
           "Target": "/blobs",
           "VolumeOptions": {
             "NoCopy": true
@@ -579,16 +579,16 @@
           "NONE"
         ]
       },
-      "Image": "ghcr.io/thephaseless/printscan-device:0.0.0-test",
+      "Image": "ghcr.io/thephaseless/pagewire-device:0.0.0-test",
       "Volumes": null,
       "WorkingDir": "",
       "Entrypoint": [
         "/usr/local/sbin/ipp-usb"
       ],
       "Labels": {
-        "dev.printscan.container": "ipp-usb",
-        "dev.printscan.init": "false",
-        "dev.printscan.managed-by": "printscan"
+        "dev.pagewire.container": "ipp-usb",
+        "dev.pagewire.init": "false",
+        "dev.pagewire.managed-by": "pagewire"
       },
       "StopTimeout": 10
     },
@@ -675,7 +675,7 @@
       "Mounts": [
         {
           "Type": "volume",
-          "Source": "printscan-device-config",
+          "Source": "pagewire-device-config",
           "Target": "/etc/ipp-usb",
           "ReadOnly": true,
           "VolumeOptions": {
@@ -684,7 +684,7 @@
         },
         {
           "Type": "volume",
-          "Source": "printscan-device-dbus",
+          "Source": "pagewire-device-dbus",
           "Target": "/run/dbus",
           "VolumeOptions": {
             "NoCopy": true

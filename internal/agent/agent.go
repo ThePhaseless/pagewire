@@ -17,10 +17,10 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/dnssd"
-	"github.com/ThePhaseless/printscan/internal/pappl"
-	"github.com/ThePhaseless/printscan/internal/usb"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/dnssd"
+	"github.com/ThePhaseless/pagewire/internal/pappl"
+	"github.com/ThePhaseless/pagewire/internal/usb"
 )
 
 const (

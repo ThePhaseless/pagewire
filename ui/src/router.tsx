@@ -4,7 +4,7 @@ import { useEffect, useSyncExternalStore } from "react";
 export const routes = ["/", "/print", "/scan", "/settings", "/setup"] as const;
 export type Route = (typeof routes)[number];
 
-const NAVIGATE = "printscan:navigate";
+const NAVIGATE = "pagewire:navigate";
 
 export function isRoute(path: string): path is Route {
   return (routes as readonly string[]).includes(path);

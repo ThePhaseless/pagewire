@@ -9,9 +9,9 @@ const (
 	// TokenScheme is the Authorization scheme: "Authorization: Bearer <token>".
 	TokenScheme = "Bearer"
 
-	InventoryFile  = "/run/printscan/inventory.json"
-	BlobStatusFile = "/run/printscan/blobs.json"
-	AgentTokenFile = "/var/run/printscan/token" //nolint:gosec // a file path, not a credential
+	InventoryFile  = "/run/pagewire/inventory.json"
+	BlobStatusFile = "/run/pagewire/blobs.json"
+	AgentTokenFile = "/var/run/pagewire/token" //nolint:gosec // a file path, not a credential
 	DBusAddress    = "unix:path=/run/dbus/system_bus_socket"
 
 	ServiceIPP   = "_ipp._tcp"

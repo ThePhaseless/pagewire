@@ -26,7 +26,7 @@ func TestNewClientTCPPodman(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"Id":"abc","Names":["/printscan-device-agent"],"State":"running"}]`))
+			_, _ = w.Write([]byte(`[{"Id":"abc","Names":["/pagewire-device-agent"],"State":"running"}]`))
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}

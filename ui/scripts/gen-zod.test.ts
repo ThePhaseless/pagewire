@@ -23,7 +23,7 @@ describe("keywords", () => {
     ["number", { type: "number" }, "z.number()"],
     ["boolean", { type: "boolean" }, "z.boolean()"],
     ["enum", { type: "string", enum: ["a", "b"] }, 'z.enum(["a","b"])'],
-    ["const", { type: "string", const: "printscan/v1" }, 'z.literal("printscan/v1")'],
+    ["const", { type: "string", const: "pagewire/v1" }, 'z.literal("pagewire/v1")'],
     [
       "array bounds",
       { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },

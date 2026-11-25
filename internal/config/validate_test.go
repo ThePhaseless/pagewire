@@ -154,7 +154,7 @@ func TestCheck(t *testing.T) {
 	if c.Name != "Living room printer" {
 		t.Errorf("name %q", c.Name)
 	}
-	if _, err := Check([]byte("apiVersion: printscan/v1\n"), testKnown); err == nil {
+	if _, err := Check([]byte("apiVersion: pagewire/v1\n"), testKnown); err == nil {
 		t.Error("Check accepted a file without name")
 	}
 }

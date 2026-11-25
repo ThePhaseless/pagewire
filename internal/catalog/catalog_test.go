@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // hplipFingerprint is the GPG_Verification default key in hplip 3.24.4's
@@ -25,7 +25,7 @@ func TestIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.APIVersion != "printscan.catalog/v1" {
+	if c.APIVersion != "pagewire.catalog/v1" {
 		t.Errorf("apiVersion %q", c.APIVersion)
 	}
 	ids := func(name string, list []string) {

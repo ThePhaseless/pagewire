@@ -9,7 +9,7 @@
 // workload instead of tearing it down.
 //
 // Ownership: the backend only stops or removes containers and volumes that
-// carry dev.printscan.managed-by=printscan. A foreign container or volume
+// carry dev.pagewire.managed-by=pagewire. A foreign container or volume
 // holding one of its names fails the rollout and is left alone.
 package docker
 
@@ -35,9 +35,9 @@ import (
 	"github.com/moby/moby/client"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ThePhaseless/printscan/internal/backend/k8s"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/usb"
+	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/usb"
 )
 
 // Params are the backend's inputs besides the Spec.
@@ -222,7 +222,7 @@ func (b *Backend) resolveSelf(ctx context.Context) (string, error) {
 	r, err := b.eng.ContainerInspect(ctx, b.p.Container, client.ContainerInspectOptions{})
 	switch {
 	case cerrdefs.IsNotFound(err):
-		b.self = k8s.ImageRef(b.p.Registry, b.p.Tag, "printscan", b.p.Overrides)
+		b.self = k8s.ImageRef(b.p.Registry, b.p.Tag, "pagewire", b.p.Overrides)
 		b.warnSelf.Do(func() {
 			slog.Warn("no container named "+b.p.Container+"; the device containers use the registry image",
 				"image", b.self)
@@ -543,7 +543,7 @@ func containerName(c container.Summary) string {
 }
 
 // teardown stops and removes the owned containers, mains before inits, with
-// their anonymous volumes, then the owned per-rollout volumes. printscan-blobs
+// their anonymous volumes, then the owned per-rollout volumes. pagewire-blobs
 // is never removed.
 func (b *Backend) teardown(ctx context.Context, owned []container.Summary) error {
 	ordered := slices.Clone(owned)
@@ -614,7 +614,7 @@ func (b *Backend) pull(ctx context.Context, ref string) error {
 }
 
 // ensureVolumes recreates the owned per-rollout volumes, refuses foreign ones
-// with the same names, and creates printscan-blobs when it is mounted and missing.
+// with the same names, and creates pagewire-blobs when it is mounted and missing.
 func (b *Backend) ensureVolumes(ctx context.Context, w *wanted) error {
 	for _, v := range rolloutVolumes() {
 		r, err := b.eng.VolumeInspect(ctx, v.Name, client.VolumeInspectOptions{})

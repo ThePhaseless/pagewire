@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: printscan-data
+  name: pagewire-data
   namespace: printing
 spec:
   accessModes: [ReadWriteOnce]
@@ -12,14 +12,14 @@ spec:
       storage: 2Gi
 ---
 # Vendor blobs (for example the HP plug-in). Mounted by every probe and usb device pod
-# that printscan renders, not by the control plane: the agent container read-write, to
+# that pagewire renders, not by the control plane: the agent container read-write, to
 # download vendor archives and show their licence text before you accept; fetch-blobs
 # read-write; the driver and scanner containers read-only. It must be mountable on the
 # node with the USB printer. The name is the --blob-pvc default.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: printscan-blobs
+  name: pagewire-blobs
   namespace: printing
 spec:
   accessModes: [ReadWriteOnce]

@@ -20,7 +20,7 @@ Go, from the repository root:
 mise x -- go vet ./...
 mise x -- golangci-lint run
 mise x -- go test -race -count=1 ./...
-mise x -- go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml
+mise x -- go run ./cmd/pagewire validate examples/pagewire.yaml examples/simulated.yaml
 ```
 
 UI, in `ui/`:

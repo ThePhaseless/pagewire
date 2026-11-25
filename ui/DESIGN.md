@@ -1,6 +1,6 @@
-# printscan UI design system
+# pagewire UI design system
 
-printscan runs one household printer and scanner. People reach the web UI from a phone in the hallway ("print this boarding pass"), from a laptop at a desk, and now and then from the homelab owner's screen while setting up the device. Each visit is a short task: print, scan, check why the printer is offline, change a default. Every screen is an Operate surface: the interface should get out of the way, look the same from screen to screen, and keep its personality to small details.
+pagewire runs one household printer and scanner. People reach the web UI from a phone in the hallway ("print this boarding pass"), from a laptop at a desk, and now and then from the homelab owner's screen while setting up the device. Each visit is a short task: print, scan, check why the printer is offline, change a default. Every screen is an Operate surface: the interface should get out of the way, look the same from screen to screen, and keep its personality to small details.
 
 There is no PRODUCT.md yet. The product facts above are the project's own assumptions; nobody was interviewed for them.
 
@@ -78,7 +78,7 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
 
 ## App shell (`src/app.tsx`)
 
-- The header is sticky and slightly translucent. It shows the paper-sheet mark, the device name (the config's `name`, or the last good config's while the file is invalid, else "printscan") and a `StatusBadge` for the device phase: Ready, Starting (breathing), Needs attention, Not set up (no config file), Printer not found (a configured device has been looking for a printer for 5 s), or Offline when the event stream is down.
+- The header is sticky and slightly translucent. It shows the paper-sheet mark, the device name (the config's `name`, or the last good config's while the file is invalid, else "pagewire") and a `StatusBadge` for the device phase: Ready, Starting (breathing), Needs attention, Not set up (no config file), Printer not found (a configured device has been looking for a printer for 5 s), or Offline when the event stream is down.
 - Navigation has four destinations: Status, Print, Scan and Settings.
   - Under 768 px it is a bottom tab bar, and the current item gets a tinted pill behind its icon.
   - From 768 px it is a compact rail with the icon above the label.
@@ -89,7 +89,7 @@ Weights are `--weight-regular` 420, `--weight-medium` 540 (labels, buttons) and 
   - invalid config (red, with the first error's line and message and a link to Settings), except on Settings, which lists the errors itself.
 - A skip link, the toast region, and focus moving to the page `h1` after each navigation.
 - Pages that hold unsaved work block navigation to another page with `useNavigationBlocker` (`src/router.tsx`): links, `navigate()` and Back/Forward wait for the page to confirm. Settings asks in an alert dialog while it has unsaved edits, and also sets `beforeunload`.
-- `document.title` is the page `h1` and the device name ("Print · Hall printer"), or `printscan` before one is set. In setup the title carries the step ("Step 2 of 5: Name and location") through `PageHeader`'s `documentTitle`.
+- `document.title` is the page `h1` and the device name ("Print · Hall printer"), or `pagewire` before one is set. In setup the title carries the step ("Step 2 of 5: Name and location") through `PageHeader`'s `documentTitle`.
 
 ## Components (`src/components/ui.tsx`)
 

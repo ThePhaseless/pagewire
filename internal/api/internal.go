@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const maxReportBody = 1 << 20

@@ -14,10 +14,10 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 func hplipRef(t *testing.T) device.EULARef {

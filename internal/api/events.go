@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // subscriberBuffer is how many events a slow SSE client may lag behind

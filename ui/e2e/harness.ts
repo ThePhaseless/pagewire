@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Browser, type BrowserContextOptions, chromium, type Page } from "playwright-core";
 
-// The e2e run must see no fake DOM: package.json's e2e script sets PRINTSCAN_E2E=1.
+// The e2e run must see no fake DOM: package.json's e2e script sets PAGEWIRE_E2E=1.
 if (typeof window !== "undefined") throw new Error("happy-dom is registered in the e2e run");
 
 export const repoRoot = resolve(import.meta.dir, "../..");
 export const artifactsDir = join(import.meta.dir, "artifacts");
-const binary = join(repoRoot, ".cache/printscan");
+const binary = join(repoRoot, ".cache/pagewire");
 
 /** Console errors matching one of these are ignored. Kept empty: fix the cause instead. */
 export const consoleAllowlist: RegExp[] = [];
@@ -25,7 +25,7 @@ export function buildBinary(): Promise<void> {
   built ??= (async () => {
     if (!existsSync(join(repoRoot, "ui/dist/index.html")))
       throw new Error("ui/dist/index.html is missing: run `bun run build` before `bun run e2e`");
-    const p = Bun.spawn(["go", "build", "-o", binary, "./cmd/printscan"], {
+    const p = Bun.spawn(["go", "build", "-o", binary, "./cmd/pagewire"], {
       cwd: repoRoot,
       stdout: "inherit",
       stderr: "inherit",
@@ -58,8 +58,8 @@ export async function startServer(
 ): Promise<Server> {
   await buildBinary();
   mkdirSync(artifactsDir, { recursive: true });
-  const dataDir = mkdtempSync(join(tmpdir(), "printscan-e2e-"));
-  const configPath = join(dataDir, "printscan.yaml");
+  const dataDir = mkdtempSync(join(tmpdir(), "pagewire-e2e-"));
+  const configPath = join(dataDir, "pagewire.yaml");
   const url = `http://127.0.0.1:${freePort()}`;
   const log = join(artifactsDir, `server-${name}.log`);
   // A file, not a pipe: an unread pipe would fill up and stall the server.

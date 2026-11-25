@@ -6,15 +6,15 @@ import (
 	"io"
 	"os"
 
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
 )
 
 // validate checks each file with the same check serve uses and prints
 // file:line:col: message per problem. It returns 1 on any error.
 func validate(files []string, stdout, stderr io.Writer) int {
 	if len(files) == 0 || files[0] != "help" && isHelp(files[0]) { // a file may be named help
-		_, _ = fmt.Fprintln(stderr, "usage: printscan validate <file>...\n\nChecks each config file and prints file:line:col: message per problem.")
+		_, _ = fmt.Fprintln(stderr, "usage: pagewire validate <file>...\n\nChecks each config file and prints file:line:col: message per problem.")
 		return 2
 	}
 	known := catalog.Known()

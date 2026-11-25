@@ -15,10 +15,10 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // runWith builds a makeself archive whose payload holds the given tar entries.
@@ -202,7 +202,7 @@ func TestMarkerRecheck(t *testing.T) {
 			prepare := func(t *testing.T) fixture {
 				f := setup(t, "arm64")
 				wantState(t, f.fetch(t, f.v.blob(t), accepted(t), "arm64"), device.BlobInstalled, "")
-				p := filepath.Join(f.dir, id, ".printscan-text-sha256")
+				p := filepath.Join(f.dir, id, ".pagewire-text-sha256")
 				if marker == nil {
 					_ = os.Remove(p)
 				} else if err := os.WriteFile(p, []byte(*marker), 0o600); err != nil {
@@ -217,7 +217,7 @@ func TestMarkerRecheck(t *testing.T) {
 				if f.v.hits.Load() == hits {
 					t.Error("no re-check: the install was trusted without its text marker")
 				}
-				got, _ := os.ReadFile(filepath.Join(f.dir, id, ".printscan-text-sha256")) //nolint:gosec // test temp dir
+				got, _ := os.ReadFile(filepath.Join(f.dir, id, ".pagewire-text-sha256")) //nolint:gosec // test temp dir
 				if strings.TrimSpace(string(got)) != licenseSHA {
 					t.Errorf("marker = %q after the re-check", got)
 				}

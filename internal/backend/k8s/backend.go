@@ -16,7 +16,7 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Backend runs the device pod through the Kubernetes API. It implements
@@ -106,7 +106,7 @@ func (b *Backend) resolveOwner(ctx context.Context) error {
 		}
 	}
 	if b.p.SelfImage == "" {
-		b.p.SelfImage = ImageRef(b.p.Registry, b.p.Tag, "printscan", b.p.Overrides)
+		b.p.SelfImage = ImageRef(b.p.Registry, b.p.Tag, "pagewire", b.p.Overrides)
 		slog.Warn("owner deployment has no container named "+SelfContainer+"; using the fallback agent image",
 			"deployment", ns+"/"+name, "image", b.p.SelfImage)
 	}

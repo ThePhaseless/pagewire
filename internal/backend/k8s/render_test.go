@@ -17,20 +17,20 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
-const selfImage = "ghcr.io/thephaseless/printscan:0.0.0-test"
+const selfImage = "ghcr.io/thephaseless/pagewire:0.0.0-test"
 
 func goldenParams() Params {
 	return Params{
 		Namespace:   "printing",
-		Owner:       Owner{Name: "printscan", UID: "00000000-0000-0000-0000-000000000001"},
+		Owner:       Owner{Name: "pagewire", UID: "00000000-0000-0000-0000-000000000001"},
 		Registry:    "ghcr.io/thephaseless",
 		Tag:         "0.0.0-test",
-		AgentURL:    "http://printscan.printing.svc:8081",
+		AgentURL:    "http://pagewire.printing.svc:8081",
 		USBResource: "devic.es/printer",
-		BlobPVC:     "printscan-blobs",
+		BlobPVC:     "pagewire-blobs",
 		SelfImage:   selfImage,
 	}
 }
@@ -282,12 +282,12 @@ func TestNoUSBResource(t *testing.T) {
 
 func TestArgs(t *testing.T) {
 	fixed := []string{
-		"--control-plane-url", "http://printscan.printing.svc:8081",
-		"--token-file", "/var/run/printscan/token",
+		"--control-plane-url", "http://pagewire.printing.svc:8081",
+		"--token-file", "/var/run/pagewire/token",
 		"--pod-uid", "$(POD_UID)",
 		"--dbus-address", "unix:path=/run/dbus/system_bus_socket",
-		"--inventory", "/run/printscan/inventory.json",
-		"--blob-status", "/run/printscan/blobs.json",
+		"--inventory", "/run/pagewire/inventory.json",
+		"--blob-status", "/run/pagewire/blobs.json",
 	}
 	for name, s := range goldenSpecs {
 		d, _ := render(t, s, goldenParams())
@@ -304,7 +304,7 @@ func TestArgs(t *testing.T) {
 		if name == "hplip-airsane-blob" {
 			want = append(want, "--pappl-url", "ipp://127.0.0.1:8002/ipp/system")
 		}
-		if !slices.Equal(a.Command, []string{"/printscan"}) || !slices.Equal(a.Args, want) {
+		if !slices.Equal(a.Command, []string{"/pagewire"}) || !slices.Equal(a.Args, want) {
 			t.Errorf("%s agent: %v %v", name, a.Command, a.Args)
 		}
 		if len(a.Env) != 1 || a.Env[0].Name != "POD_UID" || a.Env[0].ValueFrom.FieldRef.FieldPath != "metadata.uid" {
@@ -337,15 +337,15 @@ func TestArgs(t *testing.T) {
 	d, _ = render(t, goldenSpecs["hplip-airsane-blob"], goldenParams())
 	fb := find(t, d, "fetch-blobs")
 	wantFB := []string{
-		"agent", "fetch", "--dir", "/blobs", "--status-out", "/run/printscan/blobs.json",
+		"agent", "fetch", "--dir", "/blobs", "--status-out", "/run/pagewire/blobs.json",
 		"--blob", "hplip-plugin@3.24.4", "--optional", "hplip-plugin",
 		"--accept", "hplip-plugin@3.24.4@" + goldenTextSHA,
 	}
 	if !slices.Equal(fb.Args, wantFB) {
 		t.Errorf("fetch-blobs args %v", fb.Args)
 	}
-	if !slices.ContainsFunc(fb.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/run/printscan" && !m.ReadOnly }) {
-		t.Errorf("fetch-blobs has no writable /run/printscan: %+v", fb.VolumeMounts)
+	if !slices.ContainsFunc(fb.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == "/run/pagewire" && !m.ReadOnly }) {
+		t.Errorf("fetch-blobs has no writable /run/pagewire: %+v", fb.VolumeMounts)
 	}
 
 	required := *goldenSpecs["hplip-airsane-blob"]
@@ -380,11 +380,11 @@ func TestPullPolicies(t *testing.T) {
 		t.Errorf("tag main: self %v other %v", self, other)
 	}
 	p = goldenParams()
-	p.SelfImage = "ghcr.io/thephaseless/printscan:main"
+	p.SelfImage = "ghcr.io/thephaseless/pagewire:main"
 	if self, _, _ = policies(p); !one(self, corev1.PullAlways) {
 		t.Errorf("self main: %v", self)
 	}
-	p.SelfImage = "ghcr.io/thephaseless/printscan:main" + digest
+	p.SelfImage = "ghcr.io/thephaseless/pagewire:main" + digest
 	self, _, images := policies(p)
 	if !one(self, corev1.PullIfNotPresent) || images["agent"] != p.SelfImage {
 		t.Errorf("self digest: %v %s", self, images["agent"])
@@ -406,7 +406,7 @@ func TestMetadata(t *testing.T) {
 	for name, s := range goldenSpecs {
 		d, cm := render(t, s, goldenParams())
 		for _, refs := range [][]metav1.OwnerReference{d.OwnerReferences, cm.OwnerReferences} {
-			if len(refs) != 1 || refs[0].UID != "00000000-0000-0000-0000-000000000001" || refs[0].Name != "printscan" ||
+			if len(refs) != 1 || refs[0].UID != "00000000-0000-0000-0000-000000000001" || refs[0].Name != "pagewire" ||
 				refs[0].Kind != "Deployment" || !*refs[0].Controller || !*refs[0].BlockOwnerDeletion {
 				t.Errorf("%s ownerReferences %+v", name, refs)
 			}
@@ -419,7 +419,7 @@ func TestMetadata(t *testing.T) {
 		if d.Annotations["reloader.stakater.com/auto"] != "false" || d.Annotations[SpecHashAnnotation] != s.Hash {
 			t.Errorf("%s: annotations %v", name, d.Annotations)
 		}
-		if d.Name != DeviceName || d.Namespace != "printing" || d.Labels[NameLabel] != DeviceName || d.Labels[ManagedByLabel] != "printscan" {
+		if d.Name != DeviceName || d.Namespace != "printing" || d.Labels[NameLabel] != DeviceName || d.Labels[ManagedByLabel] != "pagewire" {
 			t.Errorf("%s: metadata %+v", name, d.ObjectMeta)
 		}
 	}

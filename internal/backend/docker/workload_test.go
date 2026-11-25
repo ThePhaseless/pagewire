@@ -16,8 +16,8 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 
-	"github.com/ThePhaseless/printscan/internal/backend/k8s"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const goldenSelf = "sha256:self"
@@ -28,7 +28,7 @@ func goldenParams(s *device.Spec) k8s.Params {
 	return k8s.Params{
 		Registry:  "ghcr.io/thephaseless",
 		Tag:       "0.0.0-test",
-		AgentURL:  "http://printscan.printing.svc:8081",
+		AgentURL:  "http://pagewire.printing.svc:8081",
 		BlobPVC:   BlobVolume,
 		SelfImage: goldenSelf,
 		PodUID:    "docker-" + s.Hash[:12],
@@ -148,7 +148,7 @@ func byName(cs []plannedContainer) map[string]plannedContainer {
 }
 
 func TestUIDRule(t *testing.T) {
-	// Writers of run-printscan or blobs run as root (named volumes have no
+	// Writers of run-pagewire or blobs run as root (named volumes have no
 	// fsGroup); in usb and probe modes the agent stages EULA texts on blobs.
 	want := map[string]map[string]string{
 		"simulated":          {"probe": "0:0", "agent": "65532:65532", "dbus": "101:101", "avahi": "102:102", "sim-printer": "65532:65532", "airsane": "65532:65532"},
@@ -194,7 +194,7 @@ func TestHardening(t *testing.T) {
 		for _, c := range cs {
 			cfg, hc := c.Opts.Config, c.Opts.HostConfig
 			id := spec + "/" + c.Name
-			if c.Opts.Name != "printscan-device-"+c.Name {
+			if c.Opts.Name != "pagewire-device-"+c.Name {
 				t.Errorf("%s: name %q", id, c.Opts.Name)
 			}
 			if !hc.ReadonlyRootfs || hc.Privileged || !slices.Equal(hc.CapDrop, []string{"ALL"}) || len(hc.CapAdd) > 0 ||

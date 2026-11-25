@@ -22,7 +22,7 @@ import (
 
 	"github.com/google/renameio/v2"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // Scan states.

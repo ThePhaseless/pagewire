@@ -82,7 +82,7 @@ export const scanStrings = {
   },
   confirmDelete: {
     title: "Delete this scan?",
-    body: "The pages and the downloadable file are removed from printscan. This cannot be undone.",
+    body: "The pages and the downloadable file are removed from pagewire. This cannot be undone.",
     confirm: "Delete scan",
     failed: "The scan was not deleted",
     deleted: "Scan deleted",

@@ -30,7 +30,7 @@ const viewports: Viewport[] = [
 
 const samplePdf = join(repoRoot, "internal/printing/testdata/sample.pdf");
 // A 1×1 PNG, which the simulated printer (PDF and JPEG, no PNG) gets converted to JPEG.
-const tmp = mkdtempSync(join(tmpdir(), "printscan-e2e-files-"));
+const tmp = mkdtempSync(join(tmpdir(), "pagewire-e2e-files-"));
 const samplePng = join(tmp, "dot.png");
 await Bun.write(
   samplePng,

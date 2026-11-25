@@ -11,9 +11,9 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // TestRealHPLIPPlugin checks the pinned HP plug-in against local copies of the
@@ -21,12 +21,12 @@ import (
 // and the licence text path. It is opt-in, as the files are HP's and never
 // part of the repo:
 //
-//	PRINTSCAN_HPLIP_RUN=/path/hplip-3.24.4-plugin.run PRINTSCAN_HPLIP_ASC=/path/hplip-3.24.4-plugin.run.asc \
+//	PAGEWIRE_HPLIP_RUN=/path/hplip-3.24.4-plugin.run PAGEWIRE_HPLIP_ASC=/path/hplip-3.24.4-plugin.run.asc \
 //	  go test ./internal/blobs -run TestRealHPLIPPlugin -v
 func TestRealHPLIPPlugin(t *testing.T) {
-	run, asc := os.Getenv("PRINTSCAN_HPLIP_RUN"), os.Getenv("PRINTSCAN_HPLIP_ASC")
+	run, asc := os.Getenv("PAGEWIRE_HPLIP_RUN"), os.Getenv("PAGEWIRE_HPLIP_ASC")
 	if run == "" || asc == "" {
-		t.Skip("set PRINTSCAN_HPLIP_RUN and PRINTSCAN_HPLIP_ASC to local copies of HP's plug-in and signature")
+		t.Skip("set PAGEWIRE_HPLIP_RUN and PAGEWIRE_HPLIP_ASC to local copies of HP's plug-in and signature")
 	}
 	b, ok := catalog.Default().Blob(id)
 	if !ok {

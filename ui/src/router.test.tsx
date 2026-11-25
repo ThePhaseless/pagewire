@@ -11,7 +11,7 @@ let setName: (n: string) => void = () => {};
 
 function Harness() {
   const [heading, setH] = useState<{ title: string; documentTitle?: string }>({ title: "Status" });
-  const [name, setN] = useState("printscan");
+  const [name, setN] = useState("pagewire");
   setHeading = setH;
   setName = setN;
   useDocumentTitle(name);
@@ -25,13 +25,13 @@ function Harness() {
 describe("document title", () => {
   test("is the page heading and the device name on first render", () => {
     render(<Harness />);
-    expect(document.title).toBe("Status · printscan");
+    expect(document.title).toBe("Status · pagewire");
   });
 
   test("follows heading changes, the setup step override and the device name", async () => {
     render(<Harness />);
     act(() => setHeading({ title: "Print" }));
-    await waitFor(() => expect(document.title).toBe("Print · printscan"));
+    await waitFor(() => expect(document.title).toBe("Print · pagewire"));
     act(() => setName("Hall printer"));
     await waitFor(() => expect(document.title).toBe("Print · Hall printer"));
     act(() =>

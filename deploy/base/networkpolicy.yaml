@@ -1,12 +1,12 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: printscan
+  name: pagewire
   namespace: printing
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: printscan
+      app.kubernetes.io/name: pagewire
   policyTypes: [Ingress]
   ingress:
     # Web UI and API from the ingress controller's namespace only. Set the name of

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/api.schema.json",
+  "$id": "https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/api.schema.json",
   "$defs": {
     "AdvertisedService": {
       "properties": {
@@ -56,7 +56,7 @@
       "properties": {
         "apiVersion": {
           "type": "string",
-          "const": "printscan/v1"
+          "const": "pagewire/v1"
         },
         "name": {
           "type": "string",

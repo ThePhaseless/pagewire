@@ -1,7 +1,7 @@
 # Development: the control plane with the simulated backend (in-process virtual printer and scanner).
 # docker compose up, then open http://127.0.0.1:8080
 services:
-  printscan:
+  pagewire:
     build: .
     command: ["serve", "--backend=sim"]
     ports:

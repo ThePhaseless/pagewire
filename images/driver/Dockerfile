@@ -1,4 +1,4 @@
-# printscan driver images: PAPPL retrofit Printer Applications built the way
+# pagewire driver images: PAPPL retrofit Printer Applications built the way
 # the upstream rock recipes (rockcraft.yaml) build them, without their
 # avahi-daemon and dbus parts (the device pod's single Avahi comes from the
 # device image), and with Ubuntu packages for CUPS, its backends, the filters
@@ -129,7 +129,7 @@ RUN apt-get update \
       libjpeg8 libpng16-16t64 libusb-1.0-0 libpam0g zlib1g \
  && rm -rf /var/lib/apt/lists/* \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
- && useradd --uid 10001 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin printscan
+ && useradd --uid 10001 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pagewire
 ENV BACKEND_DIR=/usr/lib/cups/backend \
     FILTER_DIR=/usr/lib/cups/filter
 
@@ -150,19 +150,19 @@ RUN ldconfig \
  && mkdir -p "/var/lib/${APP}/ppd" "/var/spool/${APP}" \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && if ldd "/usr/local/bin/${APP}" | grep 'not found'; then exit 1; fi \
- && mkdir -p /usr/share/printscan \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
- && test -s /usr/share/printscan/source-packages.txt
+ && mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
-COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
 ARG VERSION
-ARG IMAGE=printscan-driver-ps
+ARG IMAGE=pagewire-driver-ps
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
-RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
-LABEL dev.printscan.sources="${SOURCES_REF}"
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL dev.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8001
 CMD ["/usr/local/bin/ps-printer-app", "-o", "server-port=8001", "server"]
 
@@ -188,19 +188,19 @@ RUN ldconfig \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && test -x /usr/lib/cups/backend/hp \
  && if ldd "/usr/local/bin/${APP}" | grep 'not found'; then exit 1; fi \
- && mkdir -p /usr/share/printscan \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
- && test -s /usr/share/printscan/source-packages.txt
+ && mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
-COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
 ARG VERSION
-ARG IMAGE=printscan-driver-hplip
+ARG IMAGE=pagewire-driver-hplip
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
-RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
-LABEL dev.printscan.sources="${SOURCES_REF}"
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL dev.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8002
 CMD ["/usr/local/bin/hplip-printer-app", "-o", "server-port=8002", "server"]
 
@@ -216,19 +216,19 @@ RUN ldconfig \
  && mkdir -p "/var/lib/${APP}/ppd" "/var/spool/${APP}" \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && if ldd "/usr/local/bin/${APP}" | grep 'not found'; then exit 1; fi \
- && mkdir -p /usr/share/printscan \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
- && test -s /usr/share/printscan/source-packages.txt
+ && mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
-COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
 ARG VERSION
-ARG IMAGE=printscan-driver-gutenprint
+ARG IMAGE=pagewire-driver-gutenprint
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
-RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
-LABEL dev.printscan.sources="${SOURCES_REF}"
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL dev.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8003
 CMD ["/usr/local/bin/gutenprint-printer-app", "-o", "server-port=8003", "server"]
 
@@ -244,36 +244,36 @@ RUN ldconfig \
  && mkdir -p "/var/lib/${APP}/ppd" "/var/spool/${APP}" \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && if ldd "/usr/local/bin/${APP}" | grep 'not found'; then exit 1; fi \
- && mkdir -p /usr/share/printscan \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/printscan/source-packages.txt \
- && test -s /usr/share/printscan/source-packages.txt
+ && mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
-COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/
+COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
 ARG VERSION
-ARG IMAGE=printscan-driver-ghostscript
+ARG IMAGE=pagewire-driver-ghostscript
 ARG SOURCES_REF=ghcr.io/thephaseless/${IMAGE}:${VERSION#v}-sources
-RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/printscan/SOURCES
-LABEL dev.printscan.sources="${SOURCES_REF}"
+RUN printf '%s\n' "${SOURCES_REF}" > /usr/share/pagewire/SOURCES
+LABEL dev.pagewire.sources="${SOURCES_REF}"
 EXPOSE 8004
 CMD ["/usr/local/bin/ghostscript-printer-app", "-o", "server-port=8004", "server"]
 
 # Package lists for the sources target, chosen by SOURCES_LISTS.
 FROM scratch AS lists-local
-COPY --from=ps /usr/share/printscan/source-packages.txt /lists/ps.txt
-COPY --from=hplip /usr/share/printscan/source-packages.txt /lists/hplip.txt
-COPY --from=gutenprint /usr/share/printscan/source-packages.txt /lists/gutenprint.txt
-COPY --from=ghostscript /usr/share/printscan/source-packages.txt /lists/ghostscript.txt
+COPY --from=ps /usr/share/pagewire/source-packages.txt /lists/ps.txt
+COPY --from=hplip /usr/share/pagewire/source-packages.txt /lists/hplip.txt
+COPY --from=gutenprint /usr/share/pagewire/source-packages.txt /lists/gutenprint.txt
+COPY --from=ghostscript /usr/share/pagewire/source-packages.txt /lists/ghostscript.txt
 
 # The pushed stages only COPY, so the arm64 one needs no emulation.
 FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
 FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
 
 FROM scratch AS lists-pushed
-COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/amd64.txt
-COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/arm64.txt
+COPY --from=pushed-amd64 /usr/share/pagewire/source-packages.txt /lists/amd64.txt
+COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/arm64.txt
 
 FROM lists-${SOURCES_LISTS} AS lists
 

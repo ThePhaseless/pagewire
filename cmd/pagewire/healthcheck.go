@@ -10,10 +10,10 @@ import (
 )
 
 // healthcheck GETs http://127.0.0.1:<port>/healthz, the port taken from
-// --listen (env PRINTSCAN_LISTEN, as for serve). Any non-200 is an error.
+// --listen (env PAGEWIRE_LISTEN, as for serve). Any non-200 is an error.
 func healthcheck(ctx context.Context, args []string) error {
 	fl := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
-	listen := fl.String("listen", env("PRINTSCAN_LISTEN", ":8080"), "serve's public listen address (env PRINTSCAN_LISTEN)")
+	listen := fl.String("listen", env("PAGEWIRE_LISTEN", ":8080"), "serve's public listen address (env PAGEWIRE_LISTEN)")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}

@@ -20,9 +20,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
 const (
@@ -136,7 +136,7 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 	case s.watchers <- struct{}{}:
 	default:
 		writeProblem(w, http.StatusTooManyRequests, "too-many-jobs",
-			fmt.Sprintf("printscan is already following %d print jobs; try again when one finishes", maxJobWatchers))
+			fmt.Sprintf("pagewire is already following %d print jobs; try again when one finishes", maxJobWatchers))
 		return
 	}
 	watching := false
@@ -199,7 +199,7 @@ func convertUpload(doc io.Reader, from, to string) (io.Reader, func(), error) {
 		}
 	}
 	temp := func() (*os.File, error) {
-		f, err := os.CreateTemp("", "printscan-print-*")
+		f, err := os.CreateTemp("", "pagewire-print-*")
 		if err == nil {
 			files = append(files, f)
 		}

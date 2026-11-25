@@ -16,7 +16,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const (

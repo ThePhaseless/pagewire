@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 // scanError maps a scan service error to its response.

@@ -9,8 +9,8 @@ package apitypes
 import (
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // SSE event names.
@@ -149,13 +149,13 @@ type StatusPrinter struct {
 	State     string   `json:"state" jsonschema:"enum=idle,enum=processing,enum=stopped,enum=unknown"`
 	Reasons   []string `json:"reasons"`
 	Formats   []string `json:"formats"` // the printer's own document-format-supported
-	// ConvertedFormats are the other inputs printscan converts for this printer.
+	// ConvertedFormats are the other inputs pagewire converts for this printer.
 	ConvertedFormats []FormatConversion `json:"convertedFormats"`
 	Media            []string           `json:"media"`
 	Markers          []Marker           `json:"markers"`
 }
 
-// FormatConversion is one upload format printscan converts before printing.
+// FormatConversion is one upload format pagewire converts before printing.
 type FormatConversion struct {
 	From string `json:"from"` // detected MIME type, e.g. image/png
 	To   string `json:"to"`   // MIME type sent to the printer

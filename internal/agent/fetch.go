@@ -13,9 +13,9 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // FetchConfig holds the `agent fetch` flags.

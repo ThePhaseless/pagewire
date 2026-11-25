@@ -174,7 +174,7 @@ export const statusStrings = {
       ],
       linux: (name: string) => [
         `Most desktops list ${name} in their printer settings automatically.`,
-        "Otherwise add it with: lpadmin -p printscan -E -m everywhere -v followed by the printer address below.",
+        "Otherwise add it with: lpadmin -p pagewire -E -m everywhere -v followed by the printer address below.",
         "Scanning works through sane-airscan, for example in Document Scanner or Skanlite.",
       ],
     },

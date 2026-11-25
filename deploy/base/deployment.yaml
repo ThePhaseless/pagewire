@@ -1,11 +1,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  # PRINTSCAN_K8S_OWNER below must name this Deployment: it owns the device pod.
-  name: printscan
+  # PAGEWIRE_K8S_OWNER below must name this Deployment: it owns the device pod.
+  name: pagewire
   namespace: printing
   annotations:
-    # printscan watches its config file itself; a restart is never needed.
+    # pagewire watches its config file itself; a restart is never needed.
     reloader.stakater.com/auto: "false"
 spec:
   replicas: 1
@@ -13,13 +13,13 @@ spec:
     type: Recreate # the data volume is ReadWriteOnce
   selector:
     matchLabels:
-      app.kubernetes.io/name: printscan
+      app.kubernetes.io/name: pagewire
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: printscan
+        app.kubernetes.io/name: pagewire
     spec:
-      serviceAccountName: printscan
+      serviceAccountName: pagewire
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -29,12 +29,12 @@ spec:
           type: RuntimeDefault
       containers:
         # The name is load-bearing: the control plane reads the image of the container
-        # named "printscan" in this Deployment and runs the device pod's probe, agent
+        # named "pagewire" in this Deployment and runs the device pod's probe, agent
         # and fetch-blobs containers from it. Renaming it falls back to a registry tag.
-        - name: printscan
+        - name: pagewire
           # Use main until the first release, then a version tag pinned by digest
           # (<version>@sha256:<digest>); kustomization.yaml sets the same tag.
-          image: ghcr.io/thephaseless/printscan:main
+          image: ghcr.io/thephaseless/pagewire:main
           # main moves with every push, and the device pod already pulls it Always, so
           # both run the same agent protocol. Drop this once the image is pinned as
           # <version>@sha256:<digest>.
@@ -47,28 +47,28 @@ spec:
           env:
             # Must equal <generic-device-plugin --domain>/<device name>, see
             # deploy/examples/generic-device-plugin.yaml. Empty disables USB (simulated only).
-            - name: PRINTSCAN_USB_RESOURCE
+            - name: PAGEWIRE_USB_RESOURCE
               value: devic.es/printer
-            - name: PRINTSCAN_K8S_OWNER
-              value: printscan
+            - name: PAGEWIRE_K8S_OWNER
+              value: pagewire
             - name: TZ
               value: Etc/UTC
-            # No GOMEMLIMIT: printscan sets the Go memory limit to 80% of
+            # No GOMEMLIMIT: pagewire sets the Go memory limit to 80% of
             # resources.limits.memory, read from the cgroup. Setting GOMEMLIMIT overrides that.
             # Host names the UI and API answer to, comma-separated; other Host headers
             # get 421. Unset or empty: no check on Kubernetes. "*" turns the check off.
-            # - name: PRINTSCAN_ALLOWED_HOSTS
-            #   value: printscan.example.com
+            # - name: PAGEWIRE_ALLOWED_HOSTS
+            #   value: pagewire.example.com
             # Shared secret the auth proxy adds to every request. When set, /api/ requests
             # without the header get 401. Create the Secret yourself.
-            # - name: PRINTSCAN_PROXY_SECRET
+            # - name: PAGEWIRE_PROXY_SECRET
             #   valueFrom:
             #     secretKeyRef:
-            #       name: printscan-proxy-secret
+            #       name: pagewire-proxy-secret
             #       key: secret
             # Header that carries it; this is the default.
-            # - name: PRINTSCAN_PROXY_SECRET_HEADER
-            #   value: X-Printscan-Proxy-Secret
+            # - name: PAGEWIRE_PROXY_SECRET_HEADER
+            #   value: X-Pagewire-Proxy-Secret
           livenessProbe:
             httpGet:
               path: /healthz
@@ -101,6 +101,6 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: printscan-data
+            claimName: pagewire-data
         - name: tmp
           emptyDir: {}

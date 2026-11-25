@@ -13,8 +13,8 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/goccy/go-yaml"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 //go:embed catalog.yaml all:keys fixtures/*.json

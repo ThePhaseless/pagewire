@@ -6,7 +6,7 @@ import { build } from "./build.ts";
 
 const dirs: string[] = [];
 const tmp = () => {
-  const d = mkdtempSync(join(tmpdir(), "printscan-build-"));
+  const d = mkdtempSync(join(tmpdir(), "pagewire-build-"));
   dirs.push(d);
   return d;
 };

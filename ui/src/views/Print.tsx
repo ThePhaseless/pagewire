@@ -242,7 +242,7 @@ export function Print({ upload = uploadPrint }: { upload?: typeof uploadPrint } 
   const notFound = usePrinterNotFound();
   const printer = status?.printer;
   const available = printer?.available ?? false;
-  // What the printer takes as is, plus what printscan converts for it.
+  // What the printer takes as is, plus what pagewire converts for it.
   const formats = [
     ...(printer?.formats ?? []),
     ...(printer?.convertedFormats ?? []).map((c) => c.from),

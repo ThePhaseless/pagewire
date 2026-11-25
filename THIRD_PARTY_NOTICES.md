@@ -1,19 +1,19 @@
 # Third-party notices
 
-printscan's own code is licensed under Apache-2.0 (`LICENSE`, `NOTICE`). The container images also contain third-party software, listed here per image: what it is, its licence, how it gets into the image, where its source is, and whether printscan changes it.
+pagewire's own code is licensed under Apache-2.0 (`LICENSE`, `NOTICE`). The container images also contain third-party software, listed here per image: what it is, its licence, how it gets into the image, where its source is, and whether pagewire changes it.
 
 Versions were read from images built from this repository on 2026-11-24 (linux/arm64). Ubuntu and Debian package versions move with security updates, because every image build runs `apt-get upgrade`. For a given image the authoritative lists are inside it and attached to it:
 
 - the SBOM attestation published with every image (Go modules, npm packages, Alpine, Debian and Ubuntu packages);
-- `/licenses` in the control-plane image (`go/` for Go modules and the Go standard library, `c/` for the statically linked C libraries, `printscan/` for this project's `LICENSE`, `NOTICE` and this file);
-- `/usr/share/printscan/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`;
-- `/usr/share/printscan/` in the device and driver images also holds `NOTICE`, this file and `SOURCES`, which names the image with the corresponding source (`ghcr.io/thephaseless/<image>:<tag>-sources`). The image label `dev.printscan.sources` carries the same name.
+- `/licenses` in the control-plane image (`go/` for Go modules and the Go standard library, `c/` for the statically linked C libraries, `pagewire/` for this project's `LICENSE`, `NOTICE` and this file);
+- `/usr/share/pagewire/source-packages.txt` in the device and driver images (every Ubuntu source package, as `name=version`), with each package's licence in `/usr/share/doc/<package>/copyright` and the licences of software built from source in `/usr/share/licenses/`;
+- `/usr/share/pagewire/` in the device and driver images also holds `NOTICE`, this file and `SOURCES`, which names the image with the corresponding source (`ghcr.io/thephaseless/<image>:<tag>-sources`). The image label `dev.pagewire.sources` carries the same name.
 
 Licence cells give the licence of the component's own files. Debian packaging files (`debian/*`) are often GPL-2.0-or-later and are not repeated here; the copyright file in the image has every stanza.
 
-"Linked" below means compiled into the printscan binary. "Separate program" means a program installed unmodified next to others in the image and run as its own process (aggregation). printscan never links against GPL, LGPL or AGPL code.
+"Linked" below means compiled into the pagewire binary. "Separate program" means a program installed unmodified next to others in the image and run as its own process (aggregation). pagewire never links against GPL, LGPL or AGPL code.
 
-## Control-plane image (`printscan`)
+## Control-plane image (`pagewire`)
 
 A single statically linked Go binary with the web UI embedded, on Google's distroless base.
 
@@ -119,7 +119,7 @@ go-mfp's image conversion code uses libjpeg and libpng through cgo. The binary i
 | libpng | 1.6.59 (Alpine 1.6.59-r0) | Libpng-2.0 | https://github.com/pnggroup/libpng |
 | zlib | Alpine 1.4-r0 | Zlib | https://zlib.net |
 
-Alpine's package sources, including its patches, are in https://gitlab.alpinelinux.org/alpine/aports. None is modified by printscan.
+Alpine's package sources, including its patches, are in https://gitlab.alpinelinux.org/alpine/aports. None is modified by pagewire.
 
 ### Web UI (npm packages, bundled)
 
@@ -161,9 +161,9 @@ The Figtree font files are under the SIL Open Font License 1.1 and are served un
 | tzdata | 2026f-0+deb13u1 | public domain | Base image: time zone data |
 | tzdata-legacy | 2026f-0+deb13u1 | public domain | Base image: legacy time zone names |
 
-The packages are unmodified Debian packages. Their sources are at `https://sources.debian.org/src/<package>/<version>/`, and every published version stays available at https://snapshot.debian.org/. printscan builds no `-sources` image for the control plane.
+The packages are unmodified Debian packages. Their sources are at `https://sources.debian.org/src/<package>/<version>/`, and every published version stays available at https://snapshot.debian.org/. pagewire builds no `-sources` image for the control plane.
 
-## Device image (`printscan-device`)
+## Device image (`pagewire-device`)
 
 dbus, Avahi, ipp-usb, AirSane, the SANE backends and `ippeveprinter`, on `ubuntu:26.04`. Every component is a separate program, or a library linked by one, and none is modified.
 
@@ -176,7 +176,7 @@ Built from upstream source:
 | Go standard library (inside ipp-usb) | 1.27.1 | BSD-3-Clause | Linked into ipp-usb; licence in `/usr/share/licenses/ipp-usb/LICENSE.go` | https://go.dev/dl/ |
 | AirSane | v0.4.16 | GPL-3.0-or-later | Separate program `/usr/local/bin/airsaned` | https://github.com/SimulPiscator/AirSane/tree/v0.4.16 |
 
-The main Ubuntu packages (`apt-get install --no-install-recommends`; the full list, with dependencies and the base image, is `/usr/share/printscan/source-packages.txt`):
+The main Ubuntu packages (`apt-get install --no-install-recommends`; the full list, with dependencies and the base image, is `/usr/share/pagewire/source-packages.txt`):
 
 | Package (source) | Version | Licence | How included |
 |---|---|---|---|
@@ -194,7 +194,7 @@ The image's 139 source packages at the time of writing include the `ubuntu:26.04
 
 The HP plug-in paths (`/usr/share/hplip/{prnt,scan,fax}/plugins`, `/usr/share/hplip/data/firmware`, `/var/lib/hp/hplip.state`) are symlinks into the vendor-file volume. The image contains no plug-in files.
 
-## Driver images (`printscan-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`)
+## Driver images (`pagewire-driver-ps`, `-hplip`, `-gutenprint`, `-ghostscript`)
 
 Each image holds one PAPPL retrofit printer application, on `ubuntu:26.04`, built the way the upstream rock recipes build it, plus CUPS (for its `usb`, `socket` and `ipp` backends; `cupsd` is never started) and that family's Ubuntu driver packages.
 
@@ -204,10 +204,10 @@ Built from upstream source (identical in all four images, except the application
 |---|---|---|---|---|---|
 | PAPPL | v1.4.12 | Apache-2.0 (with its optional GPL2/LGPL2 exception) | Library linked into the application | Yes: `images/driver/patches/pappl-max-vendor.patch`, the changes the upstream rock recipes make. It raises `PAPPL_MAX_VENDOR` from 32 to 256, turns off log rotation, and makes the web interface's manual network printer use a `cups:socket://` URI | https://github.com/michaelrsweet/pappl/tree/v1.4.12 |
 | pappl-retrofit | 1.0b3 | Apache-2.0 (with the CUPS exceptions) | Library linked into the application | None | https://github.com/OpenPrinting/pappl-retrofit/tree/1.0b3 |
-| ps-printer-app | commit 5ce06c52f8a3a00420587f885e7eb4a238d586ee | Apache-2.0 | Separate program, `printscan-driver-ps` only | None | https://github.com/OpenPrinting/ps-printer-app |
-| hplip-printer-app | commit 90478d9edd063df2756e1a1045aaf1bc4012e3f5 | Apache-2.0 | Separate program, `printscan-driver-hplip` only | None | https://github.com/OpenPrinting/hplip-printer-app |
-| gutenprint-printer-app | commit fbfce9086b3e612447eec729240ab68986608857 | Apache-2.0 | Separate program, `printscan-driver-gutenprint` only | None | https://github.com/OpenPrinting/gutenprint-printer-app |
-| ghostscript-printer-app | commit acf18a476bee525b88526ff8e0154f004b361914 | Apache-2.0 | Separate program, `printscan-driver-ghostscript` only | None | https://github.com/OpenPrinting/ghostscript-printer-app |
+| ps-printer-app | commit 5ce06c52f8a3a00420587f885e7eb4a238d586ee | Apache-2.0 | Separate program, `pagewire-driver-ps` only | None | https://github.com/OpenPrinting/ps-printer-app |
+| hplip-printer-app | commit 90478d9edd063df2756e1a1045aaf1bc4012e3f5 | Apache-2.0 | Separate program, `pagewire-driver-hplip` only | None | https://github.com/OpenPrinting/hplip-printer-app |
+| gutenprint-printer-app | commit fbfce9086b3e612447eec729240ab68986608857 | Apache-2.0 | Separate program, `pagewire-driver-gutenprint` only | None | https://github.com/OpenPrinting/gutenprint-printer-app |
+| ghostscript-printer-app | commit acf18a476bee525b88526ff8e0154f004b361914 | Apache-2.0 | Separate program, `pagewire-driver-ghostscript` only | None | https://github.com/OpenPrinting/ghostscript-printer-app |
 
 Their LICENSE and NOTICE files are in `/usr/share/licenses/<component>/`. The patch carries PAPPL's licence; it ships in `/usr/share/licenses/pappl/pappl-max-vendor.patch` and in the `-sources` images.
 
@@ -234,11 +234,11 @@ The main Ubuntu packages (all unmodified):
 
 The number of source packages per image at the time of writing: ps 151, hplip 182, gutenprint 146, ghostscript 154, including the `ubuntu:26.04` base.
 
-In `printscan-driver-hplip` the HP plug-in paths are symlinks into the vendor-file volume, as in the device image.
+In `pagewire-driver-hplip` the HP plug-in paths are symlinks into the vendor-file volume, as in the device image.
 
 ## Corresponding source
 
-For every published image tag, CI publishes a matching `-sources` image for the device image and each driver image: `ghcr.io/thephaseless/<image>:<tag>-sources`, for example `main-sources`, `1.2.3-sources`, `1.2-sources` and `1-sources`. The source for `latest` is the newest `<version>-sources`. The `SOURCES` file and the `dev.printscan.sources` label in each image name its `-sources` image.
+For every published image tag, CI publishes a matching `-sources` image for the device image and each driver image: `ghcr.io/thephaseless/<image>:<tag>-sources`, for example `main-sources`, `1.2.3-sources`, `1.2-sources` and `1-sources`. The source for `latest` is the newest `<version>-sources`. The `SOURCES` file and the `dev.pagewire.sources` label in each image name its `-sources` image.
 
 Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
 
@@ -255,16 +255,16 @@ The control-plane image has no `-sources` image. Its Go and npm dependencies are
 
 These are never in an image, in this repository or in CI:
 
-- HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files) and its licence text: printscan downloads the archive at runtime on your cluster, from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`. The device pod's agent downloads it into the vendor-file volume before acceptance, checks it against HP's detached OpenPGP signature (key in `internal/catalog/keys/hplip.asc`) and the sha256 pinned in the catalog, and reads HP's licence text from inside it, so the wizard and Settings can show that text. The `agent fetch` step in the `fetch-blobs` init container installs the plug-in only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin`, the matching version and the sha256 of the text shown), and only if the text in the archive still has that sha256. It unpacks the plug-in into the vendor-file volume.
-- hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. printscan never opens that page. Its plug-in paths lead into `/blobs`. The driver container mounts the vendor-file volume there only after you accepted HP's licence, and then read-only; before that, `/blobs` does not exist on the read-only root file system. So hplip-printer-app could install the plug-in itself only into a mounted `/blobs`, which happens after acceptance, and the read-only mount stops even that.
-- foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and printscan adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
+- HP's HPLIP proprietary plug-in (the `hplip-<version>-plugin.run` files) and its licence text: pagewire downloads the archive at runtime on your cluster, from OpenPrinting's mirror listed in `internal/catalog/catalog.yaml`. The device pod's agent downloads it into the vendor-file volume before acceptance, checks it against HP's detached OpenPGP signature (key in `internal/catalog/keys/hplip.asc`) and the sha256 pinned in the catalog, and reads HP's licence text from inside it, so the wizard and Settings can show that text. The `agent fetch` step in the `fetch-blobs` init container installs the plug-in only when the config accepts HP's licence (`licenses.acceptedEulas` with `id: hplip-plugin`, the matching version and the sha256 of the text shown), and only if the text in the archive still has that sha256. It unpacks the plug-in into the vendor-file volume.
+- hplip-printer-app also has its own plug-in installer, a page of its web interface that PAPPL authorizes only for local clients. pagewire never opens that page. Its plug-in paths lead into `/blobs`. The driver container mounts the vendor-file volume there only after you accepted HP's licence, and then read-only; before that, `/blobs` does not exist on the read-only root file system. So hplip-printer-app could install the plug-in itself only into a mounted `/blobs`, which happens after acceptance, and the read-only mount stops even that.
+- foo2zjs printer firmware: Ubuntu's `printer-driver-foo2zjs` ships an empty `/var/lib/foo2zjs/firmware`, and pagewire adds nothing there. Printers that need a firmware upload from the host are not supported through foo2zjs.
 - Brother, Epson and Canon proprietary drivers: The images contain only free drivers (Gutenprint, Ghostscript, foo2zjs, SpliX, HPLIP's free parts) and the SANE backends Ubuntu ships.
-- The Mopria eSCL specification: printscan's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.
+- The Mopria eSCL specification: pagewire's eSCL code follows the open implementations go-mfp and sane-airscan, never the specification text.
 
 ## Regenerating these lists
 
-- Go modules: `mise x -- go tool go-licenses report ./cmd/printscan`.
+- Go modules: `mise x -- go tool go-licenses report ./cmd/pagewire`.
 - npm packages: `bun run build` in `ui/` writes `dist/THIRD_PARTY_LICENSES.txt`.
 - Everything in an image, from a build: `docker buildx build --sbom=true -o type=local,dest=out .` (add `-f images/... --target ...` for the other images), then read `out/sbom*.spdx.json`. For a published image: `docker buildx imagetools inspect ghcr.io/thephaseless/<image>:<tag> --format '{{ json .SBOM }}'`.
-- Ubuntu packages in a device or driver image: `docker run --rm --entrypoint cat <image> /usr/share/printscan/source-packages.txt`.
+- Ubuntu packages in a device or driver image: `docker run --rm --entrypoint cat <image> /usr/share/pagewire/source-packages.txt`.
 - Distroless packages: `docker create` the pinned digest from `Dockerfile`, then `docker cp <container>:/var/lib/dpkg/status.d/ .` and read each package's `/usr/share/doc/<package>/copyright` the same way.

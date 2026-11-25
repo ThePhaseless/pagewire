@@ -1,5 +1,5 @@
-printscan
-Copyright 2026 The printscan authors
+pagewire
+Copyright 2026 The pagewire authors
 
 This product is licensed under the Apache License, Version 2.0 (the
 "License"); you may not use it except in compliance with the License. A copy
@@ -14,14 +14,14 @@ under the License.
 
 Third-party software
 
-The printscan container images also contain third-party software under its
+The pagewire container images also contain third-party software under its
 own licences. THIRD_PARTY_NOTICES.md in the source repository
-(https://github.com/ThePhaseless/printscan) lists it per image, with each
+(https://github.com/ThePhaseless/pagewire) lists it per image, with each
 component's licence and where to get its source. Inside the images the
 licence texts are under /licenses (control plane), /usr/share/licenses and
 /usr/share/doc/*/copyright (device and driver images). The device and driver
-images also hold this file and THIRD_PARTY_NOTICES.md in /usr/share/printscan/,
-and /usr/share/printscan/SOURCES names the image that holds their
+images also hold this file and THIRD_PARTY_NOTICES.md in /usr/share/pagewire/,
+and /usr/share/pagewire/SOURCES names the image that holds their
 corresponding source.
 
 The control-plane image links libjpeg-turbo, and the device and driver images
@@ -36,6 +36,6 @@ Everywhere is a trademark of the IEEE-ISTO Printer Working Group. HP is a
 trademark of HP Inc. All other trademarks are the property of their
 respective owners.
 
-printscan is not certified by, affiliated with or endorsed by Apple, the
+pagewire is not certified by, affiliated with or endorsed by Apple, the
 Mopria Alliance, the Printer Working Group or HP. These names appear only to
-describe which protocols, clients and devices printscan works with.
+describe which protocols, clients and devices pagewire works with.

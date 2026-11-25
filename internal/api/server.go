@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 // ConfigStore is the config file store (*store.Store).
@@ -110,7 +110,7 @@ type Deps struct {
 	// /healthz and /readyz are exempt.
 	AllowedHosts []string
 	// ProxySecret, when set, must arrive in ProxySecretHeader (default
-	// X-Printscan-Proxy-Secret) on every /api/ request, else 401.
+	// X-Pagewire-Proxy-Secret) on every /api/ request, else 401.
 	ProxySecret       string
 	ProxySecretHeader string
 
@@ -120,7 +120,7 @@ type Deps struct {
 }
 
 // DefaultProxySecretHeader carries the proxy secret unless Deps names another.
-const DefaultProxySecretHeader = "X-Printscan-Proxy-Secret" //nolint:gosec // G101 false positive: a header name
+const DefaultProxySecretHeader = "X-Pagewire-Proxy-Secret" //nolint:gosec // G101 false positive: a header name
 
 const (
 	defaultReadTimeout      = 30 * time.Second // config and scan bodies
@@ -246,7 +246,7 @@ func allowedHosts(hosts []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowed[hostName(r.Host)] && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" {
 			writeProblem(w, http.StatusMisdirectedRequest, "misdirected-request",
-				"this host name is not in printscan's allowed hosts (PRINTSCAN_ALLOWED_HOSTS)")
+				"this host name is not in pagewire's allowed hosts (PAGEWIRE_ALLOWED_HOSTS)")
 			return
 		}
 		next.ServeHTTP(w, r)

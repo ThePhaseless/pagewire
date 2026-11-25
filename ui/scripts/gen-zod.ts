@@ -1,4 +1,4 @@
-// Turns the JSON Schema subset that invopop/jsonschema emits for printscan into Zod 4 source.
+// Turns the JSON Schema subset that invopop/jsonschema emits for pagewire into Zod 4 source.
 // It throws on any keyword it does not handle, so a schema change can never be silently ignored.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";

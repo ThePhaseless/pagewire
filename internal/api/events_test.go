@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // sseClient reads frames ("event: x\ndata: y" or ": heartbeat") from /api/v1/events.

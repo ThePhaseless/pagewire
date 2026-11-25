@@ -16,21 +16,21 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Names and labels of the rendered objects.
 const (
-	DeviceName      = "printscan-device" // Deployment and ConfigMap
-	TokenSecretName = "printscan-agent-token"
+	DeviceName      = "pagewire-device" // Deployment and ConfigMap
+	TokenSecretName = "pagewire-agent-token"
 	TokenSecretKey  = "token"
 	NameLabel       = "app.kubernetes.io/name"
 	ManagedByLabel  = "app.kubernetes.io/managed-by"
-	FieldManager    = "printscan"
+	FieldManager    = "pagewire"
 
-	SpecHashAnnotation   = "printscan.dev/spec-hash"
-	ConfigHashAnnotation = "printscan.dev/config-hash"
+	SpecHashAnnotation   = "pagewire.dev/spec-hash"
+	ConfigHashAnnotation = "pagewire.dev/config-hash"
 )
 
 // ErrNoUSBResource is returned for usb and probe specs when Params.USBResource is empty.
@@ -73,7 +73,7 @@ const (
 // VolumeOrder lists every volume the pod can mount, in pod order; Render
 // includes only those a container uses.
 var VolumeOrder = []string{
-	"run-printscan", "run-dbus", "run-avahi", "tmp", "agent-token", "blobs",
+	"run-pagewire", "run-dbus", "run-avahi", "tmp", "agent-token", "blobs",
 	"ipp-usb-conf", "ipp-usb-state", "ipp-usb-log", "app-state", "app-spool", "app-run", "app-ssl",
 	"app-fontconfig", "airsane-conf", "sane-conf",
 }
@@ -183,13 +183,13 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 		return Pod{}, fmt.Errorf("render: printer name %q must not start with -", spec.Name)
 	}
 	cat := catalog.Default()
-	deviceImage := ImageRef(p.Registry, p.Tag, "printscan-device", p.Overrides)
+	deviceImage := ImageRef(p.Registry, p.Tag, "pagewire-device", p.Overrides)
 
 	probe := Container{
-		Name: "probe", Image: p.SelfImage, Command: []string{"/printscan"},
+		Name: "probe", Image: p.SelfImage, Command: []string{"/pagewire"},
 		Args: []string{"agent", "probe", "--out", device.InventoryFile},
 		UID:  uidNonroot, USB: usbMode,
-		Mounts: []Mount{{"run-printscan", "/run/printscan", false}},
+		Mounts: []Mount{{"run-pagewire", "/run/pagewire", false}},
 		Res:    [4]string{"10m", "16Mi", "200m", "64Mi"},
 	}
 	if usbMode {
@@ -198,14 +198,14 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 	dbus := Container{
 		Name: "dbus", Image: deviceImage, Sidecar: true, UID: uidMessagebus,
 		Command: []string{"/usr/bin/dbus-daemon"},
-		Args:    []string{"--config-file=/etc/printscan/dbus.conf", "--nofork", "--nopidfile"},
+		Args:    []string{"--config-file=/etc/pagewire/dbus.conf", "--nofork", "--nopidfile"},
 		Mounts:  []Mount{{"run-dbus", "/run/dbus", false}},
 		Res:     [4]string{"5m", "8Mi", "100m", "32Mi"},
 	}
 	avahi := Container{
 		Name: "avahi", Image: deviceImage, Sidecar: true, UID: uidAvahi,
 		Command: []string{"/usr/sbin/avahi-daemon"},
-		Args:    []string{"--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/printscan/avahi-daemon.conf"},
+		Args:    []string{"--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/pagewire/avahi-daemon.conf"},
 		// avahi-daemon creates /run/avahi-daemon itself and refuses it unless it
 		// is owned by avahi:avahi, which an emptyDir mounted there never is; so
 		// its own emptyDir is /run, with the shared /run/dbus mounted inside.
@@ -218,7 +218,7 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 	}
 	agent := Container{
 		Name: "agent", Image: p.SelfImage, Sidecar: spec.Mode != device.ModeProbe, UID: uidNonroot,
-		Command: []string{"/printscan"},
+		Command: []string{"/pagewire"},
 		Args: []string{
 			"agent", "run",
 			"--control-plane-url", p.AgentURL,
@@ -230,8 +230,8 @@ func Plan(spec *device.Spec, p Params) (Pod, error) {
 		},
 		Env: podUIDEnv,
 		Mounts: []Mount{
-			{"agent-token", "/var/run/printscan", true},
-			{"run-printscan", "/run/printscan", true},
+			{"agent-token", "/var/run/pagewire", true},
+			{"run-pagewire", "/run/pagewire", true},
 			{"run-dbus", "/run/dbus", false},
 		},
 		Res: [4]string{"10m", "32Mi", "200m", "128Mi"},
@@ -339,8 +339,8 @@ func fetchBlobs(spec *device.Spec, image string) Container {
 	}
 	return Container{
 		Name: "fetch-blobs", Image: image, UID: uidNonroot,
-		Command: []string{"/printscan"}, Args: args,
-		Mounts: []Mount{{"blobs", "/blobs", false}, {"run-printscan", "/run/printscan", false}},
+		Command: []string{"/pagewire"}, Args: args,
+		Mounts: []Mount{{"blobs", "/blobs", false}, {"run-pagewire", "/run/pagewire", false}},
 		Res:    [4]string{"10m", "32Mi", "500m", "256Mi"},
 	}
 }
@@ -357,14 +357,14 @@ func airsane(cat *catalog.Catalog, spec *device.Spec, image string, uid int64, u
 		Command: []string{"/usr/local/bin/airsaned"},
 		Args: []string{
 			"--listen-port=" + strconv.Itoa(port), "--hotplug=false",
-			"--options-file=/etc/printscan/airsane/options.conf",
-			"--ignore-list=/etc/printscan/airsane/ignore.conf",
-			"--access-file=/etc/printscan/airsane/access.conf",
+			"--options-file=/etc/pagewire/airsane/options.conf",
+			"--ignore-list=/etc/pagewire/airsane/ignore.conf",
+			"--access-file=/etc/pagewire/airsane/access.conf",
 		},
-		Env: []EnvVar{{Name: "SANE_CONFIG_DIR", Value: "/etc/printscan/sane.d:"}},
+		Env: []EnvVar{{Name: "SANE_CONFIG_DIR", Value: "/etc/pagewire/sane.d:"}},
 		Mounts: []Mount{
-			{"airsane-conf", "/etc/printscan/airsane", true},
-			{"sane-conf", "/etc/printscan/sane.d", true},
+			{"airsane-conf", "/etc/pagewire/airsane", true},
+			{"sane-conf", "/etc/pagewire/sane.d", true},
 			{"run-dbus", "/run/dbus", false},
 			{"tmp", "/tmp", false},
 		},

@@ -290,7 +290,7 @@ describe("app shell", () => {
           state: "invalid",
           errors: [],
           lastGood: {
-            apiVersion: "printscan/v1",
+            apiVersion: "pagewire/v1",
             name: "Hall printer",
             location: "",
             device: { mode: "simulated", driver: "auto", scanner: "auto" },

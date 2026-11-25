@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
 )
 
 // encodeJSON is the one JSON encoder of every response and SSE payload: it

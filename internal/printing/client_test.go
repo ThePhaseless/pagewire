@@ -18,7 +18,7 @@ import (
 	"github.com/OpenPrinting/go-mfp/transport"
 	"github.com/OpenPrinting/goipp"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // recorder is the virtual printer's abstract.Printer backend plus a hook

@@ -1,4 +1,4 @@
-// Package agent is the device-pod side of printscan: the USB probe, the blob
+// Package agent is the device-pod side of pagewire: the USB probe, the blob
 // fetcher and the report loop that talks to the control plane.
 package agent
 
@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/renameio/v2"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/usb"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/usb"
 )
 
 const classPrinter = 7

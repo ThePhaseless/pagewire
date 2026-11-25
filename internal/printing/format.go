@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // Document formats as IPP document-format MIME types.
@@ -80,10 +80,10 @@ func (e *UnsupportedFormatError) Error() string {
 
 // Negotiate returns the format to send the printer: the detected one when
 // the printer's document-format-supported lists it, else the format
-// printscan converts it to (see Conversions), else *UnsupportedFormatError.
+// pagewire converts it to (see Conversions), else *UnsupportedFormatError.
 // Parameters such as charset are ignored. An unknown format is always
 // refused, even when the printer lists application/octet-stream, since
-// printscan cannot tell what the printer would make of it.
+// pagewire cannot tell what the printer would make of it.
 func Negotiate(detected string, supported []string) (string, error) {
 	if detected != FormatUnknown && listed(detected, supported) {
 		return detected, nil
@@ -94,7 +94,7 @@ func Negotiate(detected string, supported []string) (string, error) {
 	return "", &UnsupportedFormatError{Detected: detected, Supported: supported}
 }
 
-// Conversions lists the formats printscan converts for a printer with this
+// Conversions lists the formats pagewire converts for a printer with this
 // document-format-supported list (what Negotiate converts).
 func Conversions(supported []string) []apitypes.FormatConversion {
 	out := []apitypes.FormatConversion{}

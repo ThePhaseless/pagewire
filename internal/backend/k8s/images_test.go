@@ -27,11 +27,11 @@ func TestImageTag(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	got, err := ParseOverrides(" device=reg/dev@sha256:1 ,printscan=reg/ps:1, driver-hplip=reg/h:2 ")
+	got, err := ParseOverrides(" device=reg/dev@sha256:1 ,pagewire=reg/ps:1, driver-hplip=reg/h:2 ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"device": "reg/dev@sha256:1", "printscan": "reg/ps:1", "driver-hplip": "reg/h:2"}
+	want := map[string]string{"device": "reg/dev@sha256:1", "pagewire": "reg/ps:1", "driver-hplip": "reg/h:2"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -51,29 +51,29 @@ func TestParseOverrides(t *testing.T) {
 }
 
 func TestImageRef(t *testing.T) {
-	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "printscan-device", nil); got != "ghcr.io/thephaseless/printscan-device:1.2.3" {
+	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "pagewire-device", nil); got != "ghcr.io/thephaseless/pagewire-device:1.2.3" {
 		t.Errorf("default: %s", got)
 	}
-	ov := map[string]string{"driver-ps": "localhost:5000/ps:x", "printscan": "localhost:5000/self:y"}
-	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "printscan-driver-ps", ov); got != "localhost:5000/ps:x" {
+	ov := map[string]string{"driver-ps": "localhost:5000/ps:x", "pagewire": "localhost:5000/self:y"}
+	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "pagewire-driver-ps", ov); got != "localhost:5000/ps:x" {
 		t.Errorf("override: %s", got)
 	}
-	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "printscan", ov); got != "localhost:5000/self:y" {
+	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "pagewire", ov); got != "localhost:5000/self:y" {
 		t.Errorf("self override: %s", got)
 	}
-	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "printscan-driver-hplip", ov); got != "ghcr.io/thephaseless/printscan-driver-hplip:1.2.3" {
+	if got := ImageRef("ghcr.io/thephaseless", "1.2.3", "pagewire-driver-hplip", ov); got != "ghcr.io/thephaseless/pagewire-driver-hplip:1.2.3" {
 		t.Errorf("other key: %s", got)
 	}
 }
 
 func TestPullPolicy(t *testing.T) {
 	for ref, want := range map[string]corev1.PullPolicy{
-		"ghcr.io/thephaseless/printscan-device:main":          corev1.PullAlways,
-		"ghcr.io/thephaseless/printscan-device:1.2.3":         corev1.PullIfNotPresent,
-		"ghcr.io/thephaseless/printscan-device:main" + digest: corev1.PullIfNotPresent,
-		"ghcr.io/thephaseless/printscan-device" + digest:      corev1.PullIfNotPresent,
-		"localhost:5000/x:0.0.0-test":                         corev1.PullIfNotPresent,
-		"localhost:5000/x:main":                               corev1.PullAlways,
+		"ghcr.io/thephaseless/pagewire-device:main":          corev1.PullAlways,
+		"ghcr.io/thephaseless/pagewire-device:1.2.3":         corev1.PullIfNotPresent,
+		"ghcr.io/thephaseless/pagewire-device:main" + digest: corev1.PullIfNotPresent,
+		"ghcr.io/thephaseless/pagewire-device" + digest:      corev1.PullIfNotPresent,
+		"localhost:5000/x:0.0.0-test":                        corev1.PullIfNotPresent,
+		"localhost:5000/x:main":                              corev1.PullAlways,
 	} {
 		if got := PullPolicy(ref); got != want {
 			t.Errorf("PullPolicy(%q) = %s, want %s", ref, got, want)

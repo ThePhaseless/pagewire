@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/pappl"
-	"github.com/ThePhaseless/printscan/internal/pappl/papplfake"
-	"github.com/ThePhaseless/printscan/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/pappl"
+	"github.com/ThePhaseless/pagewire/internal/pappl/papplfake"
+	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
 const hpID = "MFG:HP;MDL:LaserJet 1020;CMD:PJL,PCL;CLS:PRINTER;"

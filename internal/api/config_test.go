@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/config/store"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config/store"
 )
 
 const validFile = `# Living room MFP
-apiVersion: printscan/v1
+apiVersion: pagewire/v1
 name: Living room printer
 
 # where it stands
@@ -56,14 +56,14 @@ func TestGetConfigRaw(t *testing.T) {
 	}
 	h := rec.Header()
 	if !strings.HasPrefix(h.Get("Content-Type"), "text/yaml") || h.Get("ETag") != quote(e.etag()) ||
-		!strings.Contains(h.Get("Content-Disposition"), "printscan.yaml") {
+		!strings.Contains(h.Get("Content-Disposition"), "pagewire.yaml") {
 		t.Fatalf("headers %v", h)
 	}
 }
 
 func TestPutConfigPreconditions(t *testing.T) {
 	e := newEnv(t)
-	body := `{"apiVersion":"printscan/v1","name":"Office"}`
+	body := `{"apiVersion":"pagewire/v1","name":"Office"}`
 	wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(body)), 428, "precondition-required")
 	wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(body), "If-None-Match", `"abc"`), 400, "bad-request")
 	// Replace while the file is missing: the 412's re-read finds no file.
@@ -83,7 +83,7 @@ func TestPutConfigPreconditions(t *testing.T) {
 	}
 
 	// A second create: 412 with the file on disk.
-	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"Other"}`), "If-None-Match", "*")
+	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"Other"}`), "If-None-Match", "*")
 	if rec.Code != 412 {
 		t.Fatalf("double create: %d", rec.Code)
 	}
@@ -92,7 +92,7 @@ func TestPutConfigPreconditions(t *testing.T) {
 	}
 
 	// Replace with the current ETag (quoted, as the UI sends it), then a stale one.
-	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"Office 2"}`), "If-Match", quote(created.Etag))
+	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"Office 2"}`), "If-Match", quote(created.Etag))
 	if rec.Code != 200 {
 		t.Fatalf("replace: %d %s", rec.Code, rec.Body)
 	}
@@ -110,7 +110,7 @@ func TestPutConfigBadBodies(t *testing.T) {
 	for _, body := range []string{`not json`, `[1,2]`, `name: yaml`, `"x"`} {
 		wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(body), "If-None-Match", "*"), 400, "bad-request")
 	}
-	p := wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"x","bogus":true}`),
+	p := wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"x","bogus":true}`),
 		"If-None-Match", "*"), 422, "invalid-config")
 	if len(p.Errors) == 0 || p.Errors[0].Line == 0 || p.Errors[0].Column == 0 {
 		t.Fatalf("422 without position: %+v", p.Errors)
@@ -123,7 +123,7 @@ func TestPutConfigBadBodies(t *testing.T) {
 func TestPutConfigRoundTripsTrickyStrings(t *testing.T) {
 	for _, loc := range []string{"2", "null", "~", "yes", "0x1F"} {
 		e := newEnv(t)
-		body := `{"apiVersion":"printscan/v1","name":"x","location":"` + loc + `"}`
+		body := `{"apiVersion":"pagewire/v1","name":"x","location":"` + loc + `"}`
 		if rec := e.do("PUT", "/api/v1/config", strings.NewReader(body), "If-None-Match", "*"); rec.Code != 201 {
 			t.Fatalf("location %q: %d %s", loc, rec.Code, rec.Body)
 		}
@@ -132,7 +132,7 @@ func TestPutConfigRoundTripsTrickyStrings(t *testing.T) {
 		}
 	}
 	e := newEnv(t)
-	body := `{"apiVersion":"printscan/v1","name":"true","location":"Room: 1 # top",` +
+	body := `{"apiVersion":"pagewire/v1","name":"true","location":"Room: 1 # top",` +
 		`"device":{"mode":"usb","usb":{"vendorId":"03f0","productId":"2b17","serial":"0e21"}},` +
 		`"licenses":{"acceptedEulas":[{"id":"hplip-plugin","version":"3.24.4","textSha256":"` + textSHA + `"}]}}`
 	if rec := e.do("PUT", "/api/v1/config", strings.NewReader(body), "If-None-Match", "*"); rec.Code != 201 {
@@ -239,8 +239,8 @@ func TestPreconditionFailedBodies(t *testing.T) {
 	e.mu.Lock()
 	e.lastGood = &good
 	e.mu.Unlock()
-	e.writeFile("apiVersion: printscan/v1\nname: x\nbogus: 1\n")
-	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"x"}`), "If-Match", quote(stale))
+	e.writeFile("apiVersion: pagewire/v1\nname: x\nbogus: 1\n")
+	rec = e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"x"}`), "If-Match", quote(stale))
 	if rec.Code != http.StatusPreconditionFailed {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -264,7 +264,7 @@ func (failingStore) Patch(string, []byte) ([]byte, string, error) { return nil, 
 
 func TestConfigStorageError(t *testing.T) {
 	e := newEnv(t, func(d *Deps) { d.Store = failingStore{} })
-	p := wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"x"}`), "If-None-Match", "*"),
+	p := wantProblem(t, e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"x"}`), "If-None-Match", "*"),
 		500, "storage-error")
 	// The raw error goes to the log, not to the client.
 	if strings.Contains(p.Detail, "read-only") || p.Detail == "" {
@@ -276,7 +276,7 @@ func TestConfigStorageError(t *testing.T) {
 
 func TestCrossOriginWriteRefused(t *testing.T) {
 	e := newEnv(t)
-	rec := e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"printscan/v1","name":"x"}`),
+	rec := e.do("PUT", "/api/v1/config", strings.NewReader(`{"apiVersion":"pagewire/v1","name":"x"}`),
 		"If-None-Match", "*", "Sec-Fetch-Site", "cross-site")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin PUT: %d", rec.Code)

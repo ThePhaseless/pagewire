@@ -12,7 +12,7 @@ import (
 
 // SelfContainer is the container of the owner Deployment whose image becomes
 // Params.SelfImage (probe, agent and fetch-blobs).
-const SelfContainer = "printscan"
+const SelfContainer = "pagewire"
 
 // DefaultTag is the image tag for any version that is not a release.
 const DefaultTag = "main"
@@ -30,10 +30,10 @@ func ImageTag(version string) string {
 
 var overrideKeys = map[string]bool{
 	"device": true, "driver-ps": true, "driver-hplip": true,
-	"driver-gutenprint": true, "driver-ghostscript": true, "printscan": true,
+	"driver-gutenprint": true, "driver-ghostscript": true, "pagewire": true,
 }
 
-// ParseOverrides parses PRINTSCAN_IMAGE_OVERRIDES ("device=ref,driver-ps=ref,...").
+// ParseOverrides parses PAGEWIRE_IMAGE_OVERRIDES ("device=ref,driver-ps=ref,...").
 // Unknown, repeated or malformed entries are errors.
 func ParseOverrides(s string) (map[string]string, error) {
 	out := map[string]string{}
@@ -58,9 +58,9 @@ func ParseOverrides(s string) (map[string]string, error) {
 }
 
 // ImageRef returns <registry>/<name>:<tag>, or the override for name. Override
-// keys are the image names without the "printscan-" prefix ("printscan" stays).
+// keys are the image names without the "pagewire-" prefix ("pagewire" stays).
 func ImageRef(registry, tag, name string, overrides map[string]string) string {
-	if ref := overrides[strings.TrimPrefix(name, "printscan-")]; ref != "" {
+	if ref := overrides[strings.TrimPrefix(name, "pagewire-")]; ref != "" {
 		return ref
 	}
 	return registry + "/" + name + ":" + tag

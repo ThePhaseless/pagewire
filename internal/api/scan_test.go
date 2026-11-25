@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 const scanBody = `{"source":"platen","resolution":300,"colorMode":"color","format":"pdf"}`

@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // ErrNoPrinter means no device in the inventory can be dispatched: none has a

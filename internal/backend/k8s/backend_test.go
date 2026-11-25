@@ -15,19 +15,19 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const ns = "printing"
 
-var ownerImage = "ghcr.io/thephaseless/printscan:1.2.3" + digest
+var ownerImage = "ghcr.io/thephaseless/pagewire:1.2.3" + digest
 
 func ownerDeployment(containers ...corev1.Container) *appsv1.Deployment {
 	if containers == nil {
 		containers = []corev1.Container{{Name: SelfContainer, Image: ownerImage}}
 	}
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "printscan", Namespace: ns, UID: "owner-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pagewire", Namespace: ns, UID: "owner-uid"},
 		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: containers}}},
 	}
 }
@@ -35,12 +35,12 @@ func ownerDeployment(containers ...corev1.Container) *appsv1.Deployment {
 func backendParams() Params {
 	return Params{
 		Namespace:   ns,
-		Owner:       Owner{Name: "printscan"},
+		Owner:       Owner{Name: "pagewire"},
 		Registry:    "ghcr.io/thephaseless",
 		Tag:         "1.2.3",
-		AgentURL:    "http://printscan.printing.svc:8081",
+		AgentURL:    "http://pagewire.printing.svc:8081",
 		USBResource: "devic.es/printer",
-		BlobPVC:     "printscan-blobs",
+		BlobPVC:     "pagewire-blobs",
 	}
 }
 
@@ -48,7 +48,7 @@ func count(c *fake.Clientset, verb, resource string) int {
 	n := 0
 	for _, a := range c.Actions() {
 		if a.GetVerb() == verb && a.GetResource().Resource == resource {
-			if g, ok := a.(k8stesting.GetAction); ok && verb == "get" && resource == "deployments" && g.GetName() != "printscan" {
+			if g, ok := a.(k8stesting.GetAction); ok && verb == "get" && resource == "deployments" && g.GetName() != "pagewire" {
 				continue // only owner lookups
 			}
 			n++
@@ -188,12 +188,12 @@ func TestOwnerFallback(t *testing.T) {
 	if err := New(c, backendParams()).Apply(ctx, goldenSpecs["probe"]); err != nil {
 		t.Fatal(err)
 	}
-	if got := image(t, deviceDeployment(t, c), "agent"); got != "ghcr.io/thephaseless/printscan:1.2.3" {
+	if got := image(t, deviceDeployment(t, c), "agent"); got != "ghcr.io/thephaseless/pagewire:1.2.3" {
 		t.Errorf("fallback image %s", got)
 	}
 
 	p := backendParams()
-	p.Overrides = map[string]string{"printscan": "localhost:5000/ps:x"}
+	p.Overrides = map[string]string{"pagewire": "localhost:5000/ps:x"}
 	c = fake.NewClientset(ownerDeployment(other))
 	if err := New(c, p).Apply(ctx, goldenSpecs["probe"]); err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestOwnerFallback(t *testing.T) {
 		t.Errorf("override fallback image %s", got)
 	}
 
-	// The owner's printscan container beats the override.
+	// The owner's pagewire container beats the override.
 	c = fake.NewClientset(ownerDeployment())
 	if err := New(c, p).Apply(ctx, goldenSpecs["probe"]); err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestOwnerMissing(t *testing.T) {
 	c := fake.NewClientset()
 	b := New(c, backendParams())
 	err := b.Apply(ctx, goldenSpecs["probe"])
-	if err == nil || !strings.Contains(err.Error(), "owner deployment printing/printscan") || !apierrors.IsNotFound(err) {
+	if err == nil || !strings.Contains(err.Error(), "owner deployment printing/pagewire") || !apierrors.IsNotFound(err) {
 		t.Fatalf("err = %v", err)
 	}
 	assertNothingCreated(t, c)
@@ -282,7 +282,7 @@ func TestRestartPod(t *testing.T) {
 	c := fake.NewClientset(
 		pod("dev-a", deviceLabels, nil),
 		pod("dev-b", deviceLabels, nil),
-		pod("other", map[string]string{NameLabel: "printscan"}, nil),
+		pod("other", map[string]string{NameLabel: "pagewire"}, nil),
 	)
 	if err := New(c, backendParams()).RestartPod(ctx); err != nil {
 		t.Fatal(err)

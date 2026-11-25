@@ -14,13 +14,13 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/printing"
-	"github.com/ThePhaseless/printscan/internal/scanning"
-	"github.com/ThePhaseless/printscan/internal/schema"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
 // fakeBackend records every Apply (nil included) and returns a settable Observation.
@@ -632,10 +632,10 @@ func deviceItem(t *testing.T, s apitypes.Status) apitypes.ReconcileItem {
 
 func TestApplyFailureRetried(t *testing.T) {
 	h := newHarness(t, Options{})
-	h.b.applyErr = errors.New("owner deployment printing/printscan: not found")
+	h.b.applyErr = errors.New("owner deployment printing/pagewire: not found")
 	h.c.ConfigApplied(simConfig("S"), "e")
 	s := h.step()
-	if r := deviceItem(t, s); r.OK || r.Message != "owner deployment printing/printscan: not found" {
+	if r := deviceItem(t, s); r.OK || r.Message != "owner deployment printing/pagewire: not found" {
 		t.Fatalf("item %+v", r)
 	}
 	wantPhase(t, s, "error", "*")

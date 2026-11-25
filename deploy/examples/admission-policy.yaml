@@ -8,7 +8,7 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: printscan-host-network-only
+  name: pagewire-host-network-only
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -50,9 +50,9 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: printscan-host-network-only
+  name: pagewire-host-network-only
 spec:
-  policyName: printscan-host-network-only
+  policyName: pagewire-host-network-only
   validationActions: [Deny]
   matchResources:
     namespaceSelector:

@@ -7,7 +7,7 @@ import (
 )
 
 var uiFS = fstest.MapFS{
-	"index.html":                       {Data: []byte("<!doctype html><title>printscan</title>")},
+	"index.html":                       {Data: []byte("<!doctype html><title>pagewire</title>")},
 	"assets/index-qrhwxhtd.js":         {Data: []byte("console.log(1)")},
 	"assets/index-qrhwxhtd.js.map":     {Data: []byte("{}")},
 	"assets/files/figtree-latin.woff2": {Data: []byte("font")},

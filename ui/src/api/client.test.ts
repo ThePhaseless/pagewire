@@ -65,7 +65,7 @@ const simulatedDecision = {
 };
 
 const config: Config = {
-  apiVersion: "printscan/v1",
+  apiVersion: "pagewire/v1",
   name: "Living room printer",
   location: "",
   device: { mode: "simulated", driver: "auto", scanner: "auto" },

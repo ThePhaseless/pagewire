@@ -33,14 +33,14 @@ jobs:
       - run: go vet -tags integration,docker ./test/integration/...
       - run: golangci-lint run
       - run: go test -race -count=1 ./...
-      - run: go run ./cmd/printscan validate examples/printscan.yaml examples/simulated.yaml
-      - run: go tool go-licenses check ./cmd/printscan --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC,MPL-2.0
-      # printscan never runs commands; these dependencies import os/exec for code paths it does not use
+      - run: go run ./cmd/pagewire validate examples/pagewire.yaml examples/simulated.yaml
+      - run: go tool go-licenses check ./cmd/pagewire --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC,MPL-2.0
+      # pagewire never runs commands; these dependencies import os/exec for code paths it does not use
       # (godbus's autolaunch, client-go's exec credential plugin, gnostic's plugin runner).
       - name: Only the known dependencies import os/exec
         run: |
           # shellcheck disable=SC2016 # $p is a Go template variable
-          got=$(go list -deps -f '{{if not .Standard}}{{$p := .ImportPath}}{{range .Imports}}{{if eq . "os/exec"}}{{$p}}{{"\n"}}{{end}}{{end}}{{end}}' ./cmd/printscan | sort -u)
+          got=$(go list -deps -f '{{if not .Standard}}{{$p := .ImportPath}}{{range .Imports}}{{if eq . "os/exec"}}{{$p}}{{"\n"}}{{end}}{{end}}{{end}}' ./cmd/pagewire | sort -u)
           want='github.com/godbus/dbus/v5
           github.com/google/gnostic-models/compiler
           k8s.io/client-go/plugin/pkg/client/auth/exec'
@@ -107,36 +107,36 @@ jobs:
       - name: Install the cgo build headers
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build printscan:dev
+      - name: Build pagewire:dev
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
-          tags: printscan:dev
+          tags: pagewire:dev
           load: true
-          cache-from: type=gha,scope=integration-printscan
-          cache-to: type=gha,mode=max,scope=integration-printscan
+          cache-from: type=gha,scope=integration-pagewire
+          cache-to: type=gha,mode=max,scope=integration-pagewire
       # The device and driver Dockerfiles end with a sources stage, so the target is always named.
-      - name: Build printscan-device:dev
+      - name: Build pagewire-device:dev
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: images/device/Dockerfile
           target: device
-          tags: printscan-device:dev
+          tags: pagewire-device:dev
           load: true
-          cache-from: type=gha,scope=integration-printscan-device
-          cache-to: type=gha,mode=max,scope=integration-printscan-device
-      - name: Build printscan-driver-ps:dev
+          cache-from: type=gha,scope=integration-pagewire-device
+          cache-to: type=gha,mode=max,scope=integration-pagewire-device
+      - name: Build pagewire-driver-ps:dev
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: images/driver/Dockerfile
           target: ps
-          tags: printscan-driver-ps:dev
+          tags: pagewire-driver-ps:dev
           load: true
-          cache-from: type=gha,scope=integration-printscan-driver-ps
-          cache-to: type=gha,mode=max,scope=integration-printscan-driver-ps
+          cache-from: type=gha,scope=integration-pagewire-driver-ps
+          cache-to: type=gha,mode=max,scope=integration-pagewire-driver-ps
       - name: Free port 5353 for the test's avahi-daemon
         run: |
           if systemctl is-active --quiet avahi-daemon.service avahi-daemon.socket; then
@@ -164,8 +164,8 @@ jobs:
         engine: [docker, podman]
     env:
       # Fully qualified, so Podman does not apply its docker.io short-name rule.
-      PRINTSCAN_IMAGE: localhost/printscan:dev
-      PRINTSCAN_IMAGE_OVERRIDES: device=localhost/printscan-device:dev
+      PAGEWIRE_IMAGE: localhost/pagewire:dev
+      PAGEWIRE_IMAGE_OVERRIDES: device=localhost/pagewire-device:dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
@@ -173,23 +173,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libjpeg-turbo8-dev libpng-dev
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # Reads the integration job's caches; writing them from two matrix legs would race.
-      - name: Build localhost/printscan:dev
+      - name: Build localhost/pagewire:dev
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
-          tags: localhost/printscan:dev
+          tags: localhost/pagewire:dev
           load: true
-          cache-from: type=gha,scope=integration-printscan
-      - name: Build localhost/printscan-device:dev
+          cache-from: type=gha,scope=integration-pagewire
+      - name: Build localhost/pagewire-device:dev
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: images/device/Dockerfile
           target: device
-          tags: localhost/printscan-device:dev
+          tags: localhost/pagewire-device:dev
           load: true
-          cache-from: type=gha,scope=integration-printscan-device
+          cache-from: type=gha,scope=integration-pagewire-device
       - name: Free port 5353 for the device's avahi-daemon
         run: |
           if systemctl is-active --quiet avahi-daemon.service avahi-daemon.socket; then
@@ -200,7 +200,7 @@ jobs:
         run: |
           command -v podman || (sudo apt-get update && sudo apt-get install -y --no-install-recommends podman)
           sudo systemctl start podman.socket
-          docker save localhost/printscan:dev localhost/printscan-device:dev | sudo podman load
+          docker save localhost/pagewire:dev localhost/pagewire-device:dev | sudo podman load
           # Ephemeral runner: compose and the test reach the root socket without sudo.
           sudo chmod 0666 /run/podman/podman.sock
           echo "DOCKER_HOST=unix:///run/podman/podman.sock" >> "$GITHUB_ENV"
@@ -213,7 +213,7 @@ jobs:
         run: |
           DOCKER_GID=0 docker compose -f compose.docker.yaml logs --tail=500
           docker ps -a
-          for c in $(docker ps -aq --filter label=dev.printscan.managed-by=printscan); do
+          for c in $(docker ps -aq --filter label=dev.pagewire.managed-by=pagewire); do
             echo "::group::$c"
             docker logs --tail=200 "$c"
             echo "::endgroup::"
@@ -222,8 +222,8 @@ jobs:
       - if: always()
         run: |
           DOCKER_GID=0 docker compose -f compose.docker.yaml down -v
-          docker ps -aq --filter label=dev.printscan.managed-by=printscan | xargs -r docker rm -fv
-          docker volume ls -q --filter label=dev.printscan.managed-by=printscan | xargs -r docker volume rm
+          docker ps -aq --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker rm -fv
+          docker volume ls -q --filter label=dev.pagewire.managed-by=pagewire | xargs -r docker volume rm
 
   # The VERSION build arg: the branch or tag name with each run of characters a tag cannot hold
   # replaced by `-`, as docker/metadata-action does for type=ref tags. A manual run on renovate/foo
@@ -249,12 +249,12 @@ jobs:
         # licenses: the SPDX expression for the image label. The device and driver images hold
         # Ubuntu packages under many licences (see THIRD_PARTY_NOTICES.md), so they say NOASSERTION.
         include:
-          - {image: printscan, file: Dockerfile, target: "", licenses: Apache-2.0}
-          - {image: printscan-device, file: images/device/Dockerfile, target: device, licenses: NOASSERTION}
-          - {image: printscan-driver-ps, file: images/driver/Dockerfile, target: ps, licenses: NOASSERTION}
-          - {image: printscan-driver-hplip, file: images/driver/Dockerfile, target: hplip, licenses: NOASSERTION}
-          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint, licenses: NOASSERTION}
-          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript, licenses: NOASSERTION}
+          - {image: pagewire, file: Dockerfile, target: "", licenses: Apache-2.0}
+          - {image: pagewire-device, file: images/device/Dockerfile, target: device, licenses: NOASSERTION}
+          - {image: pagewire-driver-ps, file: images/driver/Dockerfile, target: ps, licenses: NOASSERTION}
+          - {image: pagewire-driver-hplip, file: images/driver/Dockerfile, target: hplip, licenses: NOASSERTION}
+          - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint, licenses: NOASSERTION}
+          - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript, licenses: NOASSERTION}
     uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
     permissions:
       contents: read
@@ -301,11 +301,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {image: printscan-device, file: images/device/Dockerfile}
-          - {image: printscan-driver-ps, file: images/driver/Dockerfile}
-          - {image: printscan-driver-hplip, file: images/driver/Dockerfile}
-          - {image: printscan-driver-gutenprint, file: images/driver/Dockerfile}
-          - {image: printscan-driver-ghostscript, file: images/driver/Dockerfile}
+          - {image: pagewire-device, file: images/device/Dockerfile}
+          - {image: pagewire-driver-ps, file: images/driver/Dockerfile}
+          - {image: pagewire-driver-hplip, file: images/driver/Dockerfile}
+          - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile}
+          - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile}
     uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
     permissions:
       contents: read

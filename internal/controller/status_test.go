@@ -3,8 +3,8 @@ package controller
 import (
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Docker reports endpoints like k8s (agent-browsed services plus HostIP);

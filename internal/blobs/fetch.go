@@ -25,8 +25,8 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Options carries what Fetch needs beyond the catalog entry.
@@ -40,8 +40,8 @@ type Options struct {
 const MaxTextBytes = 256 << 10
 
 const (
-	versionFile     = ".printscan-version"
-	textSHAFile     = ".printscan-text-sha256"
+	versionFile     = ".pagewire-version"
+	textSHAFile     = ".pagewire-text-sha256"
 	stagingDir      = ".staging"
 	defaultMaxBytes = 64 << 20
 	maxSigBytes     = 64 << 10
@@ -54,8 +54,8 @@ const (
 // Fetch installs blob b into dir/<b.ID> and reports its state. A disabled blob
 // or one whose EULA {id, version} is not in accepted makes no network request.
 // accepted refs match b.EULA and the catalog version. An install is a no-op
-// when dir/<id>/.printscan-version holds the version and
-// dir/<id>/.printscan-text-sha256 holds the accepted text sha256; otherwise the
+// when dir/<id>/.pagewire-version holds the version and
+// dir/<id>/.pagewire-text-sha256 holds the accepted text sha256; otherwise the
 // archive is staged (a staged copy is reused after re-verifying it), and it is
 // installed only when the sha256 of its licence text equals the accepted one.
 func Fetch(ctx context.Context, b catalog.Blob, accepted []device.EULARef, dir string, opt Options) device.BlobStatus {

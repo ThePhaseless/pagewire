@@ -1,6 +1,6 @@
 // Package papplfake is an in-process fake of a PAPPL printer application's
 // IPP system service, used by unit tests and the sim backend. It mirrors the
-// PAPPL 1.4.12 behaviour printscan depends on: system operations at
+// PAPPL 1.4.12 behaviour pagewire depends on: system operations at
 // /ipp/system (Get-Printers, Find-Devices, Find-Drivers, Create-Printer,
 // Delete-Printer), queues at /ipp/print/<name>, device schemes limited to
 // what the retrofit apps register ("cups" by default), and driver "auto"
@@ -22,8 +22,8 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/pappl"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/pappl"
 )
 
 // Device is one entry Find-Devices lists.

@@ -1,4 +1,4 @@
-// Package config holds the printscan/v1 config file: types, defaults, strict
+// Package config holds the pagewire/v1 config file: types, defaults, strict
 // parsing with positions, and semantic validation.
 package config
 
@@ -8,7 +8,7 @@ import (
 )
 
 // APIVersion is the only accepted apiVersion.
-const APIVersion = "printscan/v1"
+const APIVersion = "pagewire/v1"
 
 // Enum values other packages compare against.
 const (
@@ -18,10 +18,10 @@ const (
 	ScannerNone   = "none" // device.scanner
 )
 
-// Config is the printscan/v1 file. Every field except apiVersion and name has
+// Config is the pagewire/v1 file. Every field except apiVersion and name has
 // a default (see Default).
 type Config struct {
-	APIVersion string      `yaml:"apiVersion" json:"apiVersion" validate:"required,eq=printscan/v1" jsonschema:"required"`
+	APIVersion string      `yaml:"apiVersion" json:"apiVersion" validate:"required,eq=pagewire/v1" jsonschema:"required"`
 	Name       string      `yaml:"name" json:"name" validate:"required,max=63,nocontrol,startsnotwith=-" jsonschema:"required,minLength=1,maxLength=63,pattern=^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names."`
 	Location   string      `yaml:"location" json:"location" validate:"max=127,nocontrol" jsonschema:"maxLength=127,pattern=^[^\\x00-\\x1f\\x7f-\\x9f]*$" jsonschema_description:"printer-location, 0 to 127 characters."`
 	Device     Device      `yaml:"device" json:"device"`

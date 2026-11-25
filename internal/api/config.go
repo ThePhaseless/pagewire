@@ -12,11 +12,11 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/config/store"
-	"github.com/ThePhaseless/printscan/internal/config/yamledit"
-	"github.com/ThePhaseless/printscan/internal/schema"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config/store"
+	"github.com/ThePhaseless/pagewire/internal/config/yamledit"
+	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
 const maxConfigBody = 1 << 20
@@ -107,7 +107,7 @@ func (s *server) getConfigRaw(w http.ResponseWriter, _ *http.Request) {
 	noWriteDeadline(w)
 	h := w.Header()
 	h.Set("Content-Type", "text/yaml; charset=utf-8")
-	h.Set("Content-Disposition", `attachment; filename="printscan.yaml"`)
+	h.Set("Content-Disposition", `attachment; filename="pagewire.yaml"`)
 	h.Set("Cache-Control", "no-store")
 	h.Set("ETag", quote(etag))
 	_, _ = w.Write(raw)

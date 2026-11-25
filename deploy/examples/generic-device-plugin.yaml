@@ -1,5 +1,5 @@
 # Example: squat/generic-device-plugin exposing the USB printer as the extended
-# resource devic.es/printer, which printscan's PRINTSCAN_USB_RESOURCE names.
+# resource devic.es/printer, which pagewire's PAGEWIRE_USB_RESOURCE names.
 # Based on the upstream manifest at release 0.2.0.
 apiVersion: apps/v1
 kind: DaemonSet
@@ -37,14 +37,14 @@ spec:
           args:
             # The resource name is <domain>/<device name>. 0.2.0 changed the default
             # domain from squat.ai to devic.es; it is passed explicitly so the name stays
-            # devic.es/printer on any version. It must match PRINTSCAN_USB_RESOURCE.
+            # devic.es/printer on any version. It must match PAGEWIRE_USB_RESOURCE.
             - --domain=devic.es
             # Replace VVVV and PPPP with the printer's USB vendor and product IDs
             # (4 lowercase hex digits, as lsusb shows them); add "serial" to pick one unit.
             # count 3 lets the one printer be allocated three times at once: the device
             # pod requests devic.es/printer in each USB container (the probe init
             # container, plus ipp-usb, or the printer app and AirSane). The probe pod
-            # printscan runs before a printer is configured requests it too, so with the
+            # pagewire runs before a printer is configured requests it too, so with the
             # printer unplugged that pod stays Pending.
             - '--device={"name":"printer","groups":[{"count":3,"usb":[{"vendor":"VVVV","product":"PPPP"}]}]}'
           ports:

@@ -24,26 +24,26 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/ThePhaseless/printscan/internal/api"
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/backend/docker"
-	"github.com/ThePhaseless/printscan/internal/backend/k8s"
-	"github.com/ThePhaseless/printscan/internal/backend/sim"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/config/store"
-	"github.com/ThePhaseless/printscan/internal/config/watch"
-	"github.com/ThePhaseless/printscan/internal/controller"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/printing"
-	"github.com/ThePhaseless/printscan/internal/scanning"
-	"github.com/ThePhaseless/printscan/ui"
+	"github.com/ThePhaseless/pagewire/internal/api"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/backend/docker"
+	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/backend/sim"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config/store"
+	"github.com/ThePhaseless/pagewire/internal/config/watch"
+	"github.com/ThePhaseless/pagewire/internal/controller"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
+	"github.com/ThePhaseless/pagewire/ui"
 )
 
 const (
 	saNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	noUSBResource   = "device.mode usb needs a USB resource (set --usb-resource)"
-	lastGoodName    = "printscan.last-good.yaml"
+	lastGoodName    = "pagewire.last-good.yaml"
 	// The print handler streams the upload to the printer inside the request,
 	// and only SSE and downloads lift the write deadline, so it must cover a
 	// full upload (up to 500 MiB) plus the IPP submit on a slow link.
@@ -59,7 +59,7 @@ type serveFlags struct {
 	allowedHosts, proxySecretHeader             string
 	proxySecretFile, simScanDelay               string
 	dockerHost, dockerContainer, hostIP         string
-	proxySecret                                 string // from PRINTSCAN_PROXY_SECRET or the file; never a flag
+	proxySecret                                 string // from PAGEWIRE_PROXY_SECRET or the file; never a flag
 	internalListenSet                           bool
 	scanDelay                                   time.Duration // parsed --sim-scan-delay
 }
@@ -133,8 +133,8 @@ func parseServeFlags(args []string) (serveFlags, error) {
 		f.scanDelay = d
 	}
 	fl.Visit(func(fg *flag.Flag) { f.internalListenSet = f.internalListenSet || fg.Name == "internal-listen" })
-	f.internalListenSet = f.internalListenSet || os.Getenv("PRINTSCAN_INTERNAL_LISTEN") != ""
-	secret, err := readProxySecret(os.Getenv("PRINTSCAN_PROXY_SECRET"), f.proxySecretFile)
+	f.internalListenSet = f.internalListenSet || os.Getenv("PAGEWIRE_INTERNAL_LISTEN") != ""
+	secret, err := readProxySecret(os.Getenv("PAGEWIRE_PROXY_SECRET"), f.proxySecretFile)
 	if err != nil {
 		return f, err
 	}
@@ -185,7 +185,7 @@ func readProxySecret(fromEnv, file string) (string, error) {
 		return fromEnv, nil
 	}
 	if fromEnv != "" {
-		return "", errors.New("set PRINTSCAN_PROXY_SECRET or --proxy-secret-file, not both")
+		return "", errors.New("set PAGEWIRE_PROXY_SECRET or --proxy-secret-file, not both")
 	}
 	b, err := os.ReadFile(file) //nolint:gosec // the operator names the secret file
 	if err != nil {
@@ -230,35 +230,35 @@ func allowedHostsFor(backend, value, hostIP string) []string {
 func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fl.SetOutput(out)
-	fl.StringVar(&f.listen, "listen", env("PRINTSCAN_LISTEN", ":8080"), "public listen address (env PRINTSCAN_LISTEN)")
-	fl.StringVar(&f.internalListen, "internal-listen", env("PRINTSCAN_INTERNAL_LISTEN", ":8081"), "agent listen address (env PRINTSCAN_INTERNAL_LISTEN)")
-	fl.StringVar(&f.configPath, "config", env("PRINTSCAN_CONFIG", "/data/printscan.yaml"), "config file (env PRINTSCAN_CONFIG)")
-	fl.StringVar(&f.dataDir, "data-dir", env("PRINTSCAN_DATA_DIR", "/data"), "data directory (env PRINTSCAN_DATA_DIR)")
-	fl.StringVar(&f.backend, "backend", env("PRINTSCAN_BACKEND", defaultBackend()), "k8s, docker or sim (env PRINTSCAN_BACKEND)")
-	fl.StringVar(&f.simDevice, "sim-device", env("PRINTSCAN_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PRINTSCAN_SIM_DEVICE)")
+	fl.StringVar(&f.listen, "listen", env("PAGEWIRE_LISTEN", ":8080"), "public listen address (env PAGEWIRE_LISTEN)")
+	fl.StringVar(&f.internalListen, "internal-listen", env("PAGEWIRE_INTERNAL_LISTEN", ":8081"), "agent listen address (env PAGEWIRE_INTERNAL_LISTEN)")
+	fl.StringVar(&f.configPath, "config", env("PAGEWIRE_CONFIG", "/data/pagewire.yaml"), "config file (env PAGEWIRE_CONFIG)")
+	fl.StringVar(&f.dataDir, "data-dir", env("PAGEWIRE_DATA_DIR", "/data"), "data directory (env PAGEWIRE_DATA_DIR)")
+	fl.StringVar(&f.backend, "backend", env("PAGEWIRE_BACKEND", defaultBackend()), "k8s, docker or sim (env PAGEWIRE_BACKEND)")
+	fl.StringVar(&f.simDevice, "sim-device", env("PAGEWIRE_SIM_DEVICE", "ippusb-mfp"), "sim USB fixture, or none (env PAGEWIRE_SIM_DEVICE)")
 	// hidden test seam (e2e scan cancel): sim backend only, holds each scanned page this long
-	fl.StringVar(&f.simScanDelay, "sim-scan-delay", env("PRINTSCAN_SIM_SCAN_DELAY", "0s"), "")
-	fl.StringVar(&f.esclClient, "escl-client", env("PRINTSCAN_ESCL_CLIENT", "mfp"), "mfp or xml (env PRINTSCAN_ESCL_CLIENT)")
-	fl.StringVar(&f.logLevel, "log-level", env("PRINTSCAN_LOG_LEVEL", "info"), "debug, info, warn or error (env PRINTSCAN_LOG_LEVEL)")
-	fl.StringVar(&f.namespace, "k8s-namespace", env("PRINTSCAN_K8S_NAMESPACE", ""), "namespace (env PRINTSCAN_K8S_NAMESPACE; default: the service account's)")
-	fl.StringVar(&f.owner, "k8s-owner", env("PRINTSCAN_K8S_OWNER", "printscan"), "owner Deployment (env PRINTSCAN_K8S_OWNER)")
-	fl.StringVar(&f.usbResource, "usb-resource", env("PRINTSCAN_USB_RESOURCE", ""), "USB extended resource, e.g. devic.es/printer (env PRINTSCAN_USB_RESOURCE)")
-	fl.StringVar(&f.blobPVC, "blob-pvc", env("PRINTSCAN_BLOB_PVC", "printscan-blobs"), "blob PVC (env PRINTSCAN_BLOB_PVC)")
-	fl.StringVar(&f.agentURL, "agent-url", env("PRINTSCAN_AGENT_URL", ""), "control-plane URL for the agent (env PRINTSCAN_AGENT_URL; default k8s: http://printscan.<ns>.svc:8081; docker: http://<internal host or 127.0.0.1>:<internal port>)")
+	fl.StringVar(&f.simScanDelay, "sim-scan-delay", env("PAGEWIRE_SIM_SCAN_DELAY", "0s"), "")
+	fl.StringVar(&f.esclClient, "escl-client", env("PAGEWIRE_ESCL_CLIENT", "mfp"), "mfp or xml (env PAGEWIRE_ESCL_CLIENT)")
+	fl.StringVar(&f.logLevel, "log-level", env("PAGEWIRE_LOG_LEVEL", "info"), "debug, info, warn or error (env PAGEWIRE_LOG_LEVEL)")
+	fl.StringVar(&f.namespace, "k8s-namespace", env("PAGEWIRE_K8S_NAMESPACE", ""), "namespace (env PAGEWIRE_K8S_NAMESPACE; default: the service account's)")
+	fl.StringVar(&f.owner, "k8s-owner", env("PAGEWIRE_K8S_OWNER", "pagewire"), "owner Deployment (env PAGEWIRE_K8S_OWNER)")
+	fl.StringVar(&f.usbResource, "usb-resource", env("PAGEWIRE_USB_RESOURCE", ""), "USB extended resource, e.g. devic.es/printer (env PAGEWIRE_USB_RESOURCE)")
+	fl.StringVar(&f.blobPVC, "blob-pvc", env("PAGEWIRE_BLOB_PVC", "pagewire-blobs"), "blob PVC (env PAGEWIRE_BLOB_PVC)")
+	fl.StringVar(&f.agentURL, "agent-url", env("PAGEWIRE_AGENT_URL", ""), "control-plane URL for the agent (env PAGEWIRE_AGENT_URL; default k8s: http://pagewire.<ns>.svc:8081; docker: http://<internal host or 127.0.0.1>:<internal port>)")
 	fl.StringVar(&f.dockerHost, "docker-host", env("DOCKER_HOST", ""), "docker: Engine API address, unix:// or tcp:// (env DOCKER_HOST; default unix:///var/run/docker.sock)")
-	fl.StringVar(&f.dockerContainer, "docker-container", env("PRINTSCAN_DOCKER_CONTAINER", docker.DefaultContainer), "docker: the control plane's container, whose image the probe and agent run (env PRINTSCAN_DOCKER_CONTAINER)")
-	fl.StringVar(&f.hostIP, "host-ip", env("PRINTSCAN_HOST_IP", ""), "docker: the address the device serves on (env PRINTSCAN_HOST_IP; default the default route's source address)")
-	fl.StringVar(&f.registry, "image-registry", env("PRINTSCAN_IMAGE_REGISTRY", "ghcr.io/thephaseless"), "image registry (env PRINTSCAN_IMAGE_REGISTRY)")
-	fl.StringVar(&f.tag, "image-tag", env("PRINTSCAN_IMAGE_TAG", k8s.ImageTag(version)), "device and driver image tag (env PRINTSCAN_IMAGE_TAG)")
-	fl.StringVar(&f.allowedHosts, "allowed-hosts", env("PRINTSCAN_ALLOWED_HOSTS", ""),
-		"comma-separated host names the UI and API answer; others get 421. * turns the check off (env PRINTSCAN_ALLOWED_HOSTS; default: localhost,127.0.0.1,[::1] with the sim backend, those plus the host IP with docker, no check with k8s)")
-	fl.StringVar(&f.proxySecretHeader, "proxy-secret-header", env("PRINTSCAN_PROXY_SECRET_HEADER", api.DefaultProxySecretHeader),
-		"header that must carry the proxy secret on /api/ requests (env PRINTSCAN_PROXY_SECRET_HEADER)")
-	fl.StringVar(&f.proxySecretFile, "proxy-secret-file", env("PRINTSCAN_PROXY_SECRET_FILE", ""),
-		"file holding the proxy secret; or set env PRINTSCAN_PROXY_SECRET, not both (env PRINTSCAN_PROXY_SECRET_FILE)")
+	fl.StringVar(&f.dockerContainer, "docker-container", env("PAGEWIRE_DOCKER_CONTAINER", docker.DefaultContainer), "docker: the control plane's container, whose image the probe and agent run (env PAGEWIRE_DOCKER_CONTAINER)")
+	fl.StringVar(&f.hostIP, "host-ip", env("PAGEWIRE_HOST_IP", ""), "docker: the address the device serves on (env PAGEWIRE_HOST_IP; default the default route's source address)")
+	fl.StringVar(&f.registry, "image-registry", env("PAGEWIRE_IMAGE_REGISTRY", "ghcr.io/thephaseless"), "image registry (env PAGEWIRE_IMAGE_REGISTRY)")
+	fl.StringVar(&f.tag, "image-tag", env("PAGEWIRE_IMAGE_TAG", k8s.ImageTag(version)), "device and driver image tag (env PAGEWIRE_IMAGE_TAG)")
+	fl.StringVar(&f.allowedHosts, "allowed-hosts", env("PAGEWIRE_ALLOWED_HOSTS", ""),
+		"comma-separated host names the UI and API answer; others get 421. * turns the check off (env PAGEWIRE_ALLOWED_HOSTS; default: localhost,127.0.0.1,[::1] with the sim backend, those plus the host IP with docker, no check with k8s)")
+	fl.StringVar(&f.proxySecretHeader, "proxy-secret-header", env("PAGEWIRE_PROXY_SECRET_HEADER", api.DefaultProxySecretHeader),
+		"header that must carry the proxy secret on /api/ requests (env PAGEWIRE_PROXY_SECRET_HEADER)")
+	fl.StringVar(&f.proxySecretFile, "proxy-secret-file", env("PAGEWIRE_PROXY_SECRET_FILE", ""),
+		"file holding the proxy secret; or set env PAGEWIRE_PROXY_SECRET, not both (env PAGEWIRE_PROXY_SECRET_FILE)")
 	fl.StringVar(&f.uiDir, "ui-dir", "", "") // hidden: serve a directory instead of the embedded UI (bun run dev)
 	fl.Usage = func() {
-		_, _ = fmt.Fprintln(fl.Output(), "usage: printscan serve [flags]")
+		_, _ = fmt.Fprintln(fl.Output(), "usage: pagewire serve [flags]")
 		fl.VisitAll(func(fg *flag.Flag) {
 			switch {
 			case fg.Name == "ui-dir", fg.Name == "sim-scan-delay":
@@ -269,8 +269,8 @@ func serveFlagSet(f *serveFlags, out io.Writer) *flag.FlagSet {
 			}
 		})
 		_, _ = fmt.Fprintln(fl.Output(), "environment only:\n"+
-			"  PRINTSCAN_PROXY_SECRET\tproxy secret (see --proxy-secret-file)\n"+
-			"  PRINTSCAN_IMAGE_OVERRIDES\tper-image references, e.g. device=<ref>,driver-ps=<ref>; keys: printscan, device, driver-ps, driver-hplip, driver-gutenprint, driver-ghostscript")
+			"  PAGEWIRE_PROXY_SECRET\tproxy secret (see --proxy-secret-file)\n"+
+			"  PAGEWIRE_IMAGE_OVERRIDES\tper-image references, e.g. device=<ref>,driver-ps=<ref>; keys: pagewire, device, driver-ps, driver-hplip, driver-gutenprint, driver-ghostscript")
 	}
 	return fl
 }
@@ -288,9 +288,9 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Checked before anything starts, whatever the backend.
-	overrides, err := k8s.ParseOverrides(os.Getenv("PRINTSCAN_IMAGE_OVERRIDES"))
+	overrides, err := k8s.ParseOverrides(os.Getenv("PAGEWIRE_IMAGE_OVERRIDES"))
 	if err != nil {
-		return fmt.Errorf("PRINTSCAN_IMAGE_OVERRIDES: %w", err)
+		return fmt.Errorf("PAGEWIRE_IMAGE_OVERRIDES: %w", err)
 	}
 	uiFS, err := uiFiles(f.uiDir)
 	if err != nil {
@@ -496,7 +496,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 	for i, ln := range listeners {
 		go func() { errc <- servers[i].Serve(ln) }()
 	}
-	slog.Info("printscan serving", "version", version, "listen", pubLn.Addr().String(), "internal", intDesc, "backend", f.backend)
+	slog.Info("pagewire serving", "version", version, "listen", pubLn.Addr().String(), "internal", intDesc, "backend", f.backend)
 	if onListen != nil {
 		onListen(pubLn.Addr(), intAddr)
 	}
@@ -555,7 +555,7 @@ func newK8sBackend(f serveFlags, overrides map[string]string) (*k8s.Backend, err
 	}
 	agentURL := f.agentURL
 	if agentURL == "" {
-		agentURL = "http://printscan." + ns + ".svc:8081"
+		agentURL = "http://pagewire." + ns + ".svc:8081"
 	}
 	rc, err := rest.InClusterConfig()
 	if err != nil {

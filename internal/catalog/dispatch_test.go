@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 func auto() config.Device {

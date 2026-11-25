@@ -11,7 +11,7 @@ import (
 )
 
 const doc = `# yaml-language-server: $schema=https://example.invalid/config.schema.json
-apiVersion: printscan/v1          # required
+apiVersion: pagewire/v1          # required
 
 # Head comment of name,
 # two lines.

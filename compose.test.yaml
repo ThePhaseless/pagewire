@@ -3,7 +3,7 @@
 # image contract (internal/backend/k8s/render.go renders the same set).
 # Ports are high and fixed so they do not clash with a real device pod.
 # See test/integration/README.md for how to run it.
-name: printscan-it # apart from the dev stack in compose.yaml
+name: pagewire-it # apart from the dev stack in compose.yaml
 
 x-hardened: &hardened
   network_mode: host
@@ -15,19 +15,19 @@ x-hardened: &hardened
 services:
   dbus:
     <<: *hardened
-    image: printscan-device:dev
-    user: "101:101" # messagebus (LABEL dev.printscan.uid.messagebus)
+    image: pagewire-device:dev
+    user: "101:101" # messagebus (LABEL dev.pagewire.uid.messagebus)
     entrypoint: ["/usr/bin/dbus-daemon"]
-    command: ["--config-file=/etc/printscan/dbus.conf", "--nofork", "--nopidfile"]
+    command: ["--config-file=/etc/pagewire/dbus.conf", "--nofork", "--nopidfile"]
     volumes:
       - run-dbus:/run/dbus
 
   avahi:
     <<: *hardened
-    image: printscan-device:dev
-    user: "102:102" # avahi (LABEL dev.printscan.uid.avahi)
+    image: pagewire-device:dev
+    user: "102:102" # avahi (LABEL dev.pagewire.uid.avahi)
     entrypoint: ["/usr/sbin/avahi-daemon"]
-    command: ["--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/printscan/avahi-daemon.conf"]
+    command: ["--no-drop-root", "--no-chroot", "--no-rlimits", "-f", "/etc/pagewire/avahi-daemon.conf"]
     volumes:
       - run-dbus:/run/dbus
     tmpfs:
@@ -45,7 +45,7 @@ services:
 
   sim-printer:
     <<: *hardened
-    image: printscan-device:dev
+    image: pagewire-device:dev
     user: "65532:65532"
     entrypoint: ["/usr/sbin/ippeveprinter"]
     command:
@@ -55,7 +55,7 @@ services:
       - "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf"
       - "-l"
       - "Integration test"
-      - "printscan-it-sim"
+      - "pagewire-it-sim"
     volumes:
       - run-dbus:/run/dbus
     tmpfs:
@@ -66,7 +66,7 @@ services:
 
   airsane:
     <<: *hardened
-    image: printscan-device:dev
+    image: pagewire-device:dev
     user: "65532:65532" # simulated mode: SANE "test" needs no USB
     entrypoint: ["/usr/local/bin/airsaned"]
     command:
@@ -79,17 +79,17 @@ services:
       - "--ignore-list=/dev/null"
       - "--access-file=/dev/null"
     environment:
-      SANE_CONFIG_DIR: "/etc/printscan/sane.d:"
+      SANE_CONFIG_DIR: "/etc/pagewire/sane.d:"
     volumes:
       - run-dbus:/run/dbus
-      - ./test/integration/sane.d:/etc/printscan/sane.d:ro
+      - ./test/integration/sane.d:/etc/pagewire/sane.d:ro
     tmpfs:
       - /tmp:mode=1777
     depends_on: *avahi-ready
 
   printer-app:
     <<: *hardened
-    image: printscan-driver-ps:dev
+    image: pagewire-driver-ps:dev
     user: "0:0" # as in usb mode; the cups usb backend is 0744
     entrypoint: ["/usr/local/bin/ps-printer-app"]
     command: ["-o", "server-port=18001", "-o", "log-file=-", "server"]
@@ -106,7 +106,7 @@ services:
 
   agent:
     <<: *hardened
-    image: printscan:dev
+    image: pagewire:dev
     user: "65532:65532"
     command:
       - "agent"

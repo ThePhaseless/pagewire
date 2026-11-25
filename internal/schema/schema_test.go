@@ -24,7 +24,7 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/ThePhaseless/printscan/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config"
 )
 
 type obj = map[string]any
@@ -189,18 +189,18 @@ func TestDefaultConfigValid(t *testing.T) {
 func TestRejectsInvalid(t *testing.T) {
 	sch := compile(t, ConfigID, Config(), "")
 	for _, doc := range []string{
-		`{"apiVersion": "printscan/v1", "name": "x", "colour": "red"}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "device": {"mode": "wifi"}}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "device": {"usb": {"vendorId": "03F0", "productId": "2b17"}}}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "print": {"defaults": {"media": "A4"}}}`,
-		`{"apiVersion": "printscan/v2", "name": "x"}`,
-		`{"apiVersion": "printscan/v1", "name": ""}`,
-		`{"apiVersion": "printscan/v1", "name": "tab\there"}`,
-		`{"apiVersion": "printscan/v1", "name": "-h"}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "a\u0007b"}}}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "` + strings.Repeat("9", 127) + `"}}}`,
-		`{"apiVersion": "printscan/v1"}`,
-		`{"apiVersion": "printscan/v1", "name": "x", "licenses": {"acceptedEulas": [{"id": "a", "version": "1"}, {"id": "a", "version": "1"}]}}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "colour": "red"}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"mode": "wifi"}}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03F0", "productId": "2b17"}}}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "print": {"defaults": {"media": "A4"}}}`,
+		`{"apiVersion": "pagewire/v2", "name": "x"}`,
+		`{"apiVersion": "pagewire/v1", "name": ""}`,
+		`{"apiVersion": "pagewire/v1", "name": "tab\there"}`,
+		`{"apiVersion": "pagewire/v1", "name": "-h"}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "a\u0007b"}}}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "device": {"usb": {"vendorId": "03f0", "productId": "2b17", "serial": "` + strings.Repeat("9", 127) + `"}}}`,
+		`{"apiVersion": "pagewire/v1"}`,
+		`{"apiVersion": "pagewire/v1", "name": "x", "licenses": {"acceptedEulas": [{"id": "a", "version": "1"}, {"id": "a", "version": "1"}]}}`,
 	} {
 		if err := sch.Validate(instance(t, []byte(doc))); err == nil {
 			t.Errorf("schema accepted %s", doc)

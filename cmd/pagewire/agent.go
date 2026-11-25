@@ -7,19 +7,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ThePhaseless/printscan/internal/agent"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/agent"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
-const agentUsage = `usage: printscan agent probe|fetch|run [flags]
+const agentUsage = `usage: pagewire agent probe|fetch|run [flags]
 
 commands:
   probe  write the USB inventory as JSON
   fetch  download, verify and install accepted vendor blobs
   run    report to the control plane and apply the desired state
 
-Run "printscan agent <command> --help" for its flags.
+Run "pagewire agent <command> --help" for its flags.
 `
 
 // agentCmd runs `agent probe|fetch|run` (the Agent CLI contract).

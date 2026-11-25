@@ -11,7 +11,7 @@ const HPLIP_ACCEPTED = { ...HPLIP, textSha256: SHA };
 
 function config(over: Partial<Config> = {}): Config {
   return {
-    apiVersion: "printscan/v1",
+    apiVersion: "pagewire/v1",
     name: "Living room printer",
     location: "",
     device: {
@@ -577,6 +577,6 @@ describe("licences", () => {
 test("a missing config points to setup", async () => {
   getConfig = () => problem(404, "config-missing");
   await mount();
-  expect(await screen.findByText("printscan is not set up yet")).toBeTruthy();
+  expect(await screen.findByText("pagewire is not set up yet")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Go to setup" }).getAttribute("href")).toBe("/setup");
 });

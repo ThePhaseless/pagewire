@@ -50,11 +50,11 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, dir: dir, events: make(chan event, 100)}
 	h.w = &Watcher[doc]{
 		Dir:          dir,
-		Name:         "printscan.yaml",
+		Name:         "pagewire.yaml",
 		Parse:        parseDoc,
 		Debounce:     100 * time.Millisecond,
 		Resync:       time.Hour,
-		LastGoodPath: filepath.Join(dir, "printscan.last-good.yaml"),
+		LastGoodPath: filepath.Join(dir, "pagewire.last-good.yaml"),
 		OnApply: func(v doc, etag string) {
 			h.events <- event{kind: "apply", name: v.Name, etag: etag}
 		},
@@ -109,7 +109,7 @@ func (h *harness) noneQueued() {
 
 func TestInitialLoadRunsBeforeStartReturns(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	if e := h.now("apply"); e.name != "a" {
 		t.Fatalf("applied %q, want a", e.name)
@@ -142,11 +142,11 @@ func (h *harness) now(kind string) event {
 
 func TestEditByRename(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
-	h.write("printscan.yaml.tmp", "name: b\n")
-	if err := os.Rename(filepath.Join(h.dir, "printscan.yaml.tmp"), filepath.Join(h.dir, "printscan.yaml")); err != nil {
+	h.write("pagewire.yaml.tmp", "name: b\n")
+	if err := os.Rename(filepath.Join(h.dir, "pagewire.yaml.tmp"), filepath.Join(h.dir, "pagewire.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if e := h.next("apply"); e.name != "b" {
@@ -156,10 +156,10 @@ func TestEditByRename(t *testing.T) {
 
 func TestEditInPlace(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
-	h.write("printscan.yaml", "name: b\n")
+	h.write("pagewire.yaml", "name: b\n")
 	if e := h.next("apply"); e.name != "b" {
 		t.Fatalf("applied %q, want b", e.name)
 	}
@@ -168,18 +168,18 @@ func TestEditInPlace(t *testing.T) {
 func TestRapidWritesCoalesce(t *testing.T) {
 	h := newHarness(t)
 	h.w.Debounce = 200 * time.Millisecond
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
 	for _, n := range []string{"b", "c", "d", "e"} {
-		h.write("printscan.yaml", "name: "+n+"\n")
+		h.write("pagewire.yaml", "name: "+n+"\n")
 		time.Sleep(5 * time.Millisecond)
 	}
 	if e := h.next("apply"); e.name != "e" {
 		t.Fatalf("first apply after the burst was %q, want e", e.name)
 	}
 	// A later change is the very next callback, so the burst gave exactly one.
-	h.write("printscan.yaml", "name: f\n")
+	h.write("pagewire.yaml", "name: f\n")
 	if e := h.next("apply"); e.name != "f" {
 		t.Fatalf("applied %q, want f", e.name)
 	}
@@ -187,12 +187,12 @@ func TestRapidWritesCoalesce(t *testing.T) {
 
 func TestIdenticalRewriteSkipped(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	first := h.next("apply")
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	time.Sleep(3 * h.w.Debounce)
-	h.write("printscan.yaml", "name: b\n")
+	h.write("pagewire.yaml", "name: b\n")
 	e := h.next("apply")
 	if e.name != "b" {
 		t.Fatalf("identical rewrite produced an apply; next was %q", e.name)
@@ -209,10 +209,10 @@ func TestInvalidEditKeepsLastGood(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			h.write("printscan.yaml", "name: a\n")
+			h.write("pagewire.yaml", "name: a\n")
 			h.start()
 			h.next("apply")
-			h.write("printscan.yaml", content)
+			h.write("pagewire.yaml", content)
 			e := h.next("invalid")
 			if e.err == nil || e.lastGood == nil || e.lastGood.Name != "a" {
 				t.Fatalf("invalid event = %+v", e)
@@ -230,10 +230,10 @@ func TestInvalidEditKeepsLastGood(t *testing.T) {
 
 func TestDeletionCallsMissing(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
-	if err := os.Remove(filepath.Join(h.dir, "printscan.yaml")); err != nil {
+	if err := os.Remove(filepath.Join(h.dir, "pagewire.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	h.next("missing")
@@ -241,7 +241,7 @@ func TestDeletionCallsMissing(t *testing.T) {
 		t.Fatalf("LastGood = %+v", lg)
 	}
 	// Restoring the same content applies it again.
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	if e := h.next("apply"); e.name != "a" {
 		t.Fatalf("applied %q, want a", e.name)
 	}
@@ -259,8 +259,8 @@ func TestStartMissing(t *testing.T) {
 
 func TestStartInvalidWithLastGoodFile(t *testing.T) {
 	h := newHarness(t)
-	h.write("printscan.last-good.yaml", "name: saved\n")
-	h.write("printscan.yaml", "name: [\n")
+	h.write("pagewire.last-good.yaml", "name: saved\n")
+	h.write("pagewire.yaml", "name: [\n")
 	h.start()
 	if e := h.now("invalid"); e.err == nil || e.lastGood == nil || e.lastGood.Name != "saved" {
 		t.Fatalf("got %+v", e)
@@ -277,7 +277,7 @@ func TestStartInvalidWithoutLastGoodFile(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			h.write("printscan.yaml", content)
+			h.write("pagewire.yaml", content)
 			h.start()
 			e := h.now("invalid")
 			if e.err == nil || e.lastGood != nil {
@@ -297,17 +297,17 @@ func TestResyncCatchesDroppedEvents(t *testing.T) {
 	h.w.watch = func(string) (<-chan fsnotify.Event, <-chan error, func() error, error) {
 		return nil, nil, func() error { return nil }, nil
 	}
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
-	h.write("printscan.yaml", "name: b\n")
+	h.write("pagewire.yaml", "name: b\n")
 	if e := h.next("apply"); e.name != "b" {
 		t.Fatalf("applied %q, want b", e.name)
 	}
 }
 
 func TestStartFailsForMissingDir(t *testing.T) {
-	w := &Watcher[doc]{Dir: filepath.Join(t.TempDir(), "nope"), Name: "printscan.yaml", Parse: parseDoc}
+	w := &Watcher[doc]{Dir: filepath.Join(t.TempDir(), "nope"), Name: "pagewire.yaml", Parse: parseDoc}
 	if err := w.Start(t.Context()); err == nil {
 		t.Fatal("Start succeeded on a missing directory")
 	}
@@ -321,7 +321,7 @@ func TestWatchFailureFallsBackToResync(t *testing.T) {
 	h.w.watch = func(string) (<-chan fsnotify.Event, <-chan error, func() error, error) {
 		return nil, nil, nil, errors.New("too many open files")
 	}
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if err := h.w.Start(ctx); !errors.Is(err, ErrWatchUnavailable) || !strings.Contains(err.Error(), "too many open files") {
@@ -330,7 +330,7 @@ func TestWatchFailureFallsBackToResync(t *testing.T) {
 	if e := h.next("apply"); e.name != "a" {
 		t.Fatalf("applied %q, want a", e.name)
 	}
-	h.write("printscan.yaml", "name: b\n")
+	h.write("pagewire.yaml", "name: b\n")
 	if e := h.next("apply"); e.name != "b" {
 		t.Fatalf("applied %q, want b", e.name)
 	}
@@ -339,7 +339,7 @@ func TestWatchFailureFallsBackToResync(t *testing.T) {
 func TestStartReadErrorKeepsWatching(t *testing.T) {
 	h := newHarness(t)
 	// A directory under the file's name makes the read fail with something other than not-exist.
-	path := filepath.Join(h.dir, "printscan.yaml")
+	path := filepath.Join(h.dir, "pagewire.yaml")
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestStartReadErrorKeepsWatching(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	h.write("printscan.yaml", "name: a\n")
+	h.write("pagewire.yaml", "name: a\n")
 	// A slow write may let the removal be seen on its own first.
 	select {
 	case e := <-h.events:

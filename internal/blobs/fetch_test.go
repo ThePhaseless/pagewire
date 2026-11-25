@@ -25,10 +25,10 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 const id = "hplip-plugin"
@@ -204,9 +204,9 @@ func TestSuccessLayout(t *testing.T) {
 			if want := "[plugin]\ninstalled = 1\neula = 1\nversion = " + version(t) + "\n\n"; string(state) != want {
 				t.Errorf("hplip.state = %q, want %q", state, want)
 			}
-			ver, err := os.ReadFile(filepath.Join(root, ".printscan-version")) //nolint:gosec // test temp dir
+			ver, err := os.ReadFile(filepath.Join(root, ".pagewire-version")) //nolint:gosec // test temp dir
 			if err != nil || strings.TrimSpace(string(ver)) != version(t) {
-				t.Errorf(".printscan-version = %q (%v)", ver, err)
+				t.Errorf(".pagewire-version = %q (%v)", ver, err)
 			}
 			// The udev rule targets $RULESDIR, which no image links to the blob volume.
 			_ = filepath.WalkDir(f.dir, func(p string, _ os.DirEntry, _ error) error {
@@ -231,8 +231,8 @@ func TestSuccessLayout(t *testing.T) {
 				}
 				return nil
 			})
-			if txt, err := os.ReadFile(filepath.Join(root, ".printscan-text-sha256")); err != nil || strings.TrimSpace(string(txt)) != licenseSHA { //nolint:gosec // test temp dir
-				t.Errorf(".printscan-text-sha256 = %q (%v), want %s", txt, err, licenseSHA)
+			if txt, err := os.ReadFile(filepath.Join(root, ".pagewire-text-sha256")); err != nil || strings.TrimSpace(string(txt)) != licenseSHA { //nolint:gosec // test temp dir
+				t.Errorf(".pagewire-text-sha256 = %q (%v), want %s", txt, err, licenseSHA)
 			}
 			// The verified archive stays staged for the next start; nothing else.
 			entries, _ := os.ReadDir(f.dir)
@@ -320,7 +320,7 @@ func TestReplacesOtherVersion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(old, "prnt/plugins"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(old, ".printscan-version"), []byte("1.0.0\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(old, ".pagewire-version"), []byte("1.0.0\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(old, "prnt/plugins/stale.so"), nil, 0o600)
 	wantState(t, f.fetch(t, f.v.blob(t), accepted(t), "arm64"), device.BlobInstalled, "")
 	if _, err := os.Stat(filepath.Join(old, "prnt/plugins/stale.so")); !errors.Is(err, os.ErrNotExist) {
@@ -421,7 +421,7 @@ func TestUnsafeArchiveEntries(t *testing.T) {
 	for name, h := range map[string]tar.Header{
 		"dot-dot":          {Typeflag: tar.TypeReg, Name: "../evil.so"},
 		"nested dot-dot":   {Typeflag: tar.TypeReg, Name: "./a/../../evil.so"},
-		"absolute":         {Typeflag: tar.TypeReg, Name: "/tmp/printscan-evil.so"},
+		"absolute":         {Typeflag: tar.TypeReg, Name: "/tmp/pagewire-evil.so"},
 		"escaping link":    {Typeflag: tar.TypeSymlink, Name: "./bb_soapht-arm64.so", Linkname: "../../evil.so"},
 		"absolute link":    {Typeflag: tar.TypeSymlink, Name: "./bb_soapht-arm64.so", Linkname: "/etc/passwd"},
 		"hard link":        {Typeflag: tar.TypeLink, Name: "./bb_soapht-arm64.so", Linkname: "/etc/passwd"},
@@ -444,7 +444,7 @@ func TestUnsafeArchiveEntries(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, id)); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("hostile archive installed: %v", err)
 			}
-			if _, err := os.Lstat("/tmp/printscan-evil.so"); err == nil {
+			if _, err := os.Lstat("/tmp/pagewire-evil.so"); err == nil {
 				t.Error("absolute entry written to /tmp")
 			}
 		})
@@ -526,7 +526,7 @@ func dsaSigner(t *testing.T) (*openpgp.Entity, func([]byte) []byte) {
 	}
 	now := time.Now().Add(-time.Hour)
 	pk := packet.NewDSAPrivateKey(now, &priv)
-	uid := packet.NewUserId("synthetic DSA vendor", "", "dsa@printscan.invalid")
+	uid := packet.NewUserId("synthetic DSA vendor", "", "dsa@pagewire.invalid")
 	primary := true
 	self := &packet.Signature{
 		Version: 4, SigType: packet.SigTypePositiveCert, PubKeyAlgo: packet.PubKeyAlgoDSA, Hash: crypto.SHA256,

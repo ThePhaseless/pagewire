@@ -68,7 +68,7 @@ export const ScanConfigSchema = z.strictObject({
 export type ScanConfig = z.infer<typeof ScanConfigSchema>;
 
 export const ConfigSchema = z.strictObject({
-  apiVersion: z.literal("printscan/v1"),
+  apiVersion: z.literal("pagewire/v1"),
   /** Required, 1 to 63 characters, no control characters, not starting with -. UI title, and the queue and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise the device's own names. */
   name: z.string().min(1).max(63).regex(new RegExp("^[^\\-\\x00-\\x1f\\x7f-\\x9f][^\\x00-\\x1f\\x7f-\\x9f]*$", "u")),
   /** printer-location, 0 to 127 characters. */

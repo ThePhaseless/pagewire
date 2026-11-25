@@ -1,4 +1,4 @@
-module github.com/ThePhaseless/printscan
+module github.com/ThePhaseless/pagewire
 
 go 1.27
 

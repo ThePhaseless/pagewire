@@ -11,11 +11,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/config/yamledit"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/config/yamledit"
 )
 
-const valid = `apiVersion: printscan/v1
+const valid = `apiVersion: pagewire/v1
 # the printer's name
 name: Office   # shown in the UI
 
@@ -29,7 +29,7 @@ func check(b []byte) error {
 
 func newStore(t *testing.T) (*Store, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "printscan.yaml")
+	path := filepath.Join(t.TempDir(), "pagewire.yaml")
 	return New(path, check), path
 }
 
@@ -82,7 +82,7 @@ func TestCreateTwice(t *testing.T) {
 
 func TestCreateInvalid(t *testing.T) {
 	s, path := newStore(t)
-	_, err := s.Create([]byte("apiVersion: printscan/v1\n"))
+	_, err := s.Create([]byte("apiVersion: pagewire/v1\n"))
 	var el *config.ErrorList
 	if !errors.As(err, &el) {
 		t.Fatalf("err = %v, want *config.ErrorList", err)
@@ -139,7 +139,7 @@ func TestPatchInvalidResult(t *testing.T) {
 
 func TestNoOpPatchOnInvalidFile(t *testing.T) {
 	s, path := newStore(t)
-	const invalid = "apiVersion: printscan/v1\n"
+	const invalid = "apiVersion: pagewire/v1\n"
 	if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := "apiVersion: printscan/v1\nname: Other\n"
+	other := "apiVersion: pagewire/v1\nname: Other\n"
 	if _, err := s.Replace("stale", []byte(other)); !errors.As(err, new(*ErrPreconditionFailed)) {
 		t.Fatalf("err = %v, want ErrPreconditionFailed", err)
 	}
@@ -260,7 +260,7 @@ func TestReadersSeeWholeFiles(t *testing.T) {
 	defer func() { _ = old.Close() }()
 	var contents []string
 	for i := range 50 {
-		contents = append(contents, "apiVersion: printscan/v1\nname: P\n# "+strings.Repeat("x", i*400)+"\n")
+		contents = append(contents, "apiVersion: pagewire/v1\nname: P\n# "+strings.Repeat("x", i*400)+"\n")
 	}
 	for _, c := range contents {
 		versions[c] = true
@@ -311,7 +311,7 @@ func TestUnwritableDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restore for TempDir cleanup
-	_, err = s.Replace(etag, []byte("apiVersion: printscan/v1\nname: Other\n"))
+	_, err = s.Replace(etag, []byte("apiVersion: pagewire/v1\nname: Other\n"))
 	var el *config.ErrorList
 	if err == nil || errors.As(err, &el) || errors.As(err, new(*ErrPreconditionFailed)) {
 		t.Fatalf("err = %v, want a plain write error", err)

@@ -24,7 +24,7 @@ export const printStrings = {
         : `${(bytes / (1024 * 1024)).toFixed(1)} MB`,
     unsupported: (format: string) => `This printer does not accept ${format} files.`,
     unknownFormat:
-      "This is not a document format printscan can send. Save it as one of the accepted formats.",
+      "This is not a document format pagewire can send. Save it as one of the accepted formats.",
     tooLarge: (mib: number) => `Larger than the ${mib} MB upload limit in Settings.`,
     readError: "This file could not be read.",
     uploading: (name: string) => `Uploading ${name}`,

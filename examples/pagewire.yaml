@@ -1,8 +1,8 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/config.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json
 #
-# printscan config with every key. Only apiVersion and name are required;
+# pagewire config with every key. Only apiVersion and name are required;
 # every other key has the default shown unless noted.
-apiVersion: printscan/v1          # required, always printscan/v1
+apiVersion: pagewire/v1          # required, always pagewire/v1
 
 # Required, 1 to 63 characters, no control characters. UI title, and the queue
 # and DNS-SD name of PAPPL and simulated printers. ipp-usb and AirSane advertise

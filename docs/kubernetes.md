@@ -1,4 +1,4 @@
-# Running printscan on Kubernetes
+# Running pagewire on Kubernetes
 
 This guide covers what a cluster needs before `deploy/base` works, and the values in it that you have to change. Names in angle brackets, such as `<node>`, are placeholders.
 
@@ -10,11 +10,11 @@ Note the printer's USB vendor and product IDs (4 hex digits each). The device pl
 
 ## Device plugin
 
-printscan does not mount `/dev`. It asks for the printer as an extended resource, which [generic-device-plugin](https://github.com/squat/generic-device-plugin) provides. `deploy/examples/generic-device-plugin.yaml` is a DaemonSet you can start from:
+pagewire does not mount `/dev`. It asks for the printer as an extended resource, which [generic-device-plugin](https://github.com/squat/generic-device-plugin) provides. `deploy/examples/generic-device-plugin.yaml` is a DaemonSet you can start from:
 
 - Replace `VVVV` and `PPPP` in its `--device` argument with the printer's vendor and product IDs. Add `serial` if you have two identical printers.
 - Keep `"count": 3`: up to three containers of the device pod request the printer at the same time.
-- The resource name is `<domain>/<device name>`, `devic.es/printer` in the example. Set `PRINTSCAN_USB_RESOURCE` on the control plane to the same string. If they differ, the device pod stays Pending, and printscan cannot tell that from an unplugged printer.
+- The resource name is `<domain>/<device name>`, `devic.es/printer` in the example. Set `PAGEWIRE_USB_RESOURCE` on the control plane to the same string. If they differ, the device pod stays Pending, and pagewire cannot tell that from an unplugged printer.
 
 The device plugin creates the device node owned by root, so the containers that open it run as uid 0. A udev rule on the node that changes the node's owner is optional.
 
@@ -34,8 +34,8 @@ If you rename the namespace, change the binding's `namespaceSelector` too.
 
 `deploy/base/pvc.yaml` has two ReadWriteOnce claims:
 
-- `printscan-data` (2Gi) holds the config file and stored scans, and is mounted by the control plane. Use a volume that delivers inotify events: network RWX file systems do not, and the config watcher would miss edits.
-- `printscan-blobs` (1Gi) holds vendor files, such as HP's plug-in, and is mounted by the device pod. The name is the default of `--blob-pvc` (`PRINTSCAN_BLOB_PVC`).
+- `pagewire-data` (2Gi) holds the config file and stored scans, and is mounted by the control plane. Use a volume that delivers inotify events: network RWX file systems do not, and the config watcher would miss edits.
+- `pagewire-blobs` (1Gi) holds vendor files, such as HP's plug-in, and is mounted by the device pod. The name is the default of `--blob-pvc` (`PAGEWIRE_BLOB_PVC`).
 
 In probe and usb modes the device pod always mounts the blob volume, even for printers that need no vendor file. Its agent container uses it to download and check a vendor archive, so the wizard can show the vendor's licence before you accept it. The volume therefore has to be mountable on the node with the USB printer. A node-local ReadWriteOnce volume that was provisioned on another node leaves the device pod Pending. The device Deployment runs one replica with the Recreate strategy, so the old and new pod never hold the volume at the same time.
 
@@ -45,16 +45,16 @@ To run without a blob volume, pass the flag with an empty value in the control p
 args: ["serve", "--blob-pvc="]
 ```
 
-Remove every `licenses.acceptedEulas` entry from the config first. With an accepted entry the device Deployment still names the blob volume, with an empty claim name, and Kubernetes rejects it. With no accepted entries, the device pod mounts no blob volume, so it cannot download licence texts or vendor files. The HP licence shows as failed in the wizard and Settings, and the plug-in cannot be accepted or installed. An empty `PRINTSCAN_BLOB_PVC` environment variable does not do this: printscan treats an empty variable as unset and uses `printscan-blobs`.
+Remove every `licenses.acceptedEulas` entry from the config first. With an accepted entry the device Deployment still names the blob volume, with an empty claim name, and Kubernetes rejects it. With no accepted entries, the device pod mounts no blob volume, so it cannot download licence texts or vendor files. The HP licence shows as failed in the wizard and Settings, and the plug-in cannot be accepted or installed. An empty `PAGEWIRE_BLOB_PVC` environment variable does not do this: pagewire treats an empty variable as unset and uses `pagewire-blobs`.
 
 ## Ingress, forward auth and allowed hosts
 
-printscan has no login. Route only port 8080 (the Service's `http` port) through an ingress that authenticates every request, for example Traefik with Authentik forward auth. When the proxy sets `X-Authentik-Username`, print jobs carry that user name. Never route port 8081.
+pagewire has no login. Route only port 8080 (the Service's `http` port) through an ingress that authenticates every request, for example Traefik with Authentik forward auth. When the proxy sets `X-Authentik-Username`, print jobs carry that user name. Never route port 8081.
 
 Two optional settings close the gaps a misconfigured proxy would leave. `deploy/base/deployment.yaml` has both as commented-out examples:
 
-- `PRINTSCAN_ALLOWED_HOSTS` (flag `--allowed-hosts`) is a comma-separated list of host names the UI and API answer to, for example `printscan.example.com`. A request with any other `Host` header gets 421 with problem type `misdirected-request`, which stops DNS-rebinding pages from reaching the API. The port is ignored and case does not matter. `/healthz` and `/readyz` are exempt. On Kubernetes the default is no check. `*` turns the check off on any backend.
-- `PRINTSCAN_PROXY_SECRET` is a shared secret that your proxy adds to every request, in the header `X-Printscan-Proxy-Secret` (change it with `PRINTSCAN_PROXY_SECRET_HEADER` or `--proxy-secret-header`). When it is set, an `/api/` request without the right header gets 401 with problem type `unauthorized`, so the API refuses requests that bypassed the proxy. The UI files, `/healthz`, `/readyz` and port 8081 are exempt. Take the secret from a Secret through `secretKeyRef`, or mount it as a file and set `--proxy-secret-file` (`PRINTSCAN_PROXY_SECRET_FILE`). There is no flag that takes the secret itself. Setting both the variable and the file, or giving an empty file, stops printscan at startup.
+- `PAGEWIRE_ALLOWED_HOSTS` (flag `--allowed-hosts`) is a comma-separated list of host names the UI and API answer to, for example `pagewire.example.com`. A request with any other `Host` header gets 421 with problem type `misdirected-request`, which stops DNS-rebinding pages from reaching the API. The port is ignored and case does not matter. `/healthz` and `/readyz` are exempt. On Kubernetes the default is no check. `*` turns the check off on any backend.
+- `PAGEWIRE_PROXY_SECRET` is a shared secret that your proxy adds to every request, in the header `X-Pagewire-Proxy-Secret` (change it with `PAGEWIRE_PROXY_SECRET_HEADER` or `--proxy-secret-header`). When it is set, an `/api/` request without the right header gets 401 with problem type `unauthorized`, so the API refuses requests that bypassed the proxy. The UI files, `/healthz`, `/readyz` and port 8081 are exempt. Take the secret from a Secret through `secretKeyRef`, or mount it as a file and set `--proxy-secret-file` (`PAGEWIRE_PROXY_SECRET_FILE`). There is no flag that takes the secret itself. Setting both the variable and the file, or giving an empty file, stops pagewire at startup.
 
 ## NetworkPolicy
 
@@ -67,7 +67,7 @@ Port 8081 takes reports from the agent in the device pod. That pod uses the host
 
 ## The agent token on port 8081
 
-The agent sends its reports to `http://printscan.<namespace>.svc:8081` (`--agent-url`) with a bearer token from the Secret `printscan-agent-token`, which the control plane creates. The connection is plain HTTP inside the cluster, so anyone who can capture traffic between the node and the control-plane pod can read the token and send false reports. The NetworkPolicy limits who can reach port 8081. Use a CNI with transparent encryption if your cluster network is shared with machines you do not trust.
+The agent sends its reports to `http://pagewire.<namespace>.svc:8081` (`--agent-url`) with a bearer token from the Secret `pagewire-agent-token`, which the control plane creates. The connection is plain HTTP inside the cluster, so anyone who can capture traffic between the node and the control-plane pod can read the token and send false reports. The NetworkPolicy limits who can reach port 8081. Use a CNI with transparent encryption if your cluster network is shared with machines you do not trust.
 
 ## LAN-only IPP and eSCL
 
@@ -77,8 +77,8 @@ The device pod serves IPP, eSCL and mDNS on the node's LAN address, the way a ne
 
 Until the first release, `deploy/base/deployment.yaml` and `deploy/base/kustomization.yaml` both use the tag `main`, and the control-plane container has `imagePullPolicy: Always`. `main` moves with every push to the main branch, and the device pod already pulls `main` images Always, so the control plane and the agent speak the same protocol after a restart.
 
-After the first release, set `newTag: <version>@sha256:<digest>` in `kustomization.yaml` and drop `imagePullPolicy: Always`. The device pod's probe, agent and fetch-blobs containers reuse the control-plane image string, digest included. Pin the device and driver images with `PRINTSCAN_IMAGE_OVERRIDES` (see Images in the README).
+After the first release, set `newTag: <version>@sha256:<digest>` in `kustomization.yaml` and drop `imagePullPolicy: Always`. The device pod's probe, agent and fetch-blobs containers reuse the control-plane image string, digest included. Pin the device and driver images with `PAGEWIRE_IMAGE_OVERRIDES` (see Images in the README).
 
 ## Memory limit and GOMEMLIMIT
 
-The control-plane container has a 256Mi memory limit. At start, printscan reads that limit from the cgroup (`/sys/fs/cgroup/memory.max`, cgroup v2) and sets the Go memory limit to 80% of it, about 205 MiB by default. When printscan converts a PNG for printing, it decodes up to 128 MiB of pixels at a time. The Go memory limit makes the garbage collector work harder as the heap nears it, and the remaining 20% covers memory the cgroup counts but Go does not, such as kernel buffers and page tables. To change it, change only `resources.limits.memory`. Setting `GOMEMLIMIT` on the container overrides the 80% rule, and on a node that still uses cgroup v1 printscan sets no limit unless you set `GOMEMLIMIT`.
+The control-plane container has a 256Mi memory limit. At start, pagewire reads that limit from the cgroup (`/sys/fs/cgroup/memory.max`, cgroup v2) and sets the Go memory limit to 80% of it, about 205 MiB by default. When pagewire converts a PNG for printing, it decodes up to 128 MiB of pixels at a time. The Go memory limit makes the garbage collector work harder as the heap nears it, and the remaining 20% covers memory the cgroup counts but Go does not, such as kernel buffers and page tables. To change it, change only `resources.limits.memory`. Setting `GOMEMLIMIT` on the container overrides the 80% rule, and on a node that still uses cgroup v1 pagewire sets no limit unless you set `GOMEMLIMIT`.

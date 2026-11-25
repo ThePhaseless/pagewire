@@ -9,10 +9,10 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Backend names serve passes as Options.BackendName (the Setup DTO's backend).
@@ -107,7 +107,7 @@ func serviceURL(scheme, hostIP string, s device.DNSSDService, key string) string
 	return scheme + "://" + net.JoinHostPort(hostIP, strconv.Itoa(s.Port)) + "/" + strings.TrimPrefix(s.TXT[key], "/")
 }
 
-// preferredName is the DNS-SD name the printer advertises under when printscan
+// preferredName is the DNS-SD name the printer advertises under when pagewire
 // names it (PAPPL and simulated families); ipp-usb advertises the device's own.
 func preferredName(fam catalog.Printer, cfg *config.Config) string {
 	if cfg == nil || fam.ID == "ipp-usb" {

@@ -81,7 +81,7 @@ export function createEventStore(opts: StoreOptions = {}) {
     try {
       payload = schemas[type].parse(JSON.parse(data)) as EventPayload[T];
     } catch (err) {
-      console.error(`printscan: dropped malformed "${type}" event`, err);
+      console.error(`pagewire: dropped malformed "${type}" event`, err);
       return;
     }
     latest[type] = payload;

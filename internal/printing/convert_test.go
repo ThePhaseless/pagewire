@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 func pngBytes(t *testing.T, img image.Image) []byte {

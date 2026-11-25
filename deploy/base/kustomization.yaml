@@ -3,7 +3,7 @@ kind: Kustomization
 namespace: printing
 labels:
   - pairs:
-      app.kubernetes.io/name: printscan
+      app.kubernetes.io/name: pagewire
     includeSelectors: true
 resources:
   - namespace.yaml
@@ -18,5 +18,5 @@ images:
   # Use main until the first release, then pin <version>@sha256:<digest>
   # (and drop imagePullPolicy: Always in deployment.yaml).
   # The device pod's probe, agent and fetch-blobs containers reuse this exact image string.
-  - name: ghcr.io/thephaseless/printscan
+  - name: ghcr.io/thephaseless/pagewire
     newTag: main

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/ThePhaseless/printscan/main/schema/config.schema.json",
+  "$id": "https://raw.githubusercontent.com/ThePhaseless/pagewire/main/schema/config.schema.json",
   "$ref": "#/$defs/Config",
   "$defs": {
     "Config": {
       "properties": {
         "apiVersion": {
           "type": "string",
-          "const": "printscan/v1"
+          "const": "pagewire/v1"
         },
         "name": {
           "type": "string",

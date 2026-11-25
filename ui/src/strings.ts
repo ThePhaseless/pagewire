@@ -2,7 +2,7 @@
 // Each view keeps its own copy in views/<View>.strings.ts.
 
 export const strings = {
-  appName: "printscan",
+  appName: "pagewire",
   skipToContent: "Skip to content",
   nav: {
     label: "Main",
@@ -21,9 +21,9 @@ export const strings = {
     offline: "Offline",
   },
   banners: {
-    offline: "Lost connection to printscan. Reconnecting…",
+    offline: "Lost connection to pagewire. Reconnecting…",
     invalidConfig:
-      "The settings file has an error, so printscan keeps using the last working settings.",
+      "The settings file has an error, so pagewire keeps using the last working settings.",
     invalidConfigLine: (line: number, message: string) => `Line ${line}: ${message}`,
     openSettings: "Open Settings",
   },
@@ -47,21 +47,21 @@ export const strings = {
   plugInHint: "Plug the printer in with USB, switch it on and wait. This page updates by itself.",
   notFound: {
     title: "Page not found",
-    body: "This address is not part of printscan.",
+    body: "This address is not part of pagewire.",
     home: "Go to Status",
   },
   problems: {
     "config-missing": "There is no settings file yet. Finish setup to create it.",
     "storage-error":
-      "printscan could not write to its data directory. Check that the volume is mounted and writable.",
+      "pagewire could not write to its data directory. Check that the volume is mounted and writable.",
     "multipart-order": "The upload was malformed. Reload the page and try again.",
     "storage-full":
       "Stored scans have reached the 1 GiB limit. Delete old scans under Recent scans to scan again.",
     "invalid-image":
       "This image is damaged, or its contents do not match its type. Open it and save it again, or save it as a PDF.",
-    "network-error": "Could not reach printscan. Check your connection and try again.",
+    "network-error": "Could not reach pagewire. Check your connection and try again.",
     "bad-response":
-      "printscan sent a response this page does not understand. Reload the page; if it persists, the UI and server versions differ.",
+      "pagewire sent a response this page does not understand. Reload the page; if it persists, the UI and server versions differ.",
     byStatus: {
       400: "The request was not valid.",
       404: "That item no longer exists.",
@@ -71,7 +71,7 @@ export const strings = {
       415: "The printer does not accept this file type.",
       422: "Some values are not valid.",
       428: "The request is missing its version check. Reload the page and try again.",
-      500: "printscan hit an internal error.",
+      500: "pagewire hit an internal error.",
       503: "The device is not available right now.",
     } as Record<number, string>,
     unknown: "Something went wrong.",

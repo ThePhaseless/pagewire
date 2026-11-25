@@ -24,10 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/pappl"
-	"github.com/ThePhaseless/printscan/internal/printing"
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/pappl"
+	"github.com/ThePhaseless/pagewire/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 // Fixed host ports from compose.test.yaml.

@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   name: printing
   labels:
-    # The device pod that printscan renders uses hostNetwork (mDNS/DNS-SD and the IPP
+    # The device pod that pagewire renders uses hostNetwork (mDNS/DNS-SD and the IPP
     # and eSCL ports on the node's LAN IP), which only the privileged Pod Security
     # level allows. It does not mount host paths such as /sys and runs no privileged
     # container. deploy/examples/admission-policy.yaml enforces that for this namespace.

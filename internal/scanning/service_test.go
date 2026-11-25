@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
 )
 
 // fakeScanner serves pages; when gate is set, every NextPage waits for it.

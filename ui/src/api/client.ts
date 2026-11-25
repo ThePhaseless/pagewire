@@ -109,7 +109,7 @@ async function send(path: string, opts: Options = {}): Promise<Response> {
 function parse<S extends z.ZodType>(schema: S, data: unknown): z.infer<S> {
   const r = schema.safeParse(data);
   if (!r.success) {
-    console.error("printscan: unexpected response shape", z.prettifyError(r.error));
+    console.error("pagewire: unexpected response shape", z.prettifyError(r.error));
     throw synthetic("bad-response", 0, "Unexpected response", z.prettifyError(r.error));
   }
   return r.data;

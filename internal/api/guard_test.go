@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 func TestAllowedHosts(t *testing.T) {
 	e := newEnv(t, func(d *Deps) {
 		d.UI = uiFS
-		d.AllowedHosts = []string{"localhost", "127.0.0.1", "[::1]", " Printscan.Example "}
+		d.AllowedHosts = []string{"localhost", "127.0.0.1", "[::1]", " Pagewire.Example "}
 		d.Agent = Agent{Tokens: tokenSource{token: "secret"}, Report: func(_ context.Context, _ device.AgentReport) (device.DesiredState, error) {
 			return device.DesiredState{}, nil
 		}}
@@ -28,7 +28,7 @@ func TestAllowedHosts(t *testing.T) {
 		e.public.ServeHTTP(rec, req)
 		return rec
 	}
-	for _, host := range []string{"localhost", "LOCALHOST:1", "127.0.0.1:8080", "[::1]:8080", "[::1]", "printscan.example:443"} {
+	for _, host := range []string{"localhost", "LOCALHOST:1", "127.0.0.1:8080", "[::1]:8080", "[::1]", "pagewire.example:443"} {
 		if rec := get("/api/v1/status", host); rec.Code != 200 {
 			t.Errorf("Host %q: %d %s", host, rec.Code, rec.Body)
 		}
@@ -82,7 +82,7 @@ func TestProxySecret(t *testing.T) {
 				d.ProxySecretHeader = header
 			})
 			if header == "" {
-				header = "X-Printscan-Proxy-Secret"
+				header = "X-Pagewire-Proxy-Secret"
 			}
 			for _, path := range []string{"/api/v1/status", "/api/v1/events", "/api/v1/nope"} {
 				wantProblem(t, e.do("GET", path, nil), 401, "unauthorized")

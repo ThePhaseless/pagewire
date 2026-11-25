@@ -14,9 +14,9 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/ThePhaseless/printscan/internal/backend/docker"
-	"github.com/ThePhaseless/printscan/internal/backend/k8s"
-	"github.com/ThePhaseless/printscan/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/backend/docker"
+	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
 )
 
 const root = "../.."
@@ -252,9 +252,9 @@ func TestCatalogFamiliesMatchImages(t *testing.T) {
 			continue
 		}
 		n++
-		target, ok := strings.CutPrefix(p.Image, "printscan-driver-")
+		target, ok := strings.CutPrefix(p.Image, "pagewire-driver-")
 		if !ok {
-			t.Errorf("printer %s: image %q is not printscan-driver-<target>", p.ID, p.Image)
+			t.Errorf("printer %s: image %q is not pagewire-driver-<target>", p.ID, p.Image)
 			continue
 		}
 		s := findStage(driver, target)
@@ -517,8 +517,8 @@ func TestSourcesListSwitch(t *testing.T) {
 			`(?m)^FROM --platform=linux/amd64 \$\{PUSHED_IMAGE\} AS pushed-amd64\s*$`,
 			`(?m)^FROM --platform=linux/arm64 \$\{PUSHED_IMAGE\} AS pushed-arm64\s*$`,
 			`(?m)^FROM lists-\$\{SOURCES_LISTS\} AS lists\s*$`,
-			`(?m)^COPY --from=pushed-amd64 /usr/share/printscan/source-packages.txt /lists/`,
-			`(?m)^COPY --from=pushed-arm64 /usr/share/printscan/source-packages.txt /lists/`,
+			`(?m)^COPY --from=pushed-amd64 /usr/share/pagewire/source-packages.txt /lists/`,
+			`(?m)^COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/`,
 			`(?m)^COPY --from=lists /lists/ /sources/lists/\s*$`,
 			`sort -u /sources/lists/\*`,
 			`(?m)^COPY .*\b` + regexp.QuoteMeta(file) + `\b.* /sources/build/`,
@@ -561,17 +561,17 @@ func TestSourcesReference(t *testing.T) {
 			"ARG VERSION",
 			"ARG IMAGE=" + image,
 			"ARG SOURCES_REF=" + ref,
-			"COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/printscan/",
-			`LABEL dev.printscan.sources="${SOURCES_REF}"`,
+			"COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/",
+			`LABEL dev.pagewire.sources="${SOURCES_REF}"`,
 		} {
 			if !slices.ContainsFunc(s.lines, func(l string) bool { return strings.TrimSpace(l) == want }) {
 				t.Errorf("%s stage %s: no line %q", file, target, want)
 			}
 		}
 		if !slices.ContainsFunc(s.lines, func(l string) bool {
-			return strings.HasPrefix(l, "RUN ") && strings.Contains(l, `"${SOURCES_REF}" > /usr/share/printscan/SOURCES`)
+			return strings.HasPrefix(l, "RUN ") && strings.Contains(l, `"${SOURCES_REF}" > /usr/share/pagewire/SOURCES`)
 		}) {
-			t.Errorf("%s stage %s: no RUN writing \"${SOURCES_REF}\" to /usr/share/printscan/SOURCES", file, target)
+			t.Errorf("%s stage %s: no RUN writing \"${SOURCES_REF}\" to /usr/share/pagewire/SOURCES", file, target)
 		}
 	}
 	if n != 5 {
@@ -601,15 +601,15 @@ func TestComposeDockerContainerName(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(read(t, "compose.test.yaml")), &it); err != nil {
 		t.Fatal(err)
 	}
-	if got := str(get(c, "services", "printscan", "container_name")); got != docker.DefaultContainer {
+	if got := str(get(c, "services", "pagewire", "container_name")); got != docker.DefaultContainer {
 		t.Errorf("compose.docker.yaml container_name = %q, want %q (docker.DefaultContainer)", got, docker.DefaultContainer)
 	}
-	if !slices.ContainsFunc(list(get(c, "services", "printscan", "command")), func(a any) bool { return str(a) == "--backend=docker" }) {
+	if !slices.ContainsFunc(list(get(c, "services", "pagewire", "command")), func(a any) bool { return str(a) == "--backend=docker" }) {
 		t.Error("compose.docker.yaml command lacks --backend=docker")
 	}
-	// compose.yaml has no name, so its project is the checkout directory, usually printscan.
-	if name := str(get(c, "name")); name == "" || name == "printscan" || name == str(get(it, "name")) {
-		t.Errorf("compose.docker.yaml name = %q; want a project apart from compose.test.yaml (%q) and the demo stack (printscan)", name, str(get(it, "name")))
+	// compose.yaml has no name, so its project is the checkout directory, usually pagewire.
+	if name := str(get(c, "name")); name == "" || name == "pagewire" || name == str(get(it, "name")) {
+		t.Errorf("compose.docker.yaml name = %q; want a project apart from compose.test.yaml (%q) and the demo stack (pagewire)", name, str(get(it, "name")))
 	}
 }
 
@@ -620,8 +620,8 @@ func TestE2EScript(t *testing.T) {
 	if err := json.Unmarshal([]byte(read(t, "ui/package.json")), &pkg); err != nil {
 		t.Fatal(err)
 	}
-	if e2e := pkg.Scripts["e2e"]; !strings.HasPrefix(e2e, "PRINTSCAN_E2E=1 ") {
-		t.Errorf("ui/package.json e2e script %q does not start with PRINTSCAN_E2E=1", e2e)
+	if e2e := pkg.Scripts["e2e"]; !strings.HasPrefix(e2e, "PAGEWIRE_E2E=1 ") {
+		t.Errorf("ui/package.json e2e script %q does not start with PAGEWIRE_E2E=1", e2e)
 	}
 }
 

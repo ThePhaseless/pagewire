@@ -86,7 +86,7 @@ export async function writeLicenses(
   const rule = `\n\n${"-".repeat(72)}\n\n`;
   writeFileSync(
     out,
-    `Third-party software bundled in the printscan web UI.${rule}${sections.join(rule)}\n`,
+    `Third-party software bundled in the pagewire web UI.${rule}${sections.join(rule)}\n`,
   );
   return out;
 }

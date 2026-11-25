@@ -1,16 +1,16 @@
-# printscan device catalog: data only. The dispatcher (dispatch.go) evaluates
+# pagewire device catalog: data only. The dispatcher (dispatch.go) evaluates
 # rules top to bottom and the first match wins. catalog_test.go checks that
 # every reference resolves.
-apiVersion: printscan.catalog/v1
+apiVersion: pagewire.catalog/v1
 
 printers:
   - {id: ipp-usb, role: ipp-usb}                                       # device image, ipp-usb container
   # deviceSchemes become QueueSpec.Schemes: the preferred CUPS backend when one
   # device is listed by several (hplip: hp: before usb:).
-  - {id: ps, image: printscan-driver-ps, app: ps-printer-app, port: 8001, deviceSchemes: [usb]}
-  - {id: hplip, image: printscan-driver-hplip, app: hplip-printer-app, port: 8002, deviceSchemes: [hp, usb]}
-  - {id: gutenprint, image: printscan-driver-gutenprint, app: gutenprint-printer-app, port: 8003, deviceSchemes: [usb]}
-  - {id: ghostscript, image: printscan-driver-ghostscript, app: ghostscript-printer-app, port: 8004, deviceSchemes: [usb]}
+  - {id: ps, image: pagewire-driver-ps, app: ps-printer-app, port: 8001, deviceSchemes: [usb]}
+  - {id: hplip, image: pagewire-driver-hplip, app: hplip-printer-app, port: 8002, deviceSchemes: [hp, usb]}
+  - {id: gutenprint, image: pagewire-driver-gutenprint, app: gutenprint-printer-app, port: 8003, deviceSchemes: [usb]}
+  - {id: ghostscript, image: pagewire-driver-ghostscript, app: ghostscript-printer-app, port: 8004, deviceSchemes: [usb]}
   - {id: sim, role: ippeveprinter, port: 8631}                          # simulated mode only
 
 # airsane and sim are the same AirSane daemon in different modes, so they share

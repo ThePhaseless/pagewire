@@ -136,7 +136,7 @@ const ready: Status = {
 };
 
 const config: Config = {
-  apiVersion: "printscan/v1",
+  apiVersion: "pagewire/v1",
   name: "Living room printer",
   location: "",
   device: { mode: "simulated", driver: "auto", scanner: "auto" },
@@ -380,7 +380,7 @@ describe("Scan view", () => {
     expect(scanButton().hasAttribute("data-pending")).toBe(true);
   });
 
-  test("scanning is off while the connection to printscan is down", async () => {
+  test("scanning is off while the connection to pagewire is down", async () => {
     await renderScan(ready, false);
     await waitFor(() => expect(selected("Resolution")).toBe("300 dpi"));
     expect(disabled(scanButton())).toBe(true);

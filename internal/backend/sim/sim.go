@@ -39,12 +39,12 @@ import (
 	"github.com/OpenPrinting/goipp"
 	"github.com/ProtonMail/go-crypto/openpgp"
 
-	"github.com/ThePhaseless/printscan/internal/agent"
-	"github.com/ThePhaseless/printscan/internal/blobs"
-	"github.com/ThePhaseless/printscan/internal/blobs/blobtest"
-	"github.com/ThePhaseless/printscan/internal/catalog"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/pappl/papplfake"
+	"github.com/ThePhaseless/pagewire/internal/agent"
+	"github.com/ThePhaseless/pagewire/internal/blobs"
+	"github.com/ThePhaseless/pagewire/internal/blobs/blobtest"
+	"github.com/ThePhaseless/pagewire/internal/catalog"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/pappl/papplfake"
 )
 
 const (
@@ -326,7 +326,7 @@ func (b *Backend) newPrinter(spec *device.Spec, addr, out string) http.Handler {
 		PrinterName:             optional.New(name),
 		PrinterLocation:         optional.New(spec.Location),
 		PrinterInfo:             optional.New(name),
-		PrinterMakeAndModel:     optional.New("printscan virtual printer"),
+		PrinterMakeAndModel:     optional.New("pagewire virtual printer"),
 		PrinterState:            &idle,
 		PrinterStateReasons:     []ipp.KwPrinterStateReasons{"none"},
 		PrinterIsAcceptingJobs:  optional.New(true),
@@ -480,7 +480,7 @@ func newScanner() http.Handler {
 		}},
 	}
 	caps := &abstract.ScannerCapabilities{
-		MakeAndModel:    "printscan virtual scanner",
+		MakeAndModel:    "pagewire virtual scanner",
 		DocumentFormats: []string{"image/jpeg"},
 		Platen:          input,
 		ADFSimplex:      input,

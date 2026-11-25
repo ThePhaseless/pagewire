@@ -20,11 +20,11 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/controller"
-	"github.com/ThePhaseless/printscan/internal/device"
-	"github.com/ThePhaseless/printscan/internal/schema"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/controller"
+	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/schema"
 )
 
 // waitFor bounds every single wait inside the 2 min overall deadline.
@@ -48,7 +48,7 @@ type instance struct {
 // stops it when the test ends.
 func startServe(t *testing.T, ctx context.Context, dataDir string, extra ...string) *instance {
 	t.Helper()
-	cfgPath := filepath.Join(dataDir, "printscan.yaml")
+	cfgPath := filepath.Join(dataDir, "pagewire.yaml")
 	args := append([]string{
 		"--backend=sim", "--listen=127.0.0.1:0", "--internal-listen=127.0.0.1:0",
 		"--data-dir=" + dataDir, "--config=" + cfgPath,
@@ -377,7 +377,7 @@ func TestEndToEnd(t *testing.T) {
 		}
 
 		// 7. A broken hand edit: invalid with a line, printer still ready.
-		in.writeConfig("apiVersion: printscan/v1\nname: [unclosed\n")
+		in.writeConfig("apiVersion: pagewire/v1\nname: [unclosed\n")
 		waitStatus(in, ch, "config invalid with a line", func(s apitypes.Status) bool {
 			return s.Config.State == apitypes.ConfigInvalid && len(s.Config.Errors) > 0 && s.Config.Errors[0].Line > 0 && ready(s)
 		})
@@ -395,7 +395,7 @@ func TestEndToEnd(t *testing.T) {
 		})
 
 		// 9. An unknown EULA: valid YAML, invalid config, printer still ready.
-		in.writeConfig("apiVersion: printscan/v1\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n      textSha256: " + strings.Repeat("a", 64) + "\n")
+		in.writeConfig("apiVersion: pagewire/v1\nname: Printer\nlicenses:\n  acceptedEulas:\n    - id: no-such-eula\n      version: \"1\"\n      textSha256: " + strings.Repeat("a", 64) + "\n")
 		waitStatus(in, ch, "unknown EULA rejected", func(s apitypes.Status) bool {
 			return s.Config.State == apitypes.ConfigInvalid && ready(s) && slices.ContainsFunc(s.Config.Errors, func(e config.FieldError) bool {
 				return e.Path == "/licenses/acceptedEulas/0"
@@ -417,7 +417,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("eula %+v", eula)
 		}
 		ch := in.events()
-		in.writeConfig("apiVersion: printscan/v1\nname: HP test\ndevice:\n  mode: usb\nlicenses:\n  acceptedEulas:\n" +
+		in.writeConfig("apiVersion: pagewire/v1\nname: HP test\ndevice:\n  mode: usb\nlicenses:\n  acceptedEulas:\n" +
 			"    - id: hplip-plugin\n      version: \"3.24.4\"\n      textSha256: " + *eula.TextSHA256 + "\n")
 		st := waitStatus(in, ch, "PAPPL printer ready with the blob installed", func(s apitypes.Status) bool {
 			return ready(s) && strings.HasPrefix(s.Printer.URI, "ipp://127.0.0.1:") &&
@@ -480,11 +480,11 @@ func TestEndToEnd(t *testing.T) {
 }
 
 func TestServeBadOverrides(t *testing.T) {
-	t.Setenv("PRINTSCAN_IMAGE_OVERRIDES", "device=x,bogus=y")
+	t.Setenv("PAGEWIRE_IMAGE_OVERRIDES", "device=x,bogus=y")
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := serve(ctx, []string{"--backend=sim", "--listen=127.0.0.1:0", "--internal-listen=127.0.0.1:0", "--data-dir=" + t.TempDir()}, nil)
-	if err == nil || !strings.Contains(err.Error(), "PRINTSCAN_IMAGE_OVERRIDES") {
+	if err == nil || !strings.Contains(err.Error(), "PAGEWIRE_IMAGE_OVERRIDES") {
 		t.Fatalf("serve with malformed overrides: %v", err)
 	}
 }
@@ -514,8 +514,8 @@ func TestValidate(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yaml")
 	bad := filepath.Join(dir, "bad.yaml")
-	_ = os.WriteFile(good, []byte("apiVersion: printscan/v1\nname: Printer\n"), 0o600)
-	_ = os.WriteFile(bad, []byte("apiVersion: printscan/v1\nname: Printer\ndevice:\n  mode: bogus\n"), 0o600)
+	_ = os.WriteFile(good, []byte("apiVersion: pagewire/v1\nname: Printer\n"), 0o600)
+	_ = os.WriteFile(bad, []byte("apiVersion: pagewire/v1\nname: Printer\ndevice:\n  mode: bogus\n"), 0o600)
 	var out, errOut bytes.Buffer
 	if code := validate([]string{good}, &out, &errOut); code != 0 {
 		t.Fatalf("good file: exit %d, %s", code, errOut.String())
@@ -596,7 +596,7 @@ func TestDefaultBackend(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.k8sHost)
 			t.Setenv("DOCKER_HOST", tc.dockerHost)
-			t.Setenv("PRINTSCAN_BACKEND", "")
+			t.Setenv("PAGEWIRE_BACKEND", "")
 			oldSock, oldMarkers := dockerSocket, containerMarkers
 			t.Cleanup(func() { dockerSocket, containerMarkers = oldSock, oldMarkers })
 			dockerSocket, containerMarkers = tc.socket, []string{missing, tc.marker}
@@ -613,7 +613,7 @@ func TestDefaultBackend(t *testing.T) {
 
 func TestBackendFlagValues(t *testing.T) {
 	f, err := parseServeFlags([]string{"--backend=docker"})
-	if err != nil || f.backend != controller.BackendDocker || f.dockerContainer != "printscan" {
+	if err != nil || f.backend != controller.BackendDocker || f.dockerContainer != "pagewire" {
 		t.Fatalf("--backend=docker: backend %q container %q err %v", f.backend, f.dockerContainer, err)
 	}
 	if _, err := parseServeFlags([]string{"--backend=bogus"}); err == nil || !strings.Contains(err.Error(), "k8s, docker or sim") {
@@ -645,7 +645,7 @@ func TestDockerAgentURL(t *testing.T) {
 // The Engine client connects lazily: serve starts on an unreachable socket,
 // and the failure shows only in the status.
 func TestServeDockerUnreachable(t *testing.T) {
-	t.Setenv("PRINTSCAN_HOST_IP", "")
+	t.Setenv("PAGEWIRE_HOST_IP", "")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	dir := t.TempDir()
@@ -655,7 +655,7 @@ func TestServeDockerUnreachable(t *testing.T) {
 		done <- serve(ctx, []string{
 			"--backend=docker", "--docker-host=unix:///nonexistent.sock",
 			"--listen=127.0.0.1:0", "--internal-listen=127.0.0.1:0", "--host-ip=192.0.2.7",
-			"--data-dir=" + dir, "--config=" + filepath.Join(dir, "printscan.yaml"),
+			"--data-dir=" + dir, "--config=" + filepath.Join(dir, "pagewire.yaml"),
 		},
 			func(p, i net.Addr) {
 				if i == nil {
@@ -719,7 +719,7 @@ func TestServeFlagsProxySecret(t *testing.T) {
 		{name: "missing file", file: filepath.Join(dir, "nope"), err: "nope"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PRINTSCAN_PROXY_SECRET", tc.env)
+			t.Setenv("PAGEWIRE_PROXY_SECRET", tc.env)
 			args := []string{"--backend=sim"}
 			if tc.file != "" {
 				args = append(args, "--proxy-secret-file="+tc.file)
@@ -731,7 +731,7 @@ func TestServeFlagsProxySecret(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || f.proxySecret != tc.want || f.proxySecretHeader != "X-Printscan-Proxy-Secret" {
+			if err != nil || f.proxySecret != tc.want || f.proxySecretHeader != "X-Pagewire-Proxy-Secret" {
 				t.Fatalf("secret %q header %q err %v, want %q", f.proxySecret, f.proxySecretHeader, err, tc.want)
 			}
 		})
@@ -742,7 +742,7 @@ func TestServeUsage(t *testing.T) {
 	var b bytes.Buffer
 	serveFlagSet(&serveFlags{}, &b).Usage()
 	usage := b.String()
-	for _, want := range []string{"--allowed-hosts", "--docker-host", "--docker-container", "--host-ip", "--proxy-secret-header", "--proxy-secret-file", "PRINTSCAN_PROXY_SECRET", "PRINTSCAN_IMAGE_OVERRIDES"} {
+	for _, want := range []string{"--allowed-hosts", "--docker-host", "--docker-container", "--host-ip", "--proxy-secret-header", "--proxy-secret-file", "PAGEWIRE_PROXY_SECRET", "PAGEWIRE_IMAGE_OVERRIDES"} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("serve usage lacks %s:\n%s", want, usage)
 		}
@@ -757,7 +757,7 @@ func TestSubcommandHelp(t *testing.T) {
 		var out, errOut bytes.Buffer
 		code := run(t.Context(), args, &out, &errOut)
 		all := out.String() + errOut.String()
-		if code != 2 || !strings.Contains(all, "usage: printscan "+args[0]) || strings.Contains(all, "no such file") || strings.Contains(all, "unknown agent command") {
+		if code != 2 || !strings.Contains(all, "usage: pagewire "+args[0]) || strings.Contains(all, "no such file") || strings.Contains(all, "unknown agent command") {
 			t.Errorf("%v: exit %d, output %q", args, code, all)
 		}
 	}
@@ -772,7 +772,7 @@ func TestServeSimHasNoInternalListener(t *testing.T) {
 	port := ln.Addr().String()
 	_ = ln.Close()
 
-	t.Setenv("PRINTSCAN_PROXY_SECRET", "s3cret")
+	t.Setenv("PAGEWIRE_PROXY_SECRET", "s3cret")
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	type addrs struct{ public, internal net.Addr }
@@ -780,7 +780,7 @@ func TestServeSimHasNoInternalListener(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		dir := t.TempDir()
-		done <- serve(ctx, []string{"--backend=sim", "--listen=127.0.0.1:0", "--internal-listen=" + port, "--data-dir=" + dir, "--config=" + filepath.Join(dir, "printscan.yaml")},
+		done <- serve(ctx, []string{"--backend=sim", "--listen=127.0.0.1:0", "--internal-listen=" + port, "--data-dir=" + dir, "--config=" + filepath.Join(dir, "pagewire.yaml")},
 			func(p, i net.Addr) { got <- addrs{p, i} })
 	}()
 	var a addrs
@@ -825,10 +825,10 @@ func TestServeSimHasNoInternalListener(t *testing.T) {
 	if code := get(""); code != http.StatusUnauthorized {
 		t.Errorf("without the proxy secret: %d, want 401", code)
 	}
-	if code := get("", "X-Printscan-Proxy-Secret", "s3cret"); code != http.StatusOK {
+	if code := get("", "X-Pagewire-Proxy-Secret", "s3cret"); code != http.StatusOK {
 		t.Errorf("with the proxy secret: %d, want 200", code)
 	}
-	if code := get("evil.example", "X-Printscan-Proxy-Secret", "s3cret"); code != http.StatusMisdirectedRequest {
+	if code := get("evil.example", "X-Pagewire-Proxy-Secret", "s3cret"); code != http.StatusMisdirectedRequest {
 		t.Errorf("Host evil.example: %d, want 421", code)
 	}
 }

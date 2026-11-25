@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-const minimalYAML = `apiVersion: printscan/v1
+const minimalYAML = `apiVersion: pagewire/v1
 name: Printer
 `
 
 const fullYAML = `# a comment
-apiVersion: printscan/v1
+apiVersion: pagewire/v1
 name: Living room printer
 location: Living room
 device:
@@ -230,7 +230,7 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "name starting with -",
-			src:  "apiVersion: printscan/v1\nname: \"-h\"\n",
+			src:  "apiVersion: pagewire/v1\nname: \"-h\"\n",
 			path: "/name", line: 2, column: 7, msg: "must not start with -",
 		},
 		{
@@ -245,22 +245,22 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "missing name",
-			src:  "apiVersion: printscan/v1\nlocation: x\n",
+			src:  "apiVersion: pagewire/v1\nlocation: x\n",
 			path: "/name", line: 1, column: 1, msg: "required",
 		},
 		{
 			name: "wrong apiVersion",
-			src:  "apiVersion: printscan/v2\nname: x\n",
-			path: "/apiVersion", line: 1, column: 13, msg: "printscan/v1",
+			src:  "apiVersion: pagewire/v2\nname: x\n",
+			path: "/apiVersion", line: 1, column: 13, msg: "pagewire/v1",
 		},
 		{
 			name: "control character in name",
-			src:  "apiVersion: printscan/v1\nname: \"bad\\tname\"\n",
+			src:  "apiVersion: pagewire/v1\nname: \"bad\\tname\"\n",
 			path: "/name", line: 2, column: 7, msg: "control",
 		},
 		{
 			name: "name too long",
-			src:  "apiVersion: printscan/v1\nname: " + strings.Repeat("x", 64) + "\n",
+			src:  "apiVersion: pagewire/v1\nname: " + strings.Repeat("x", 64) + "\n",
 			path: "/name", line: 2, column: 7, msg: "63",
 		},
 		{
@@ -275,7 +275,7 @@ func TestParseErrors(t *testing.T) {
 		},
 		{
 			name: "syntax error",
-			src:  "apiVersion: printscan/v1\nname: [unclosed\n",
+			src:  "apiVersion: pagewire/v1\nname: [unclosed\n",
 			path: "", line: 2, column: 7, msg: "",
 		},
 	}
@@ -340,7 +340,7 @@ func TestEnumsAccepted(t *testing.T) {
 			t.Errorf("%q: %v", src, err)
 		}
 	}
-	if _, err := Parse([]byte("apiVersion: printscan/v1\nname: " + strings.Repeat("ü", 63) + "\n")); err != nil {
+	if _, err := Parse([]byte("apiVersion: pagewire/v1\nname: " + strings.Repeat("ü", 63) + "\n")); err != nil {
 		t.Errorf("63-rune name: %v", err)
 	}
 }

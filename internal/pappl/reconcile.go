@@ -9,7 +9,7 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // Reconcile makes the PAPPL system hold exactly one queue named want.Name on

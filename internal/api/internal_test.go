@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 type tokenSource struct {

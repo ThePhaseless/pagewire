@@ -16,7 +16,7 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 
-	"github.com/ThePhaseless/printscan/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/device"
 )
 
 // PAPPL vendor operations, from pappl/base.h at v1.4.12.

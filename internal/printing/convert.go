@@ -15,7 +15,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/ThePhaseless/printscan/internal/scanning"
+	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 // MaxDecodeBytes caps the memory one PNG conversion may use: the decoded
@@ -89,7 +89,7 @@ func Convert(dst io.Writer, src io.ReadSeeker, from, to string) error {
 		return jpeg.Encode(dst, img, &jpeg.Options{Quality: jpegQuality})
 	}
 
-	tmp, err := os.CreateTemp("", "printscan-print-*")
+	tmp, err := os.CreateTemp("", "pagewire-print-*")
 	if err != nil {
 		return err
 	}

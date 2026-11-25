@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ThePhaseless/printscan/internal/apitypes"
-	"github.com/ThePhaseless/printscan/internal/config"
-	"github.com/ThePhaseless/printscan/internal/printing"
+	"github.com/ThePhaseless/pagewire/internal/apitypes"
+	"github.com/ThePhaseless/pagewire/internal/config"
+	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
 func (e *testEnv) print(parts ...[3]string) (code int, body []byte) {
@@ -352,7 +352,7 @@ func TestPrintConverts(t *testing.T) {
 			}
 		})
 	}
-	if left, _ := filepath.Glob(filepath.Join(tmp, "printscan-print-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(tmp, "pagewire-print-*")); len(left) != 0 {
 		t.Fatalf("temp files left behind: %v", left)
 	}
 }
@@ -386,7 +386,7 @@ func TestPrintConversionRefusals(t *testing.T) {
 			}
 		})
 	}
-	if left, _ := filepath.Glob(filepath.Join(tmp, "printscan-print-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(tmp, "pagewire-print-*")); len(left) != 0 {
 		t.Fatalf("temp files left behind: %v", left)
 	}
 }

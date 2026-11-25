@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/renameio/v2"
 
-	"github.com/ThePhaseless/printscan/internal/config/yamledit"
+	"github.com/ThePhaseless/pagewire/internal/config/yamledit"
 )
 
 var (

@@ -4,7 +4,7 @@ import { strings } from "../strings";
 const stepOf = (n: number, total: number) => `Step ${n} of ${total}`;
 
 export const setupStrings = {
-  title: "Set up printscan",
+  title: "Set up pagewire",
   progressLabel: "Setup steps",
   stepOf,
   /** The document title for a step: "Step 2 of 5: Name and location". */
@@ -18,7 +18,7 @@ export const setupStrings = {
   },
   loadFailed: "Could not load the setup data.",
   alreadyDone: {
-    title: "printscan is already set up",
+    title: "pagewire is already set up",
     body: "Change the name, driver or defaults in Settings.",
     action: "Go to Settings",
   },
@@ -33,27 +33,27 @@ export const setupStrings = {
     none: "No scanner",
   } as Record<string, string>,
   detect: {
-    description: "printscan looks for a printer on USB and picks a driver for it.",
+    description: "pagewire looks for a printer on USB and picks a driver for it.",
     searchingTitle: "Looking for the printer",
     waiting: "Waiting for the device to report.",
     plugInHint: strings.plugInHint,
     devicesTitle: "USB devices",
     noDevices: "No USB devices found yet.",
     noPrinter:
-      "None of these devices is a printer printscan can use. Check the cable and that the printer is switched on.",
+      "None of these devices is a printer pagewire can use. Check the cable and that the printer is switched on.",
     unnamedDevice: "Unnamed USB device",
     usbIds: (vendorId: string, productId: string) => `USB ${vendorId}:${productId}`,
     serial: (serial: string) => `serial ${serial}`,
     simulatedName: (name: string) => `${name} (simulated)`,
-    choiceTitle: "printscan will use",
+    choiceTitle: "pagewire will use",
     ruleLabel: "Matched rule",
     printerLabel: "Printer driver",
     scannerLabel: "Scanner driver",
     noUsbTitle: "No USB printer available",
-    k8sIntro: "This server cannot reach a USB printer yet. On Kubernetes printscan needs:",
+    k8sIntro: "This server cannot reach a USB printer yet. On Kubernetes pagewire needs:",
     k8sSteps: [
       "generic-device-plugin running on the node the printer is plugged into, sharing the printer as a resource such as devic.es/printer;",
-      "PRINTSCAN_USB_RESOURCE set to that resource name on the printscan Deployment;",
+      "PAGEWIRE_USB_RESOURCE set to that resource name on the pagewire Deployment;",
       "the printing namespace allowed to run privileged pods (host networking).",
     ],
     simBackend:
@@ -62,11 +62,11 @@ export const setupStrings = {
     useSimulated: "Use a simulated printer",
     simulatedTitle: "Simulated printer",
     simulatedBody:
-      "printscan will run a test printer and a test scanner. Nothing goes to real hardware.",
+      "pagewire will run a test printer and a test scanner. Nothing goes to real hardware.",
     useUsb: "Use the USB printer instead",
   },
   name: {
-    description: "How this printer appears in printscan and to computers on your network.",
+    description: "How this printer appears in pagewire and to computers on your network.",
     nameLabel: "Name",
     nameHint:
       "Shown at the top of every page. Computers and phones may show the printer's own name instead.",
@@ -76,9 +76,9 @@ export const setupStrings = {
     locationInvalid: "Use at most 127 characters, without line breaks or tabs.",
   },
   driver: {
-    description: "printscan picked a driver from the printer's USB details. You can override it.",
+    description: "pagewire picked a driver from the printer's USB details. You can override it.",
     explained: (printer: string, scanner: string) =>
-      `printscan picked printer driver ${printer} and scanner driver ${scanner} for this printer.`,
+      `pagewire picked printer driver ${printer} and scanner driver ${scanner} for this printer.`,
     simulated: "The simulated printer and scanner need no driver.",
     driverLabel: "Printer driver",
     scannerLabel: "Scanner driver",
@@ -123,7 +123,7 @@ export const setupStrings = {
     formatOptions: { pdf: "PDF", jpeg: "JPEG" } as Record<string, string>,
   },
   review: {
-    description: "Check the settings, then finish. printscan saves them to its settings file.",
+    description: "Check the settings, then finish. pagewire saves them to its settings file.",
     name: "Name",
     location: "Location",
     noLocation: "Not set",
@@ -144,14 +144,14 @@ export const setupStrings = {
   },
   applying: {
     title: "Starting the printer",
-    description: "printscan saved the settings and is starting the printer and scanner.",
+    description: "pagewire saved the settings and is starting the printer and scanner.",
     progress: "Starting",
     timeout:
       "This is taking longer than 3 minutes. The Status page shows what the device is doing.",
     goToStatus: "Go to Status",
   },
   done: {
-    title: "printscan is ready",
+    title: "pagewire is ready",
     description: "Print and scan from this page, or add the printer on your computers and phones.",
     networkName: "Name on your network",
     printerAddress: "Printer address",

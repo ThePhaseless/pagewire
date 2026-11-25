@@ -1,4 +1,4 @@
-// Command printscan is the printscan control plane (serve), the device-pod
+// Command pagewire is the pagewire control plane (serve), the device-pod
 // agent (agent probe|fetch|run), the config checker (validate), the Docker
 // health check (healthcheck) and version.
 package main
@@ -19,7 +19,7 @@ import (
 // version is set with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = `usage: printscan <command> [flags]
+const usage = `usage: pagewire <command> [flags]
 
 commands:
   serve                  run the control plane
@@ -30,8 +30,8 @@ commands:
 `
 
 func main() {
-	if err := setLogLevel(env("PRINTSCAN_LOG_LEVEL", "info")); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "printscan:", err)
+	if err := setLogLevel(env("PAGEWIRE_LOG_LEVEL", "info")); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "pagewire:", err)
 		os.Exit(2)
 	}
 	// JSON inside Kubernetes, text otherwise.
@@ -75,7 +75,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = io.WriteString(stdout, usage)
 		return 0
 	default:
-		_, _ = fmt.Fprintf(stderr, "printscan: unknown command %q\n\n%s", cmd, usage)
+		_, _ = fmt.Fprintf(stderr, "pagewire: unknown command %q\n\n%s", cmd, usage)
 		return 2
 	}
 	switch {

@@ -16,31 +16,31 @@ import (
 	"github.com/moby/moby/client"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/ThePhaseless/printscan/internal/backend/k8s"
+	"github.com/ThePhaseless/pagewire/internal/backend/k8s"
 )
 
 // Labels and names of the objects the backend owns.
 const (
-	LabelManagedBy    = "dev.printscan.managed-by"
-	ManagedBy         = "printscan"
-	LabelWorkloadHash = "dev.printscan.workload-hash"
-	LabelContainer    = "dev.printscan.container"
-	LabelInit         = "dev.printscan.init" // "true" only for run-to-completion inits
+	LabelManagedBy    = "dev.pagewire.managed-by"
+	ManagedBy         = "pagewire"
+	LabelWorkloadHash = "dev.pagewire.workload-hash"
+	LabelContainer    = "dev.pagewire.container"
+	LabelInit         = "dev.pagewire.init" // "true" only for run-to-completion inits
 
-	Prefix        = "printscan-device-" // + the workload container's name
+	Prefix        = "pagewire-device-" // + the workload container's name
 	SeedContainer = Prefix + "seed"
 
-	RunVolume    = "printscan-device-run"
-	DBusVolume   = "printscan-device-dbus"
-	TokenVolume  = "printscan-device-token"
-	ConfigVolume = "printscan-device-config"
+	RunVolume    = "pagewire-device-run"
+	DBusVolume   = "pagewire-device-dbus"
+	TokenVolume  = "pagewire-device-token"
+	ConfigVolume = "pagewire-device-config"
 	// BlobVolume holds vendor blobs and staged EULA texts. It is never removed
 	// and may be a volume the user created.
-	BlobVolume = "printscan-blobs"
+	BlobVolume = "pagewire-blobs"
 
 	// DefaultContainer is the control plane's own container name, whose image
 	// the probe, agent, fetch-blobs and seed containers run.
-	DefaultContainer = "printscan"
+	DefaultContainer = "pagewire"
 
 	usbCgroupRule = "c 189:* rwm" // USB character devices, including nodes that appear later
 	usbDevDir     = "/dev/bus/usb"
@@ -60,13 +60,13 @@ type plannedContainer struct {
 // namedVolumes maps k8s volume names to the Docker named volume behind them.
 // The three config volumes share one volume seeded with every config file.
 var namedVolumes = map[string]string{
-	"run-printscan": RunVolume,
-	"run-dbus":      DBusVolume,
-	"agent-token":   TokenVolume,
-	"blobs":         BlobVolume,
-	"ipp-usb-conf":  ConfigVolume,
-	"airsane-conf":  ConfigVolume,
-	"sane-conf":     ConfigVolume,
+	"run-pagewire": RunVolume,
+	"run-dbus":     DBusVolume,
+	"agent-token":  TokenVolume,
+	"blobs":        BlobVolume,
+	"ipp-usb-conf": ConfigVolume,
+	"airsane-conf": ConfigVolume,
+	"sane-conf":    ConfigVolume,
 }
 
 // scratchVolumes are per-container anonymous volumes on disk: tmpfs pages
@@ -83,7 +83,7 @@ var tmpfsVolumes = map[string]bool{
 
 // writersAsRoot are the volumes whose writers run as uid 0: a new named
 // volume's root is root:root 0755 and Docker has no fsGroup.
-var writersAsRoot = map[string]bool{"run-printscan": true, "blobs": true}
+var writersAsRoot = map[string]bool{"run-pagewire": true, "blobs": true}
 
 func ownerLabels() map[string]string { return map[string]string{LabelManagedBy: ManagedBy} }
 

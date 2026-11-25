@@ -105,7 +105,7 @@ const hplipEula: SetupEULA = {
 
 function suggested(name: string, mode: "usb" | "simulated"): Config {
   return {
-    apiVersion: "printscan/v1",
+    apiVersion: "pagewire/v1",
     name,
     location: "",
     device: { mode, driver: "auto", scanner: "auto" },
@@ -479,7 +479,7 @@ describe("Setup wizard", () => {
         esclUrls: ["http://192.168.1.20:8090/eSCL"],
       },
     });
-    await heading("printscan is ready");
+    await heading("pagewire is ready");
     expect(document.body.textContent).toContain("ipp://192.168.1.20:8002/ipp/print/Hall_printer");
     expect(document.body.textContent).toContain("http://192.168.1.20:8090/eSCL");
     expect(screen.getByRole("link", { name: "Go to Status" }).getAttribute("href")).toBe("/");
@@ -525,7 +525,7 @@ describe("Setup wizard", () => {
       },
       connect: { dnssdName: "Printer", ippUris: ["ipp://127.0.0.1:8631/ipp/print"], esclUrls: [] },
     });
-    await heading("printscan is ready");
+    await heading("pagewire is ready");
     expect(document.body.textContent).toContain("ipp://127.0.0.1:8631/ipp/print");
   });
 
@@ -651,7 +651,7 @@ describe("Setup wizard", () => {
   test("an existing config shows the already-set-up note", async () => {
     mockServer(() => ({ ...hpSetup, required: false }));
     mount();
-    await heading("printscan is already set up");
+    await heading("pagewire is already set up");
     expect(screen.getByRole("link", { name: "Go to Settings" }).getAttribute("href")).toBe(
       "/settings",
     );
