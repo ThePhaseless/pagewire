@@ -1,0 +1,65 @@
+pagewire's change to PAPPL v1.4.12: close the web interface's admin pages
+when no authentication service is set.
+
+Upstream papplClientHTMLAuthorize() lets every client use the admin pages
+when no auth service, auth callback or access password is set. That is how
+the retrofit Printer Applications run in pagewire, and they listen on every
+address of the node, so any LAN client could add, change or delete printers.
+
+With this patch papplClientHTMLAuthorize() answers 403 Forbidden whenever no
+auth service or callback is set; the access password is ignored. That closes
+PAPPL's system and printer admin pages, the printer page's form actions
+(pause, resume, hold, release, set as default, identify, print test page;
+the patch adds the authorization check there, which upstream lacks), and the
+application-added pages that call it, such as pappl-retrofit's /addppd (PPD
+upload) and hplip-printer-app's /plugin (plugin download and install). The
+status pages stay readable. IPP administration stays loopback-only, as
+upstream has it.
+
+PAPPL is Copyright (c) 2019-2026 by Michael R Sweet and is licensed under
+the Apache License, Version 2.0, with an (optional) exception to allow
+linking against GPL2/LGPL2 software (see the LICENSE and NOTICE files in the
+PAPPL source). This patch is a modification of PAPPL and is distributed
+under the same licence.
+
+diff --git a/pappl/client-webif.c b/pappl/client-webif.c
+index 48714be..7b8590e 100644
+--- a/pappl/client-webif.c
++++ b/pappl/client-webif.c
+@@ -449,12 +449,16 @@ papplClientHTMLAuthorize(
+   const char	*status = NULL;		// Status message, if any
+ 
+ 
+-  // Don't authorize if we have no auth service or we don't have a password set.
+-  if (!client || (!client->system->auth_service && !client->system->auth_cb && !client->system->password_hash[0]))
++  if (!client)
++    return (false);
++
++  // pagewire: with no auth service or callback, refuse every client; the
++  // access password is ignored, so one set before this patch cannot log in.
++  if (!client->system->auth_service && !client->system->auth_cb)
+   {
+-    _PAPPL_DEBUG("papplClientHTMLAuthorize: auth_service='%s', auth_cb=%s, password_hash=%s\n", client->system->auth_service, client->system->auth_cb != NULL ? "set" : "unset", client->system->password_hash[0] ? "set" : "unset");
+-    _PAPPL_DEBUG("papplClientHTMLAuthorize: Returning true.");
+-    return (true);
++    _PAPPL_DEBUG("papplClientHTMLAuthorize: no auth service, returning false.\n");
++    papplClientRespond(client, HTTP_STATUS_FORBIDDEN, NULL, NULL, 0, 0);
++    return (false);
+   }
+ 
+   // When using an auth service, use HTTP Basic authentication...
+diff --git a/pappl/printer-webif.c b/pappl/printer-webif.c
+index 2047a16..571bd2c 100644
+--- a/pappl/printer-webif.c
++++ b/pappl/printer-webif.c
+@@ -785,6 +785,10 @@ _papplPrinterWebHome(
+     cups_option_t	*form = NULL;	// Form variables
+     const char		*action;	// Form action
+ 
++    // pagewire: these actions change the printer, so they need authorization.
++    if (!papplClientHTMLAuthorize(client))
++      return;
++
+     if ((num_form = (cups_len_t)papplClientGetForm(client, &form)) == 0)
+     {
+       status = _PAPPL_LOC("Invalid form data.");

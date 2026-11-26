@@ -31,7 +31,7 @@ spec:
         app.kubernetes.io/name: pagewire-device
         pagewire.thephaseless.github.io/device-workload: "true"
       annotations:
-        pagewire.thephaseless.github.io/config-hash: 7e1f8bd6b7baa02a34e548aa590a44edc9e8d41ad033d7ab5ba9826cc4b4b23b
+        pagewire.thephaseless.github.io/config-hash: ba7004d69af0ee531d87d09fe6accb60e0fe814562e2fca2ea7a3c1ac3c03543
         pagewire.thephaseless.github.io/spec-hash: b8bf3459fc74005a08ffe18835d82e8bd49c6806206b183b4b8fa1cb54c8dcb1
     spec:
       volumes:
@@ -249,6 +249,7 @@ spec:
         args:
         - --listen-port=8090
         - --hotplug=false
+        - --web-interface=false
         - --options-file=/etc/pagewire/airsane/options.conf
         - --ignore-list=/etc/pagewire/airsane/ignore.conf
         - --access-file=/etc/pagewire/airsane/access.conf

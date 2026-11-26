@@ -31,7 +31,7 @@ spec:
         app.kubernetes.io/name: pagewire-device
         pagewire.thephaseless.github.io/device-workload: "true"
       annotations:
-        pagewire.thephaseless.github.io/config-hash: 2a267da95715153768ef8607c02e9577bf23e6836338cbe4e2a678677b04f157
+        pagewire.thephaseless.github.io/config-hash: 21190f5ff85d44238ab786a75d64ac3163973cd489723989656c55d2ca6577ed
         pagewire.thephaseless.github.io/spec-hash: 14894cd48c5501713ca7456761b43ae9f5aac0bd2ed74024bbb61ceb23966059
     spec:
       volumes:

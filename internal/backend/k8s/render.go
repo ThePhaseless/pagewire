@@ -450,7 +450,7 @@ func airsane(cat *catalog.Catalog, spec *device.Spec, image string, usb []device
 		Name: "airsane", Image: image, UID: uid, USB: usb,
 		Command: []string{"/usr/local/bin/airsaned"},
 		Args: []string{
-			"--listen-port=" + strconv.Itoa(port), "--hotplug=false",
+			"--listen-port=" + strconv.Itoa(port), "--hotplug=false", "--web-interface=false",
 			"--options-file=/etc/pagewire/airsane/options.conf",
 			"--ignore-list=/etc/pagewire/airsane/ignore.conf",
 			"--access-file=/etc/pagewire/airsane/access.conf",
@@ -550,6 +550,7 @@ func volume(name, configMap, blobPVC string) *corev1ac.VolumeApplyConfiguration 
 	}
 }
 
+// ipp-usb passes only print and scan; the printer's web console (class config) and fax stay closed to every client.
 var ippUSBConf = `[network]
   http-min-port = ` + strconv.Itoa(device.IPPUSBMinPort) + `
   http-max-port = ` + strconv.Itoa(device.IPPUSBMaxPort) + `
@@ -558,7 +559,7 @@ var ippUSBConf = `[network]
   ipv6 = enable
 
 [auth uid]
-  all = *
+  print, scan = *
 
 [logging]
   device-log = error

@@ -20,5 +20,5 @@ data:
   ignore.conf: |
     escl:.*
     airscan:.*
-  ipp-usb.conf: "[network]\n  http-min-port = 60000\n  http-max-port = 60009\n  dns-sd = enable\n  interface = all\n  ipv6 = enable\n\n[auth uid]\n  all = *\n\n[logging]\n  device-log = error\n  main-log = info\n  console-log = info\n  console-color = disable\n"
+  ipp-usb.conf: "[network]\n  http-min-port = 60000\n  http-max-port = 60009\n  dns-sd = enable\n  interface = all\n  ipv6 = enable\n\n[auth uid]\n  print, scan = *\n\n[logging]\n  device-log = error\n  main-log = info\n  console-log = info\n  console-color = disable\n"
   options.conf: "# AirSane per-device options; none are needed.\n"

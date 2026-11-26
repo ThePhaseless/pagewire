@@ -411,6 +411,36 @@ func TestIPPUSBPortRange(t *testing.T) {
 	}
 }
 
+func TestLANExposure(t *testing.T) {
+	_, cm := render(t, goldenSpecs["ippusb"], goldenParams())
+	conf := cm.Data["ipp-usb.conf"]
+	if !strings.Contains(conf, "[auth uid]\n  print, scan = *\n") || strings.Contains(conf, "all = *") || strings.Contains(conf, "config") {
+		t.Errorf("ipp-usb.conf must allow only print and scan:\n%s", conf)
+	}
+	airsanes := 0
+	for name, s := range goldenSpecs {
+		d, _ := render(t, s, paramsFor(name))
+		for _, c := range allContainers(d) {
+			if c.Name == "airsane" {
+				airsanes++
+				if !slices.Contains(c.Args, "--web-interface=false") {
+					t.Errorf("%s airsane args %v lack --web-interface=false", name, c.Args)
+				}
+			}
+			if strings.HasPrefix(c.Name, "printer-app-") {
+				for _, a := range c.Args {
+					if strings.HasPrefix(a, "auth-service=") {
+						t.Errorf("%s %s has %q", name, c.Name, a)
+					}
+				}
+			}
+		}
+	}
+	if airsanes == 0 {
+		t.Error("no golden spec renders an airsane container")
+	}
+}
+
 func TestNoUSBResource(t *testing.T) {
 	p := goldenParams()
 	p.USBResource = ""

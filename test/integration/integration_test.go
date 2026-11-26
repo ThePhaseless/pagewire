@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -39,6 +40,8 @@ import (
 const (
 	controlPlaneAddr = "127.0.0.1:18081"
 	papplSystemURI   = "ipp://127.0.0.1:18001/ipp/system"
+	papplWebURL      = "http://127.0.0.1:18001"
+	airsaneWebURL    = "http://127.0.0.1:18090"
 	simPrinterURI    = "ipp://127.0.0.1:18631/ipp/print"
 	queueName        = "it"
 )
@@ -259,6 +262,12 @@ func TestDevicePod(t *testing.T) {
 				scanOnePage(ctx, t, s)
 			})
 		}
+		// --web-interface=false: AirSane serves eSCL only, no status page or scan form.
+		for _, u := range []string{airsaneWebURL + "/", url, url + "/"} {
+			if code, body := httpStatus(ctx, t, http.MethodGet, u, ""); code != http.StatusNotFound {
+				t.Errorf("GET %s: %d %q, want 404", u, code, body)
+			}
+		}
 	})
 
 	// Every default the queue reports and PAPPL accepts reads back as set, so
@@ -333,6 +342,38 @@ func TestDevicePod(t *testing.T) {
 			got := onlyQueue(ctx, t, c).Caps.MediaDefault
 			return got == d.Media, "media-default " + got
 		})
+	})
+
+	// The patched PAPPL refuses every admin page and printer action with 403,
+	// even over loopback, the client address upstream trusts most.
+	t.Run("PAPPL web admin refused", func(t *testing.T) {
+		u, err := url.Parse(queueURI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// PAPPL registers printer web pages under uriname, the resource without /ipp/print (printer.c:363).
+		p := strings.TrimPrefix(u.Path, "/ipp/print")
+		if p == "" || p == u.Path {
+			t.Fatalf("queue URI %s has no /ipp/print/<name> path", queueURI)
+		}
+		check := func(method, path, body string, want int) {
+			t.Helper()
+			if code, got := httpStatus(ctx, t, method, papplWebURL+path, body); code != want {
+				t.Errorf("%s %s: %d %q, want %d", method, path, code, got, want)
+			}
+		}
+		// Status pages stay readable, so the 403s below come from the gate, not a wrong path.
+		check(http.MethodGet, "/", "", http.StatusOK)
+		check(http.MethodGet, p+"/", "", http.StatusOK)
+		for _, path := range []string{
+			"/addprinter", "/config", "/network", "/security",
+			"/tls-install-crt", "/tls-new-crt", "/tls-new-csr",
+			"/addppd", // ps-printer-app's PPD upload
+			p + "/config", p + "/delete", p + "/printing", p + "/media", p + "/jobs", p + "/cancelall",
+		} {
+			check(http.MethodGet, path, "", http.StatusForbidden)
+		}
+		check(http.MethodPost, p+"/", "action=pause-printer", http.StatusForbidden)
 	})
 
 	// Last, because the queue comes back as a new printer: the agent's system
@@ -659,6 +700,27 @@ func scanOnePage(ctx context.Context, t *testing.T, s scanning.Scanner) {
 	if !bytes.HasPrefix(pdf.Bytes(), []byte("%PDF-")) {
 		t.Fatalf("pdf output starts %q", pdf.Bytes()[:min(8, pdf.Len())])
 	}
+}
+
+// httpStatus sends one request without following redirects and returns the
+// status and the first 200 bytes of the body. A non-empty body is sent as a form.
+func httpStatus(ctx context.Context, t *testing.T, method, u, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	c := http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, u, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+	return resp.StatusCode, string(b)
 }
 
 // waitFor polls cond every second until it holds, d passes or ctx ends, and

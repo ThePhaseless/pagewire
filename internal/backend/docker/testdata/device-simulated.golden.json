@@ -699,6 +699,7 @@
       "Cmd": [
         "--listen-port=8090",
         "--hotplug=false",
+        "--web-interface=false",
         "--options-file=/etc/pagewire/airsane/options.conf",
         "--ignore-list=/etc/pagewire/airsane/ignore.conf",
         "--access-file=/etc/pagewire/airsane/access.conf"

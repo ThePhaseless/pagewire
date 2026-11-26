@@ -72,6 +72,7 @@ services:
     command:
       - "--listen-port=18090"
       - "--hotplug=false"
+      - "--web-interface=false"
       # Empty files: compose cannot inject the rendered ConfigMap items into a
       # read-only container without extra files. None changes the test: no
       # per-device options, dll.conf has nothing to ignore, access from anywhere.
