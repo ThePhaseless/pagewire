@@ -141,12 +141,17 @@ RUN cd /usr/local \
 # started) and the libraries PAPPL and pappl-retrofit link against.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
+# The UTC times before and after each apt run in an image name the Ubuntu snapshots
+# (snapshot.ubuntu.com) that hold its package versions, for sources-fetch.
+RUN mkdir -p /usr/share/pagewire \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends ca-certificates cups \
       libcups2t64 libcupsfilters2t64 libppd2 libavahi-client3 libgnutls30t64 \
       libjpeg8 libpng16-16t64 libusb-1.0-0 libpam0g zlib1g \
  && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
  && test -x /usr/lib/cups/backend/usb && test -x /usr/lib/cups/backend/socket && test -x /usr/lib/cups/backend/ipp \
  && useradd --uid 10001 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pagewire
 # NO_DRIVERLESS_PPDS: no driverless (ippfind) drivers; IPP printers are ipp-usb's job.
@@ -157,9 +162,11 @@ ENV BACKEND_DIR=/usr/lib/cups/backend \
 FROM runtime AS ps
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=ps-printer-app
-RUN apt-get update \
+RUN date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get install -y --no-install-recommends foomatic-db-compressed-ppds ghostscript cups-filters-core-drivers printer-driver-min12xxw \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt
 COPY --from=ps-build /usr/local /usr/local
 COPY --from=ps-build /out/licenses /usr/share/licenses
 # Writable at run time (emptyDirs in the pod): /var/lib/<app>, /var/spool/<app>, /tmp,
@@ -193,9 +200,11 @@ CMD ["/usr/local/bin/ps-printer-app", "-o", "server-port=8001", "server"]
 FROM runtime AS hplip
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=hplip-printer-app
-RUN apt-get update \
+RUN date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get install -y --no-install-recommends 'hplip=3.24.4*' printer-driver-hpcups hplip-data libcurl4t64 libssl3t64 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt
 COPY --from=hplip-build /usr/local /usr/local
 COPY --from=hplip-build /out/licenses /usr/share/licenses
 # HP plug-in paths point into the blob PVC, where the plug-in is installed after
@@ -234,9 +243,11 @@ CMD ["/usr/local/bin/hplip-printer-app", "-o", "server-port=8002", "server"]
 FROM runtime AS gutenprint
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=gutenprint-printer-app
-RUN apt-get update \
+RUN date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get install -y --no-install-recommends printer-driver-gutenprint libgutenprint9 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt
 COPY --from=gutenprint-build /usr/local /usr/local
 COPY --from=gutenprint-build /out/licenses /usr/share/licenses
 RUN ldconfig \
@@ -265,9 +276,11 @@ CMD ["/usr/local/bin/gutenprint-printer-app", "-o", "server-port=8003", "server"
 FROM runtime AS ghostscript
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=ghostscript-printer-app
-RUN apt-get update \
+RUN date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ghostscript foomatic-db-compressed-ppds printer-driver-foo2zjs printer-driver-min12xxw \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt
 COPY --from=ghostscript-build /usr/local /usr/local
 COPY --from=ghostscript-build /out/licenses /usr/share/licenses
 RUN ldconfig \
@@ -298,9 +311,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG APP=legacy-printer-app
 # Free classic CUPS drivers. Ghostscript for pappl-retrofit's PDF and PostScript conversions.
 ARG LEGACY_DRIVERS="printer-driver-splix printer-driver-brlaser printer-driver-ptouch printer-driver-c2esp printer-driver-sag-gdi printer-driver-escpr"
-RUN apt-get update \
+RUN date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ${LEGACY_DRIVERS} ghostscript \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt
 COPY --from=legacy-build /usr/local /usr/local
 COPY --from=legacy-build /out/licenses /usr/share/licenses
 # The app lists only /usr/share/pagewire/legacy-drivers: links to exactly these packages'
@@ -361,6 +376,11 @@ COPY --from=hplip /usr/share/pagewire/source-packages.txt /lists/hplip.txt
 COPY --from=gutenprint /usr/share/pagewire/source-packages.txt /lists/gutenprint.txt
 COPY --from=ghostscript /usr/share/pagewire/source-packages.txt /lists/ghostscript.txt
 COPY --from=legacy /usr/share/pagewire/source-packages.txt /lists/legacy.txt
+COPY --from=ps /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/ps.txt
+COPY --from=hplip /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/hplip.txt
+COPY --from=gutenprint /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/gutenprint.txt
+COPY --from=ghostscript /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/ghostscript.txt
+COPY --from=legacy /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/legacy.txt
 
 # The pushed stages only COPY, so the arm64 one needs no emulation.
 FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
@@ -369,6 +389,8 @@ FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
 FROM scratch AS lists-pushed
 COPY --from=pushed-amd64 /usr/share/pagewire/source-packages.txt /lists/amd64.txt
 COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/arm64.txt
+COPY --from=pushed-amd64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/amd64.txt
+COPY --from=pushed-arm64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/arm64.txt
 
 FROM lists-${SOURCES_LISTS} AS lists
 
@@ -379,11 +401,23 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.s
 COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
 # Lines are source package names (--only-source: never mapped through binary names).
-# apt-get names any line it cannot resolve and fails.
+# A version the live archive has superseded since the build comes from the newest
+# snapshot recorded in the images that still has it (snapshot.ubuntu.com, https only,
+# hence ca-certificates). A line no snapshot resolves is named and fails the build.
 RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
  && chown _apt /sources/ubuntu \
  && apt-get update \
- && xargs apt-get source --only-source --download-only < /sources/source-packages.txt \
+ && if ! xargs apt-get source --only-source --download-only < /sources/source-packages.txt; then \
+      apt-get install -y --no-install-recommends ca-certificates \
+      && while read -r p; do apt-get source --only-source --download-only "$p" >&2 || echo "$p"; done < /sources/source-packages.txt > /tmp/missing \
+      && for s in $(sort -ru /sources/lists/snapshots/*.txt); do \
+           [ -s /tmp/missing ] || break; \
+           apt-get update --snapshot "$s" || exit 1; \
+           while read -r p; do apt-get source --snapshot "$s" --only-source --download-only "$p" >&2 || echo "$p"; done < /tmp/missing > /tmp/left; \
+           mv /tmp/left /tmp/missing; \
+         done \
+      && if [ -s /tmp/missing ]; then echo "in no recorded snapshot:" >&2; cat /tmp/missing >&2; exit 1; fi; \
+    fi \
  && test "$(ls *.dsc | wc -l)" = "$(wc -l < /sources/source-packages.txt)"
 COPY --from=pappl-base /out/upstream/ /sources/upstream/
 COPY --from=ps-build /out/upstream/ /sources/upstream/

@@ -509,6 +509,53 @@ func TestUpstreamPinsAreCommits(t *testing.T) {
 	}
 }
 
+// Every apt-get update in a stage a shipped image is built from records the time before and
+// after it, and lists-local copies those times beside each package list, so sources-fetch can
+// fetch a version the live archive has since superseded from the snapshot of that time.
+func TestAptSnapshotsRecorded(t *testing.T) {
+	const rec = "date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt"
+	listCopy := regexp.MustCompile(`^COPY --from=(\S+) /usr/share/pagewire/(source-packages|apt-snapshots)\.txt /lists/`)
+	for _, file := range []string{"images/device/Dockerfile", "images/driver/Dockerfile"} {
+		stages := parseDockerfile(t, file)
+		local := findStage(stages, "lists-local")
+		if local == nil {
+			t.Fatalf("%s: no lists-local stage", file)
+		}
+		copies := map[string]map[string]bool{}
+		for _, l := range local.lines {
+			if m := listCopy.FindStringSubmatch(l); m != nil {
+				if copies[m[1]] == nil {
+					copies[m[1]] = map[string]bool{}
+				}
+				copies[m[1]][m[2]] = true
+			}
+		}
+		if len(copies) == 0 {
+			t.Errorf("%s: lists-local copies no package lists", file)
+		}
+		shipped := map[string]bool{}
+		for name, kinds := range copies {
+			if !kinds["source-packages"] || !kinds["apt-snapshots"] {
+				t.Errorf("%s: lists-local copies %v from %s, want both source-packages.txt and apt-snapshots.txt", file, kinds, name)
+			}
+			for s := findStage(stages, name); s != nil && !shipped[s.name]; s = findStage(stages, s.image) {
+				shipped[s.name] = true
+			}
+		}
+		for name := range shipped {
+			for _, l := range findStage(stages, name).lines {
+				if !strings.Contains(l, "apt-get update") {
+					continue
+				}
+				i, j := strings.Index(l, rec), strings.LastIndex(l, rec)
+				if i < 0 || i == j || i > strings.Index(l, "apt-get update") || j < strings.LastIndex(l, "apt-get") {
+					t.Errorf("%s: stage %s runs apt-get without recording the time before and after it: %s", file, name, strings.Join(strings.Fields(l), " "))
+				}
+			}
+		}
+	}
+}
+
 // The sources stage reads its package lists either from the local final stages (the default)
 // or, in CI, from the amd64 and arm64 images pushed for this commit.
 func TestSourcesListSwitch(t *testing.T) {
@@ -524,6 +571,11 @@ func TestSourcesListSwitch(t *testing.T) {
 			`(?m)^COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/`,
 			`(?m)^COPY --from=lists /lists/ /sources/lists/\s*$`,
 			`sort -u /sources/lists/\*`,
+			`(?m)^COPY --from=pushed-amd64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/`,
+			`(?m)^COPY --from=pushed-arm64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/`,
+			// A superseded version is gone from the live Sources index; the snapshot of its build keeps it.
+			`apt-get update --snapshot "\$s"`,
+			`apt-get source --snapshot "\$s" --only-source --download-only`,
 			`(?m)^COPY .*\b` + regexp.QuoteMeta(file) + `\b.* /sources/build/`,
 		} {
 			if !regexp.MustCompile(want).MatchString(text) {

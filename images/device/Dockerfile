@@ -69,12 +69,17 @@ RUN groupadd --system --gid "${MESSAGEBUS_UID}" messagebus \
  && useradd --system --uid "${AVAHI_UID}" --gid avahi --home-dir /run/avahi-daemon --no-create-home --shell /usr/sbin/nologin avahi \
  && groupadd --gid "${NONROOT_UID}" nonroot \
  && useradd --uid "${NONROOT_UID}" --gid nonroot --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin nonroot
-RUN apt-get update \
+# The UTC times before and after the apt run name the Ubuntu snapshots
+# (snapshot.ubuntu.com) that hold the image's package versions, for sources-fetch.
+RUN mkdir -p /usr/share/pagewire \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
+ && apt-get update \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       dbus avahi-daemon libavahi-client3 libusb-1.0-0 libsane1 libsane-hpaio \
       cups-ipp-utils libjpeg8 libpng16-16t64 ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
+ && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
  && test "$(id -u messagebus)" = "${MESSAGEBUS_UID}" \
  && test "$(id -u avahi)" = "${AVAHI_UID}"
 # The source packages the sources target downloads as the corresponding source of
@@ -202,6 +207,7 @@ COPY --from=sane-index-build /out/ /
 # Package lists for the sources target, chosen by SOURCES_LISTS.
 FROM scratch AS lists-local
 COPY --from=device /usr/share/pagewire/source-packages.txt /lists/device.txt
+COPY --from=device /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/device.txt
 
 # The pushed stages only COPY, so the arm64 one needs no emulation.
 FROM --platform=linux/amd64 ${PUSHED_IMAGE} AS pushed-amd64
@@ -210,6 +216,8 @@ FROM --platform=linux/arm64 ${PUSHED_IMAGE} AS pushed-arm64
 FROM scratch AS lists-pushed
 COPY --from=pushed-amd64 /usr/share/pagewire/source-packages.txt /lists/amd64.txt
 COPY --from=pushed-arm64 /usr/share/pagewire/source-packages.txt /lists/arm64.txt
+COPY --from=pushed-amd64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/amd64.txt
+COPY --from=pushed-arm64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/arm64.txt
 
 FROM lists-${SOURCES_LISTS} AS lists
 
@@ -218,11 +226,24 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.s
 COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
 # Lines are source package names (--only-source: never mapped through binary names,
-# e.g. coreutils vs coreutils-from). apt-get names any line it cannot resolve and fails.
+# e.g. coreutils vs coreutils-from). A version the live archive has superseded since
+# the build comes from the newest snapshot recorded in the images that still has it
+# (snapshot.ubuntu.com, https only, hence ca-certificates). A line no snapshot
+# resolves is named and fails the build.
 RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
  && chown _apt /sources/ubuntu \
  && apt-get update \
- && xargs apt-get source --only-source --download-only < /sources/source-packages.txt \
+ && if ! xargs apt-get source --only-source --download-only < /sources/source-packages.txt; then \
+      apt-get install -y --no-install-recommends ca-certificates \
+      && while read -r p; do apt-get source --only-source --download-only "$p" >&2 || echo "$p"; done < /sources/source-packages.txt > /tmp/missing \
+      && for s in $(sort -ru /sources/lists/snapshots/*.txt); do \
+           [ -s /tmp/missing ] || break; \
+           apt-get update --snapshot "$s" || exit 1; \
+           while read -r p; do apt-get source --snapshot "$s" --only-source --download-only "$p" >&2 || echo "$p"; done < /tmp/missing > /tmp/left; \
+           mv /tmp/left /tmp/missing; \
+         done \
+      && if [ -s /tmp/missing ]; then echo "in no recorded snapshot:" >&2; cat /tmp/missing >&2; exit 1; fi; \
+    fi \
  && test "$(ls *.dsc | wc -l)" = "$(wc -l < /sources/source-packages.txt)"
 # Upstream sources as git archives of the pinned commits the binaries were built from.
 COPY --from=ipp-usb /out/upstream/ /sources/upstream/
