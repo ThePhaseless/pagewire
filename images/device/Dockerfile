@@ -1,5 +1,6 @@
-# pagewire device image: dbus, avahi, ipp-usb, AirSane, the SANE backends and
-# ippeveprinter. Always build with an explicit target:
+# pagewire device image: dbus, avahi, ipp-usb, AirSane, the SANE backends (xerox_mfp
+# rebuilt with a patch from images/device/patches/) and ippeveprinter. Always build
+# with an explicit target:
 #   docker buildx build -f images/device/Dockerfile --target device .
 #   docker buildx build -f images/device/Dockerfile --target sources -o type=local,dest=out .
 # The sane-index target builds internal/catalog/sane-usb.tsv from the device stage's backends:
@@ -57,7 +58,7 @@ RUN git init -q . \
  && cmake --build build -j"$(nproc)" \
  && install -D -m 0755 build/airsaned /out/airsaned
 
-FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS device
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS device-base
 ARG MESSAGEBUS_UID
 ARG AVAHI_UID
 ARG NONROOT_UID
@@ -76,12 +77,84 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && test "$(id -u messagebus)" = "${MESSAGEBUS_UID}" \
  && test "$(id -u avahi)" = "${AVAHI_UID}"
+# The source packages the sources target downloads as the corresponding source of
+# this image. No later step installs or removes packages (the device stage only
+# replaces libsane1's xerox_mfp file with one built from the same source).
+RUN mkdir -p /usr/share/pagewire \
+ && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
+ && test -s /usr/share/pagewire/source-packages.txt
+
+# The sane-backends .desc files of the installed version: pixma, epson2 and others
+# hard-code their USB IDs, which only these files list (the image has no /usr/share/doc).
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sane-desc
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends bzip2 xz-utils
+COPY --from=device-base /usr/share/pagewire/source-packages.txt /src/source-packages.txt
+WORKDIR /src
+RUN pkg="$(grep '^sane-backends=' source-packages.txt)" \
+ && test -n "${pkg}" \
+ && chown _apt /src \
+ && apt-get update \
+ && apt-get source --only-source --download-only "${pkg}" \
+ && mkdir -p /out \
+ && tar -xf "$(ls sane-backends_*.orig.tar.* | grep -v '\.asc$')" -C /out --strip-components=2 \
+      --wildcards '*/doc/descriptions/*.desc' '*/doc/descriptions-external/*.desc' \
+ && ls /out/descriptions/*.desc /out/descriptions-external/*.desc > /dev/null
+
+# libsane1's xerox_mfp backend rebuilt from the same Ubuntu source package with
+# images/device/patches/sane-backends-xerox_mfp-adf.patch, which offers the ADF
+# sources only on devices that report an ADF. Only this backend is built.
+FROM sane-desc AS xerox-mfp
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential autoconf automake libtool \
+      autoconf-archive autopoint gettext pkg-config dpkg-dev python3-minimal \
+      libusb-1.0-0-dev libjpeg-dev libxml2-dev
+COPY --from=device-base /usr/lib/*-linux-gnu/sane/ /distro-sane/
+COPY images/device/patches/sane-backends-xerox_mfp-adf.patch /src/
+WORKDIR /src
+RUN dpkg-source -x "$(ls sane-backends_*.dsc)" /src/sane \
+ && cd /src/sane \
+ # The patch's assumptions: one source list for every device, has_adf read before init_options().
+ && grep -qF 'dev->opt[OPT_SOURCE].constraint.string_list = doc_sources;' backend/xerox_mfp.c \
+ && grep -qF 'dev->has_adf = ((dev->res[0x26] & 0x03) != 0);' backend/xerox_mfp.c \
+ && patch -p1 --fuzz=0 < /src/sane-backends-xerox_mfp-adf.patch \
+ && export DEB_BUILD_MAINT_OPTIONS=hardening=+all && eval "$(dpkg-buildflags --export=sh)" \
+ && autoreconf -fi \
+ && ma="$(dpkg-architecture -qDEB_HOST_MULTIARCH)" \
+ # debian/rules' configure flags that reach this backend; BACKENDS limits the build to it.
+ && ./configure --prefix=/usr --libdir="/usr/lib/${ma}" --sysconfdir=/etc --localstatedir=/var \
+      --enable-pthread --with-usb --disable-locking BACKENDS=xerox_mfp \
+ && make -C lib -j"$(nproc)" && make -C sanei -j"$(nproc)" \
+ && make -C backend -j"$(nproc)" libsane-xerox_mfp.la \
+ && so="$(readlink backend/.libs/libsane-xerox_mfp.so.1)" \
+ # It replaces libsane1's file of the same name: same libraries and exported symbols.
+ && test -f "/distro-sane/${so}" \
+ && readelf -d "/distro-sane/${so}" | grep NEEDED | sort > /tmp/needed.distro \
+ && readelf -d "backend/.libs/${so}" | grep NEEDED | sort > /tmp/needed.new \
+ && cmp /tmp/needed.distro /tmp/needed.new \
+ && nm -D --defined-only "/distro-sane/${so}" | awk '{print $3}' | sort > /tmp/syms.distro \
+ && nm -D --defined-only "backend/.libs/${so}" | awk '{print $3}' | sort > /tmp/syms.new \
+ && cmp /tmp/syms.distro /tmp/syms.new \
+ && mkdir -p "/xerox-mfp/usr/lib/${ma}/sane" \
+ && strip --strip-unneeded -o "/xerox-mfp/usr/lib/${ma}/sane/${so}" "backend/.libs/${so}" \
+ && chmod 0644 "/xerox-mfp/usr/lib/${ma}/sane/${so}" \
+ && install -D -m 0644 -t /xerox-mfp/usr/share/licenses/sane-backends LICENSE COPYING \
+      /src/sane-backends-xerox_mfp-adf.patch
+
+FROM device-base AS device
+ARG MESSAGEBUS_UID
+ARG AVAHI_UID
+ARG NONROOT_UID
 COPY --from=ipp-usb /out/ipp-usb /usr/local/sbin/ipp-usb
 COPY --from=ipp-usb /out/quirks/ /usr/share/ipp-usb/quirks/
 COPY --from=ipp-usb /src/LICENSE /usr/share/licenses/ipp-usb/LICENSE
 COPY --from=ipp-usb /out/LICENSE.go /out/LICENSE.goipp /usr/share/licenses/ipp-usb/
 COPY --from=airsane /out/airsaned /usr/local/bin/airsaned
 COPY --from=airsane /src/LICENSE /usr/share/licenses/airsane/LICENSE
+# libsane1's xerox_mfp backend, replaced by the patched build (same file name, checked in xerox-mfp).
+COPY --from=xerox-mfp /xerox-mfp/ /
 COPY images/device/dbus.conf images/device/avahi-daemon.conf /etc/pagewire/
 # HP plug-in paths point into the blob PVC, where the plug-in is installed after
 # the user accepts HP's licence; the image never contains it. mkdir the parents,
@@ -95,12 +168,8 @@ RUN mkdir -p /usr/share/hplip/prnt /usr/share/hplip/scan /usr/share/hplip/fax /u
  && test -x /usr/bin/dbus-daemon && test -x /usr/sbin/avahi-daemon && test -x /usr/sbin/ippeveprinter \
  && test -e "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-hpaio.so.1" \
  && test -e "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-test.so.1" \
- && if ldd /usr/local/sbin/ipp-usb /usr/local/bin/airsaned | grep 'not found'; then exit 1; fi
-# Last RUN that touches packages: the source packages the sources target downloads
-# as the corresponding source of this image.
-RUN mkdir -p /usr/share/pagewire \
- && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
- && test -s /usr/share/pagewire/source-packages.txt
+ && tr '\0' '\n' < "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-xerox_mfp.so.1" | grep -qx '%s: ADF present: %s' \
+ && if ldd /usr/local/sbin/ipp-usb /usr/local/bin/airsaned "/usr/lib/$(uname -m)-linux-gnu/sane/libsane-xerox_mfp.so.1" | grep 'not found'; then exit 1; fi
 COPY NOTICE THIRD_PARTY_NOTICES.md /usr/share/pagewire/
 # Where this image's source is: the tag CI's sources job publishes (v1.2.3 -> 1.2.3-sources,
 # main -> main-sources). Declared late, so a new VERSION rebuilds only this layer.
@@ -113,24 +182,6 @@ LABEL io.github.thephaseless.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
       io.github.thephaseless.pagewire.uid.avahi="${AVAHI_UID}" \
       io.github.thephaseless.pagewire.uid.nonroot="${NONROOT_UID}"
 EXPOSE 8090 8631 60000-60009
-
-# The sane-backends .desc files of the installed version: pixma, epson2 and others
-# hard-code their USB IDs, which only these files list (the image has no /usr/share/doc).
-FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sane-desc
-RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
- && apt-get update \
- && apt-get install -y --no-install-recommends bzip2 xz-utils
-COPY --from=device /usr/share/pagewire/source-packages.txt /src/source-packages.txt
-WORKDIR /src
-RUN pkg="$(grep '^sane-backends=' source-packages.txt)" \
- && test -n "${pkg}" \
- && chown _apt /src \
- && apt-get update \
- && apt-get source --only-source --download-only "${pkg}" \
- && mkdir -p /out \
- && tar -xf "$(ls sane-backends_*.orig.tar.* | grep -v '\.asc$')" -C /out --strip-components=2 \
-      --wildcards '*/doc/descriptions/*.desc' '*/doc/descriptions-external/*.desc' \
- && ls /out/descriptions/*.desc /out/descriptions-external/*.desc > /dev/null
 
 # The SANE USB index (internal/catalog/sane-usb.tsv) from the device stage's backends.
 FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS sane-index-build
@@ -176,6 +227,8 @@ RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
 # Upstream sources as git archives of the pinned commits the binaries were built from.
 COPY --from=ipp-usb /out/upstream/ /sources/upstream/
 COPY --from=airsane /out/upstream/ /sources/upstream/
+# The patches applied to Ubuntu source packages built here.
+COPY images/device/patches/ /sources/patches/
 # How the image was built.
 COPY images/device/Dockerfile images/device/dbus.conf images/device/avahi-daemon.conf /sources/build/
 

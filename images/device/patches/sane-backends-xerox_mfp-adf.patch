@@ -1,0 +1,49 @@
+sane-backends 1.4.0's xerox_mfp backend offers the scan sources "Flatbed",
+"ADF" and "Auto" on every device, although dev_inquiry() already reads from
+the INQUIRY reply whether the device has a document feeder (dev->has_adf).
+Frontends such as AirSane then advertise an ADF on flatbed-only models.
+
+With this change the source option offers only "Flatbed" when has_adf is
+false; has_adf is set before init_options() runs. dev_inquiry() also logs
+has_adf at debug level 3. Not sent upstream yet (an upstream merge request
+would also bump BACKEND_BUILD). Drop this patch once Ubuntu's sane-backends
+has the change.
+
+sane-backends is licensed under the GNU General Public License, version 2 or
+later, with the SANE exception (GPL-2.0-or-later WITH SANE-exception; see
+LICENSE and COPYING in its source). This patch modifies backend/xerox_mfp.c
+and is distributed under the same licence.
+
+--- a/backend/xerox_mfp.c
++++ b/backend/xerox_mfp.c
+@@ -502,6 +502,11 @@
+     "Flatbed", "ADF", "Auto", NULL
+ };
+ 
++/* devices that report no ADF offer the flatbed only */
++static SANE_String_Const doc_sources_flatbed[] = {
++    "Flatbed", NULL
++};
++
+ static int doc_source_to_code[] = {
+     DOC_FLATBED, DOC_ADF, DOC_AUTO
+ };
+@@ -602,7 +607,8 @@
+     dev->opt[OPT_SOURCE].size = max_string_size(doc_sources);
+     dev->opt[OPT_SOURCE].cap = SANE_CAP_SOFT_SELECT|SANE_CAP_SOFT_DETECT;
+     dev->opt[OPT_SOURCE].constraint_type = SANE_CONSTRAINT_STRING_LIST;
+-    dev->opt[OPT_SOURCE].constraint.string_list = doc_sources;
++    dev->opt[OPT_SOURCE].constraint.string_list =
++        dev->has_adf ? doc_sources : doc_sources_flatbed;
+ 
+     dev->opt[OPT_JPEG].name = "jpeg";
+     dev->opt[OPT_JPEG].title = SANE_I18N("jpeg compression");
+@@ -890,6 +896,8 @@
+     dev->has_adf = ((dev->res[0x26] & 0x03) != 0);
+     dev->doc_loaded = (dev->res[0x35] == 0x02)
+                        && dev->has_adf;
++    DBG(3, "%s: ADF present: %s\n", __func__,
++        (dev->has_adf ? "true" : "false"));
+ 
+     init_options(dev);
+     reset_options(dev);

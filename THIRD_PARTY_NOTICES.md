@@ -167,7 +167,7 @@ The packages are unmodified Debian packages. Their sources are at `https://sourc
 
 ## Device image (`pagewire-device`)
 
-dbus, Avahi, ipp-usb, AirSane, the SANE backends and `ippeveprinter`, on `ubuntu:26.04`. Every component is a separate program, or a library linked by one, and none is modified.
+dbus, Avahi, ipp-usb, AirSane, the SANE backends and `ippeveprinter`, on `ubuntu:26.04`. Every component is a separate program, or a library linked by one. None is modified, except the SANE xerox_mfp backend (see "Rebuilt from Ubuntu's source" below).
 
 Built from upstream source:
 
@@ -184,13 +184,15 @@ The main Ubuntu packages (`apt-get install --no-install-recommends`; the full li
 |---|---|---|---|
 | dbus (dbus) | 1.16.2-2ubuntu4 | AFL-2.1 OR GPL-2.0-or-later | Separate program: the pod's system bus |
 | avahi-daemon, libavahi-client3 (avahi) | 0.8-18ubuntu1.1 | LGPL-2.1-or-later | Separate program: the pod's mDNS responder; client library for ipp-usb and AirSane |
-| libsane1 (sane-backends) | 1.4.0-1ubuntu1 | GPL-2.0-or-later WITH SANE-exception | Library loaded by AirSane: the SANE backends and `test` |
+| libsane1 (sane-backends) | 1.4.0-1ubuntu1 | GPL-2.0-or-later WITH SANE-exception | Library loaded by AirSane: the SANE backends and `test` (its xerox_mfp backend is replaced by the rebuilt one below) |
 | libsane-hpaio (hplip) | 3.24.4+dfsg0-0ubuntu8.4 | GPL-2.0-or-later | SANE backend for HP scanners, loaded by AirSane |
 | cups-ipp-utils (cups) | 2.4.16-1ubuntu1.3 | Apache-2.0 (with CUPS's GPL2/LGPL2 exception) | Separate program `ippeveprinter`, for simulated mode |
 | libusb-1.0-0 (libusb-1.0) | 2:1.0.29-2build1 | LGPL-2.1-or-later | Library used by ipp-usb and the SANE backends |
 | libjpeg-turbo8 (libjpeg-turbo) | 2.1.5-4ubuntu4 | IJG AND BSD-3-Clause AND Zlib | Library |
 | libpng16-16t64 (libpng1.6) | 1.6.57-1ubuntu0.1 | Libpng-2.0 | Library |
 | ca-certificates | 20260816ubuntu0.26.04.2 | MPL-2.0 AND GPL-2.0-or-later | CA bundle |
+
+Rebuilt from Ubuntu's source: the SANE xerox_mfp backend, `/usr/lib/<arch>-linux-gnu/sane/libsane-xerox_mfp.so.1`. It is compiled from the sane-backends source package of the installed libsane1 (1.4.0-1ubuntu1) with `images/device/patches/sane-backends-xerox_mfp-adf.patch`, and replaces libsane1's copy. With the patch, the backend offers the ADF and Auto scan sources only on devices that report a document feeder; unpatched, it offers them on every device. The backend and the patch are GPL-2.0-or-later WITH SANE-exception. sane-backends' LICENSE and COPYING and the patch ship in `/usr/share/licenses/sane-backends/`; the source package and the patch are in the `-sources` image.
 
 The image's 139 source packages at the time of writing include the `ubuntu:26.04` base (glibc, bash, coreutils and so on).
 
@@ -254,8 +256,8 @@ For every published image tag, CI publishes a matching `-sources` image for the 
 Each is built from the `sources` stage of the image's Dockerfile and holds under `/sources`:
 
 - `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt`, fetched with `apt-get source`. In CI the list is the union of the amd64 and arm64 lists read from the images that the same run pushed (`sha-<commit>`), so it matches the published binaries. A local build of the `sources` target uses the lists of the targets it builds, the union of all five for the driver Dockerfile;
-- `upstream/`: `git archive` tarballs of everything built from source, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit, which also holds legacy-printer-app, and the four other applications);
-- `patches/` (driver images): the PAPPL patch;
+- `upstream/`: `git archive` tarballs of everything built from upstream git, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit, which also holds legacy-printer-app, and the four other applications). The device image's rebuilt xerox_mfp backend comes from the sane-backends package in `ubuntu/` with its patch in `patches/`;
+- `patches/`: the driver images' PAPPL and pappl-retrofit patches and the device image's sane-backends patch;
 - `build/`: the Dockerfile and, for the device image, its config files.
 
 To extract one: `docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .` from a checkout of the same commit, or copy `/sources` out of the published `-sources` image. Use the `-sources` image with the same tag as the image it covers.
