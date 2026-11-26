@@ -32,6 +32,10 @@ ARG PUSHED_IMAGE=scratch
 # Enable-Printer and Cancel-Current-Job answer only local clients.
 # images/driver/patches/pappl-retrofit-fd-leak.patch is upstream's fix for the
 # descriptors 1.0b3 leaks on every device listing; drop it with the first tag that has it.
+# images/driver/patches/pappl-retrofit-fork-gate.patch is pagewire's own: a fork gate in
+# libpappl-retrofit, so the filter functions libcupsfilters and libppd run in a forked child
+# never inherit a lock another thread holds (pappl-retrofit issue 35). pappl-base tests it with
+# images/driver/fork-gate-test.c, and each final stage checks that its application uses it.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS pappl-base
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 ARG PAPPL_COMMIT
@@ -42,7 +46,7 @@ RUN apt-get update \
       libcups2-dev libcupsfilters-dev libppd-dev libgnutls28-dev libavahi-client-dev \
       libjpeg-dev libpng-dev libusb-1.0-0-dev libpam0g-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
-COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-ipp-admin-local.patch images/driver/patches/pappl-retrofit-fd-leak.patch /src/
+COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-ipp-admin-local.patch images/driver/patches/pappl-retrofit-fd-leak.patch images/driver/patches/pappl-retrofit-fork-gate.patch images/driver/fork-gate-test.c /src/
 WORKDIR /src/pappl
 # The installed patch is the notice of modification that Apache-2.0 4(b) asks for.
 RUN git init -q . \
@@ -63,12 +67,13 @@ RUN git init -q . \
  && git checkout -q FETCH_HEAD \
  && git archive --prefix="pappl-retrofit-${PAPPL_RETROFIT_COMMIT}/" -o "/out/upstream/pappl-retrofit-${PAPPL_RETROFIT_COMMIT}.tar.gz" HEAD \
  && patch -p1 < /src/pappl-retrofit-fd-leak.patch \
+ && patch -p1 < /src/pappl-retrofit-fork-gate.patch \
  && ./autogen.sh \
  && ./configure --prefix=/usr/local \
  && make -j"$(nproc)" \
  && make install \
  && ldconfig \
- && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING /src/pappl-retrofit-fd-leak.patch \
+ && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING /src/pappl-retrofit-fd-leak.patch /src/pappl-retrofit-fork-gate.patch \
  # pappl-retrofit runs CUPS backends from "/usr/lib/<app>/backend" (a
  # symlink to CUPS's serverbin that the apps' "make install" makes only for
  # prefix /usr), not from CUPS's /usr/lib/cups/backend. The targets below
@@ -81,6 +86,29 @@ RUN git init -q . \
  # The legacy target ships legacy-printer-app, which build-app.sh deletes from the others.
  && grep -q 'PR_COPTIONS_NO_PAPPL_BACKENDS' legacy/legacy-printer-app.c \
  && grep -q 'PR_COPTIONS_CUPS_BACKENDS' legacy/legacy-printer-app.c
+
+# The fork gate's self-test (images/driver/fork-gate-test.c), built against the installed library
+# and without it: every hang case must hang without the gate, or it tests nothing.
+# Exit 2: a child hung; 3: a child exited 70, the gate's "would wait forever" exit.
+# The syslog case checks that the syslog wrappers pass the arguments on.
+RUN cc -O2 -Wall -Wextra -Werror -o /tmp/fork-gate-test /src/fork-gate-test.c -Wl,--no-as-needed -L/usr/local/lib -lpappl-retrofit \
+ && cc -O2 -Wall -Wextra -Werror -o /tmp/fork-gate-test-ungated /src/fork-gate-test.c \
+ && for c in wake wake-rw condwait owncond cancel tz timegm; do \
+      /tmp/fork-gate-test "$c" 2>/tmp/fork-gate.err && ! test -s /tmp/fork-gate.err \
+        || { echo "fork gate: case $c failed" >&2; cat /tmp/fork-gate.err >&2; exit 1; }; \
+    done \
+ && out=$(/tmp/fork-gate-test syslog 2>&1 >/dev/null) && test "$out" = "fork-gate-test: syslog 42" \
+        || { echo "fork gate: case syslog printed: $out" >&2; exit 1; } \
+ && for c in held held-rw; do \
+      rc=0; /tmp/fork-gate-test "$c" 2>/tmp/fork-gate.err || rc=$?; \
+      { test "$rc" -eq 3 && grep -q 'forking anyway' /tmp/fork-gate.err && grep -q 'would wait forever' /tmp/fork-gate.err; } \
+        || { echo "fork gate: failsafe case $c exited $rc" >&2; cat /tmp/fork-gate.err >&2; exit 1; }; \
+    done \
+ && for c in wake wake-rw held held-rw; do \
+      rc=0; /tmp/fork-gate-test-ungated "$c" >/dev/null || rc=$?; \
+      test "$rc" -eq 2 || { echo "fork gate: case $c did not hang without the gate (exit $rc)" >&2; exit 1; }; \
+    done \
+ && rm -f /tmp/fork-gate-test /tmp/fork-gate-test-ungated /tmp/fork-gate.err
 
 # Each retrofit app at its pinned commit, built as the rock's app part builds it
 # ("make LDFLAGS=-ljpeg", then "make install"), under /usr/local.
@@ -109,6 +137,26 @@ cd /usr/local
 rm -rf include lib/pkgconfig lib/*.a lib/*.la bin/pappl-makeresheader bin/legacy-printer-app lib/legacy-printer-app share/legacy-printer-app "lib/${app}"
 cd /src/app
 install -D -m 0644 -t "/out/licenses/${app}" LICENSE NOTICE
+SCRIPT
+
+# Run by each final stage: the fork gate works only while every library resolves the calls it
+# wraps to libpappl-retrofit, which must come before libc in the application's load order.
+COPY --chmod=0755 <<'SCRIPT' /src/check-fork-gate.sh
+#!/bin/sh
+# usage: check-fork-gate.sh <application>
+set -eu
+gated='pthread_mutex_(lock|trylock|timedlock|clocklock|unlock)|pthread_rwlock_(rdlock|wrlock|tryrdlock|trywrlock|timedrdlock|timedwrlock|clockrdlock|clockwrlock|unlock)|pthread_cond_(wait|timedwait|clockwait)|pthread_create|gmtime_r|localtime_r|gmtime|localtime|mktime|timegm|timelocal|ctime|ctime_r|strptime|strftime|tzset|__gmtime_r|strftime_l|__strftime_l|wcsftime|wcsftime_l|__wcsftime_l|syslog|vsyslog|__syslog_chk|__vsyslog_chk|openlog|closelog|setlogmask'
+b=$(LD_BIND_NOW=1 LD_DEBUG=bindings "$1" --version 2>&1 || true)
+# Where the hang was traced: libcups' string pool mutex and PAPPL's rwlocks.
+printf '%s\n' "$b" | grep -q "binding file [^ ]*/libcups\.so\.2 .* to /usr/local/lib/libpappl-retrofit\.so[^ ]* .*\`pthread_mutex_lock'" \
+  || { echo "$1: libcups' pthread_mutex_lock does not resolve to the fork gate" >&2; exit 1; }
+printf '%s\n' "$b" | grep -q "binding file /usr/local/lib/libpappl\.so[^ ]* .* to /usr/local/lib/libpappl-retrofit\.so[^ ]* .*\`pthread_rwlock_rdlock'" \
+  || { echo "$1: libpappl's pthread_rwlock_rdlock does not resolve to the fork gate" >&2; exit 1; }
+# No library resolves a gated call past the gate to libc.
+if printf '%s\n' "$b" | grep -E " to [^ ]*/libc\.so\.6 .*\`($gated)'" | grep -v 'binding file /usr/local/lib/libpappl-retrofit\.so'; then
+  echo "$1: the calls above bypass the fork gate" >&2
+  exit 1
+fi
 SCRIPT
 
 FROM pappl-base AS ps-build
@@ -188,6 +236,7 @@ RUN ldconfig \
  && mkdir -p /usr/share/pagewire \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
  && test -s /usr/share/pagewire/source-packages.txt
+RUN --mount=type=bind,from=pappl-base,source=/src/check-fork-gate.sh,target=/tmp/check-fork-gate.sh sh /tmp/check-fork-gate.sh "/usr/local/bin/${APP}"
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
 # The driver list for the index, after the ENV line so it sees the container's
@@ -231,6 +280,7 @@ RUN ldconfig \
  && mkdir -p /usr/share/pagewire \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
  && test -s /usr/share/pagewire/source-packages.txt
+RUN --mount=type=bind,from=pappl-base,source=/src/check-fork-gate.sh,target=/tmp/check-fork-gate.sh sh /tmp/check-fork-gate.sh "/usr/local/bin/${APP}"
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
 # The driver list for the index, after the ENV line so it sees the container's
@@ -264,6 +314,7 @@ RUN ldconfig \
  && mkdir -p /usr/share/pagewire \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
  && test -s /usr/share/pagewire/source-packages.txt
+RUN --mount=type=bind,from=pappl-base,source=/src/check-fork-gate.sh,target=/tmp/check-fork-gate.sh sh /tmp/check-fork-gate.sh "/usr/local/bin/${APP}"
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
 # The driver list for the index, after the ENV line so it sees the container's
@@ -297,6 +348,7 @@ RUN ldconfig \
  && mkdir -p /usr/share/pagewire \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
  && test -s /usr/share/pagewire/source-packages.txt
+RUN --mount=type=bind,from=pappl-base,source=/src/check-fork-gate.sh,target=/tmp/check-fork-gate.sh sh /tmp/check-fork-gate.sh "/usr/local/bin/${APP}"
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/local/share/ppd:/usr/share/ppd:/usr/share/cups/model:/usr/lib/cups/driver:/usr/share/cups/drv:/var/lib/${APP}/ppd
 # The driver list for the index, after the ENV line so it sees the container's
@@ -341,6 +393,7 @@ RUN ldconfig \
     done \
  && dpkg-query -W -f '${source:Package}=${source:Version}\n' | sort -u > /usr/share/pagewire/source-packages.txt \
  && test -s /usr/share/pagewire/source-packages.txt
+RUN --mount=type=bind,from=pappl-base,source=/src/check-fork-gate.sh,target=/tmp/check-fork-gate.sh sh /tmp/check-fork-gate.sh "/usr/local/bin/${APP}"
 # legacy-drivers comes first: pappl-retrofit marks every driver in the last directory "user-added".
 ENV TESTPAGE_DIR=/usr/local/share/${APP} \
     PPD_DIRS=/usr/share/pagewire/legacy-drivers:/var/lib/${APP}/ppd

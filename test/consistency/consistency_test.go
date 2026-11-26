@@ -926,3 +926,36 @@ func TestConsoleAllowlistEmpty(t *testing.T) {
 		t.Error("ui/e2e/harness.ts adds entries to consoleAllowlist")
 	}
 }
+
+// The fork gate (AGENTS.md, "Fork gate") is applied and tested in pappl-base, and every
+// driver image checks that its application resolves the gated calls to it.
+func TestForkGate(t *testing.T) {
+	driver := parseDockerfile(t, "images/driver/Dockerfile")
+	has := func(s *stage, sub string) bool {
+		return slices.ContainsFunc(s.lines, func(l string) bool { return strings.Contains(l, sub) })
+	}
+	base := findStage(driver, "pappl-base")
+	if base == nil {
+		t.Fatal("images/driver/Dockerfile: no stage pappl-base")
+	}
+	for _, want := range []string{
+		"patch -p1 < /src/pappl-retrofit-fork-gate.patch",
+		"-lpappl-retrofit",            // the gated self-test build
+		"/tmp/fork-gate-test-ungated", // the ungated one
+		"/src/check-fork-gate.sh",
+	} {
+		if !has(base, want) {
+			t.Errorf("images/driver/Dockerfile stage pappl-base: no line with %q", want)
+		}
+	}
+	for _, target := range []string{"ps", "hplip", "gutenprint", "ghostscript", "legacy"} {
+		s := findStage(driver, target)
+		if s == nil {
+			t.Errorf("images/driver/Dockerfile: no stage %s", target)
+			continue
+		}
+		if !has(s, `check-fork-gate.sh "/usr/local/bin/${APP}"`) {
+			t.Errorf("images/driver/Dockerfile stage %s: does not run check-fork-gate.sh on its application", target)
+		}
+	}
+}

@@ -418,11 +418,6 @@ func TestDevicePod(t *testing.T) {
 		if _, err := printing.New(remoteURI).Attributes(ctx); err != nil {
 			t.Errorf("Get-Printer-Attributes from %s: %v", ip, err)
 		}
-		// Validate-Job takes Print-Job's auth path; no full remote print until the cfFilterChain fork deadlock fix lands.
-		if code, rsp := ippDo(ctx, t, remoteURI, goipp.OpValidateJob); code != http.StatusOK || rsp.Code >= 0x0400 {
-			t.Errorf("Validate-Job from %s: HTTP %d (%s), want 200 and a successful IPP status", ip, code, ippStatus(rsp))
-		}
-
 		// Disable before Enable, so on an unpatched PAPPL Enable undoes Disable.
 		for _, op := range []goipp.Op{goipp.OpDisablePrinter, goipp.OpEnablePrinter, goipp.OpCancelCurrentJob} {
 			if code, rsp := ippDo(ctx, t, remoteURI, op); code != http.StatusForbidden {
@@ -447,6 +442,12 @@ func TestDevicePod(t *testing.T) {
 		if a, err := printing.New(queueURI).Attributes(ctx); err != nil || a.State == "stopped" {
 			t.Errorf("queue state over loopback: %q, %v; want it not stopped", a.State, err)
 		}
+
+		// A LAN client prints in full: Print-Job, the job's events and its attributes.
+		// Last and in its own subtest, so a failed print hides none of the checks above.
+		t.Run("full print", func(t *testing.T) {
+			printAndWatch(ctx, t, remoteURI, sample, 60*time.Second)
+		})
 	})
 
 	// Last, because the queue comes back as a new printer: the agent's system
@@ -701,6 +702,47 @@ func printAndWait(ctx context.Context, t *testing.T, uri string, doc []byte) {
 		}
 		return j.State == "completed", fmt.Sprintf("%s %v", j.State, j.Reasons)
 	})
+}
+
+// printAndWatch submits doc to uri and follows the job through IPP job
+// notifications until it ends, failing unless it completed within d. A job
+// the printer application leaves in processing is the filter fork deadlock
+// the fork gate patch fixes (pappl-retrofit issue 35).
+func printAndWatch(ctx context.Context, t *testing.T, uri string, doc []byte, d time.Duration) {
+	t.Helper()
+	c := printing.New(uri)
+	id, err := c.Submit(ctx, "sample.pdf", "it", "application/pdf", bytes.NewReader(doc), printing.PrintOptions{Copies: 1})
+	if err != nil {
+		t.Fatalf("submit to %s: %v", uri, err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	ended := func(state string) bool { return state == "completed" || state == "canceled" || state == "aborted" }
+	var state string
+	var reasons []string
+	// WatchJob calls back after subscribing too, so a job that ended before it is seen.
+	werr := c.WatchJob(wctx, id, func() {
+		if j, err := c.Job(wctx, id); err == nil {
+			state, reasons = j.State, j.Reasons
+			if ended(state) {
+				cancel()
+			}
+		}
+	})
+	if !ended(state) {
+		if j, err := c.Job(ctx, id); err == nil {
+			state, reasons = j.State, j.Reasons
+		}
+	}
+	switch {
+	case state == "completed":
+	case ended(state):
+		t.Fatalf("job %d on %s ended %s: %v", id, uri, state, reasons)
+	case errors.Is(wctx.Err(), context.DeadlineExceeded):
+		t.Fatalf("job %d on %s still %s %v after %s: a filter child of the printer application is stuck (fork deadlock)", id, uri, state, reasons, d)
+	default:
+		t.Fatalf("watch job %d on %s: %v (state %q)", id, uri, werr, state)
+	}
 }
 
 // completedJobs counts the printer's completed jobs (Get-Jobs which-jobs=completed).

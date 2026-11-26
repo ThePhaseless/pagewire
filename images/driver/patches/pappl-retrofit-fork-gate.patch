@@ -1,0 +1,474 @@
+pagewire: make fork() wait until no other thread holds a pthread lock.
+
+libcupsfilters 2.1.1 (cfFilterChain(), cfFilterPOpen()) and libppd 2.1.1
+fork without exec and run filter functions in the child, while PAPPL serves
+IPP clients on other threads. A lock another thread holds at that moment
+(libcups' string pool mutex, a PAPPL rwlock, glibc's tzset lock) stays
+locked in the child, and the job hangs in "processing" for good.
+
+This patch is pagewire's own: it adds pappl-retrofit/fork-gate.c to the
+library. Upstream report, open and unfixed:
+https://github.com/OpenPrinting/pappl-retrofit/issues/35
+Drop this patch, images/driver/fork-gate-test.c and the fork gate steps in
+images/driver/Dockerfile once that issue is fixed: when libcupsfilters and
+libppd no longer run filter functions in a forked child, or pappl-retrofit
+no longer calls them from a multi-threaded process.
+
+diff --git a/Makefile.am b/Makefile.am
+index d00d0f6..531e918 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -37,6 +37,7 @@ libpappl_retrofit_la_SOURCES = \
+ 	pappl-retrofit/print-job.c \
+ 	pappl-retrofit/print-job-private.h \
+ 	pappl-retrofit/cups-backends.c \
++	pappl-retrofit/fork-gate.c \
+ 	pappl-retrofit/cups-backends-private.h \
+ 	pappl-retrofit/cups-side-back-channel.c \
+ 	pappl-retrofit/cups-side-back-channel-private.h \
+diff --git a/pappl-retrofit/fork-gate.c b/pappl-retrofit/fork-gate.c
+new file mode 100644
+index 0000000..4619ab5
+--- /dev/null
++++ b/pappl-retrofit/fork-gate.c
+@@ -0,0 +1,440 @@
++//
++// Fork gate for pappl-retrofit (pagewire patch).
++//
++// libcupsfilters (cfFilterChain(), cfFilterPOpen()) and libppd fork() without
++// exec and run filter functions in the child, while PAPPL serves IPP clients
++// on other threads.  A lock one of those threads holds at fork() time stays
++// locked forever in the child (libcups' string pool mutex, a PAPPL rwlock,
++// glibc's tzset lock), and the job hangs in "processing".
++//
++// This file interposes the pthread lock calls of every library the
++// application loads, counts the locks held, and makes fork() wait in a
++// pthread_atfork() prepare handler until no other thread holds one.  Threads
++// that hold nothing wait at the gate; threads inside a critical section
++// finish it first.  The child therefore starts with every pthread mutex and
++// rwlock free and the data behind it consistent.
++//
++// Every wait is a futex wait on a word the other side changes: a fork sleeps
++// on "events" until a lock is released (or on the mutex of a thread passing
++// through pthread_cond_wait(), which glibc releases), and a parked thread
++// sleeps on "gate" until the fork is done.  The only timeout is the failsafe: a fork that is
++// still waiting after GATE_TIMEOUT_MS logs one line and forks anyway.  A
++// forked child that would then block on a lock held at fork time logs one
++// line and exits 70, so the job fails instead of hanging.
++//
++// Locks inside glibc are not pthread calls and fork() resets only some of
++// them.  The time and syslog functions at the end of this file take ones it
++// does not reset (tzset_lock, syslog_lock; PAPPL calls gmtime_r() for every
++// log line, in the child too), so they count as critical sections as well.
++//
++// Licensed under Apache License v2.0.  See the file "LICENSE" for more
++// information.
++//
++
++#define _GNU_SOURCE
++#include <dlfcn.h>
++#include <errno.h>
++#include <limits.h>
++#include <linux/futex.h>
++#include <pthread.h>
++#include <locale.h>
++#include <stdarg.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <sys/syscall.h>
++#include <time.h>
++#include <unistd.h>
++#include <wchar.h>
++
++// Exported by glibc and called by the libraries, but not declared by its
++// headers (or only with _FORTIFY_SOURCE, whose inline syslog() and vsyslog()
++// would clash with the wrappers below, so <syslog.h> stays out).
++extern struct tm *__gmtime_r(const time_t *, struct tm *);
++extern size_t __strftime_l(char *, size_t, const char *, const struct tm *, locale_t);
++extern size_t __wcsftime_l(wchar_t *, size_t, const wchar_t *, const struct tm *, locale_t);
++extern void syslog(int, const char *, ...);
++extern void vsyslog(int, const char *, va_list);
++extern void __syslog_chk(int, int, const char *, ...);
++extern void __vsyslog_chk(int, int, const char *, va_list);
++extern void openlog(const char *, int, int);
++extern void closelog(void);
++extern int setlogmask(int);
++
++#define GATE_TIMEOUT_MS	5000	// Then fork() goes ahead as it did before
++#define MAX_WAITERS	256	// Threads in pthread_cond_wait() at one time (PAPPL allows 100 clients)
++#define STUCK_STATUS	70	// Exit status of a child that would wait forever
++
++static atomic_int gate;		// Number of fork() calls waiting or running
++static atomic_int busy;		// Locks held or being taken, all threads
++static atomic_int excused;	// Locks held by the forking threads
++static atomic_uint events;	// Changed (and woken) whenever a waiting fork must look again
++static atomic_int waiters_full;	// The waiting list overflowed once (logged)
++static _Atomic(pthread_mutex_t *) waiting[MAX_WAITERS];
++				// Mutexes of threads in pthread_cond_wait()
++static __thread int mine;	// Locks held or being taken by this thread
++static __thread int forking;	// This thread is inside fork()
++static __thread int mine_at_fork;
++static __thread int num_taken;
++static __thread pthread_mutex_t *taken[MAX_WAITERS];
++static int in_child;		// This process is a forked child...
++static int child_threads;	// ...that has started threads of its own
++
++// Every call this file wraps (syslog() and __syslog_chk() call the va_list
++// variants).  The real functions are resolved once, at the
++// latest in fork_gate_init(), so prepare() never calls dlsym() (which takes the
++// loader lock a parked thread may hold).
++#define WRAPPED(X) \
++  X(pthread_mutex_lock) X(pthread_mutex_trylock) X(pthread_mutex_timedlock) \
++  X(pthread_mutex_clocklock) X(pthread_mutex_unlock) \
++  X(pthread_rwlock_rdlock) X(pthread_rwlock_wrlock) X(pthread_rwlock_tryrdlock) \
++  X(pthread_rwlock_trywrlock) X(pthread_rwlock_timedrdlock) X(pthread_rwlock_timedwrlock) \
++  X(pthread_rwlock_clockrdlock) X(pthread_rwlock_clockwrlock) X(pthread_rwlock_unlock) \
++  X(pthread_create) X(pthread_cond_wait) X(pthread_cond_timedwait) X(pthread_cond_clockwait) \
++  X(gmtime_r) X(localtime_r) X(gmtime) X(localtime) X(mktime) X(timegm) X(timelocal) \
++  X(ctime) X(ctime_r) X(strptime) X(strftime) X(tzset) X(__gmtime_r) \
++  X(strftime_l) X(__strftime_l) X(wcsftime) X(wcsftime_l) X(__wcsftime_l) \
++  X(vsyslog) X(__vsyslog_chk) X(openlog) X(closelog) X(setlogmask)
++
++#define DECLARE(name) static __typeof__(&name) real_##name;
++WRAPPED(DECLARE)
++static pthread_once_t resolved = PTHREAD_ONCE_INIT;
++
++static void resolve(void)
++{
++#define RESOLVE(name) real_##name = (__typeof__(&name))dlsym(RTLD_NEXT, #name);
++  WRAPPED(RESOLVE)
++}
++
++// Libraries loaded before this one can take locks in their constructors,
++// before fork_gate_init() runs.
++#define REAL(name) (pthread_once(&resolved, resolve), real_##name)
++
++static long futex(void *addr, int op, unsigned val, const struct timespec *t, unsigned bits)
++{
++  return (syscall(SYS_futex, addr, op | FUTEX_PRIVATE_FLAG, val, t, NULL, bits));
++}
++
++
++// Tell a waiting fork that something changed.
++static void notify(void)
++{
++  if (atomic_load(&gate))
++  {
++    atomic_fetch_add(&events, 1);
++    futex(&events, FUTEX_WAKE, INT_MAX, NULL, 0);
++  }
++}
++
++
++// Count a lock this thread is about to take; wait at the gate first when a
++// fork is pending and this thread holds nothing.
++static void enter(void)
++{
++  int g;
++
++  atomic_fetch_add(&busy, 1);
++  while ((g = atomic_load(&gate)) != 0 && !mine && !forking)
++  {
++    atomic_fetch_sub(&busy, 1);
++    notify();
++    futex(&gate, FUTEX_WAIT, (unsigned)g, NULL, 0);
++    atomic_fetch_add(&busy, 1);
++  }
++  mine ++;
++}
++
++static void leave(void)
++{
++  mine --;
++  atomic_fetch_sub(&busy, 1);
++  notify();
++}
++
++// In a forked child that has started no threads, a lock that is busy now
++// stays busy: say so and exit instead of hanging.
++static void stuck(void)
++{
++  dprintf(2, "fork-gate: process %d would wait forever for a lock held when it was forked; exiting\n", (int)getpid());
++  _exit(STUCK_STATUS);
++}
++
++static int alone(void)
++{
++  return (in_child && !child_threads);
++}
++
++// A lock call returns 0 when it took the lock; EOWNERDEAD (robust mutexes)
++// takes it too.
++#define TOOK(r) ((r) == 0 || (r) == EOWNERDEAD)
++
++#define LOCK(name, tryname, ...) \
++  { \
++    int r; \
++    enter(); \
++    if (alone()) \
++    { \
++      if ((r = REAL(tryname)(l)) == EBUSY) \
++        stuck(); \
++    } \
++    else \
++      r = REAL(name)(__VA_ARGS__); \
++    if (!TOOK(r)) \
++      leave(); \
++    return (r); \
++  }
++
++#define TRYLOCK(name, ...) \
++  { \
++    int r; \
++    enter(); \
++    if (!TOOK(r = REAL(name)(__VA_ARGS__))) \
++      leave(); \
++    return (r); \
++  }
++
++#define UNLOCK(name) \
++  { \
++    int r; \
++    if ((r = REAL(name)(l)) == 0) \
++      leave(); \
++    return (r); \
++  }
++
++int pthread_mutex_lock(pthread_mutex_t *l) LOCK(pthread_mutex_lock, pthread_mutex_trylock, l)
++int pthread_mutex_trylock(pthread_mutex_t *l) TRYLOCK(pthread_mutex_trylock, l)
++int pthread_mutex_timedlock(pthread_mutex_t *l, const struct timespec *t) TRYLOCK(pthread_mutex_timedlock, l, t)
++int pthread_mutex_clocklock(pthread_mutex_t *l, clockid_t c, const struct timespec *t) TRYLOCK(pthread_mutex_clocklock, l, c, t)
++int pthread_mutex_unlock(pthread_mutex_t *l) UNLOCK(pthread_mutex_unlock)
++int pthread_rwlock_rdlock(pthread_rwlock_t *l) LOCK(pthread_rwlock_rdlock, pthread_rwlock_tryrdlock, l)
++int pthread_rwlock_wrlock(pthread_rwlock_t *l) LOCK(pthread_rwlock_wrlock, pthread_rwlock_trywrlock, l)
++int pthread_rwlock_tryrdlock(pthread_rwlock_t *l) TRYLOCK(pthread_rwlock_tryrdlock, l)
++int pthread_rwlock_trywrlock(pthread_rwlock_t *l) TRYLOCK(pthread_rwlock_trywrlock, l)
++int pthread_rwlock_timedrdlock(pthread_rwlock_t *l, const struct timespec *t) TRYLOCK(pthread_rwlock_timedrdlock, l, t)
++int pthread_rwlock_timedwrlock(pthread_rwlock_t *l, const struct timespec *t) TRYLOCK(pthread_rwlock_timedwrlock, l, t)
++int pthread_rwlock_clockrdlock(pthread_rwlock_t *l, clockid_t c, const struct timespec *t) TRYLOCK(pthread_rwlock_clockrdlock, l, c, t)
++int pthread_rwlock_clockwrlock(pthread_rwlock_t *l, clockid_t c, const struct timespec *t) TRYLOCK(pthread_rwlock_clockwrlock, l, c, t)
++int pthread_rwlock_unlock(pthread_rwlock_t *l) UNLOCK(pthread_rwlock_unlock)
++
++// A child that starts threads can wait for its own threads' locks.
++int pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*f)(void *), void *d)
++{
++  if (in_child)
++    child_threads = 1;
++  return (REAL(pthread_create)(t, a, f, d));
++}
++
++// pthread_cond_wait() gives the mutex up while it sleeps, so stop counting it
++// and list it instead: fork() takes the listed mutexes itself, which tells a
++// sleeping waiter (mutex free) from one that just woke up (mutex held).
++static int wait_enter(pthread_mutex_t *m)
++{
++  int i;
++  pthread_mutex_t *none;
++
++  for (i = 0; i < MAX_WAITERS; i ++)
++  {
++    none = NULL;
++    if (atomic_compare_exchange_strong(&waiting[i], &none, m))
++    {
++      leave();
++      return (i);
++    }
++  }
++  if (!atomic_exchange(&waiters_full, 1))
++    dprintf(2, "fork-gate: more than %d threads in pthread_cond_wait(); a fork waits for the others to wake\n", MAX_WAITERS);
++  return (-1);			// List full: the mutex stays counted
++}
++
++// Also the cancellation cleanup: a thread cancelled in pthread_cond_wait()
++// holds the mutex again, and its own cleanup handler unlocks it.
++static void wait_leave(void *p)
++{
++  int i = *(int *)p;
++
++  if (i < 0)
++    return;
++  atomic_fetch_add(&busy, 1);
++  mine ++;
++  atomic_store(&waiting[i], NULL);
++  notify();
++}
++
++#define WAIT(name, ...) \
++  { \
++    int i = wait_enter(m), r; \
++    pthread_cleanup_push(wait_leave, &i); \
++    r = REAL(name)(__VA_ARGS__); \
++    pthread_cleanup_pop(1); \
++    return (r); \
++  }
++
++int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) WAIT(pthread_cond_wait, c, m)
++int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m, const struct timespec *t) WAIT(pthread_cond_timedwait, c, m, t)
++int pthread_cond_clockwait(pthread_cond_t *c, pthread_mutex_t *m, clockid_t k, const struct timespec *t) WAIT(pthread_cond_clockwait, c, m, k, t)
++
++// glibc functions that take tzset_lock or syslog_lock.  Each needs its own
++// wrapper: glibc's internal calls (ctime() to localtime(), timegm() to
++// gmtime_r(), strptime() "%s" to localtime_r(), vsyslog() to localtime_r(),
++// strftime() "%Z" to tzset()) never reach the ones above.
++#define SECTION(ret, name, params, ...) \
++  ret name params \
++  { \
++    ret r; \
++    enter(); \
++    r = REAL(name)(__VA_ARGS__); \
++    leave(); \
++    return (r); \
++  }
++
++SECTION(struct tm *, gmtime_r, (const time_t *t, struct tm *m), t, m)
++SECTION(struct tm *, localtime_r, (const time_t *t, struct tm *m), t, m)
++SECTION(struct tm *, gmtime, (const time_t *t), t)
++SECTION(struct tm *, localtime, (const time_t *t), t)
++SECTION(time_t, mktime, (struct tm *m), m)
++SECTION(time_t, timegm, (struct tm *m), m)
++SECTION(time_t, timelocal, (struct tm *m), m)
++SECTION(char *, ctime, (const time_t *t), t)
++SECTION(char *, ctime_r, (const time_t *t, char *b), t, b)
++SECTION(char *, strptime, (const char *s, const char *f, struct tm *m), s, f, m)
++SECTION(size_t, strftime, (char *s, size_t n, const char *f, const struct tm *m), s, n, f, m)
++SECTION(struct tm *, __gmtime_r, (const time_t *t, struct tm *m), t, m)
++SECTION(size_t, strftime_l, (char *s, size_t n, const char *f, const struct tm *m, locale_t l), s, n, f, m, l)
++SECTION(size_t, __strftime_l, (char *s, size_t n, const char *f, const struct tm *m, locale_t l), s, n, f, m, l)
++SECTION(size_t, wcsftime, (wchar_t *s, size_t n, const wchar_t *f, const struct tm *m), s, n, f, m)
++SECTION(size_t, wcsftime_l, (wchar_t *s, size_t n, const wchar_t *f, const struct tm *m, locale_t l), s, n, f, m, l)
++SECTION(size_t, __wcsftime_l, (wchar_t *s, size_t n, const wchar_t *f, const struct tm *m, locale_t l), s, n, f, m, l)
++SECTION(int, setlogmask, (int m), m)
++
++void tzset(void)
++{
++  enter();
++  REAL(tzset)();
++  leave();
++}
++
++static void leave_cancelled(void *p)
++{
++  (void)p;
++  leave();
++}
++
++// The syslog calls are cancellation points, and "%m" needs the caller's errno.
++#define LOGGED(...) \
++  { \
++    int e = errno; \
++    enter(); \
++    errno = e; \
++    pthread_cleanup_push(leave_cancelled, NULL); \
++    __VA_ARGS__; \
++    pthread_cleanup_pop(1); \
++  }
++
++void syslog(int p, const char *f, ...) LOGGED(va_list a; va_start(a, f); REAL(vsyslog)(p, f, a); va_end(a))
++void __syslog_chk(int p, int x, const char *f, ...) LOGGED(va_list a; va_start(a, f); REAL(__vsyslog_chk)(p, x, f, a); va_end(a))
++void vsyslog(int p, const char *f, va_list a) LOGGED(REAL(vsyslog)(p, f, a))
++void __vsyslog_chk(int p, int x, const char *f, va_list a) LOGGED(REAL(__vsyslog_chk)(p, x, f, a))
++void openlog(const char *i, int o, int f) LOGGED(REAL(openlog)(i, o, f))
++void closelog(void) LOGGED(REAL(closelog)())
++
++static void release_taken(void)
++{
++  while (num_taken > 0)
++    REAL(pthread_mutex_unlock)(taken[-- num_taken]);
++}
++
++// Take the mutex of every thread sleeping in pthread_cond_wait(); return
++// NULL, or a listed mutex another thread still holds (none are taken then).
++static pthread_mutex_t *take_waiting(void)
++{
++  int i, j;
++  pthread_mutex_t *m;
++
++  for (i = 0; i < MAX_WAITERS; i ++)
++  {
++    if ((m = atomic_load(&waiting[i])) == NULL)
++      continue;
++    for (j = 0; j < num_taken && taken[j] != m; j ++);
++    if (j < num_taken)
++      continue;
++    if (REAL(pthread_mutex_trylock)(m) != 0)
++    {
++      if (m->__data.__owner == gettid())
++        continue;			// This thread holds it already (glibc)
++      release_taken();
++      return (m);
++    }
++    taken[num_taken ++] = m;
++  }
++  return (NULL);
++}
++
++static void prepare(void)
++{
++  unsigned seen;
++  int r;
++  pthread_mutex_t *m;
++  struct timespec deadline;
++
++  forking      = 1;
++  mine_at_fork = mine;
++  atomic_fetch_add(&excused, mine);
++  atomic_fetch_add(&gate, 1);
++  clock_gettime(CLOCK_MONOTONIC, &deadline);
++  deadline.tv_sec += GATE_TIMEOUT_MS / 1000;
++
++  for (;;)
++  {
++    seen = atomic_load(&events);	// Before looking, so no change is missed
++    if (atomic_load(&busy) == atomic_load(&excused))
++    {
++      if ((m = take_waiting()) == NULL)
++        return;
++      // A thread on its way into or out of pthread_cond_wait() holds m, and
++      // glibc releases it without telling us: wait for m itself.
++      if (!TOOK(r = REAL(pthread_mutex_clocklock)(m, CLOCK_MONOTONIC, &deadline)))
++      {
++        dprintf(2, "fork-gate: a thread passing through pthread_cond_wait() still holds its mutex after %d ms, forking anyway\n", GATE_TIMEOUT_MS);
++        return;
++      }
++      REAL(pthread_mutex_unlock)(m);
++    }
++    else if (futex(&events, FUTEX_WAIT_BITSET, seen, &deadline, FUTEX_BITSET_MATCH_ANY) == -1 && errno == ETIMEDOUT)
++      break;
++  }
++
++  // Never block a job for good: fork as libcupsfilters always did
++  dprintf(2, "fork-gate: %d lock(s) still held after %d ms, forking anyway\n",
++	  atomic_load(&busy) - atomic_load(&excused), GATE_TIMEOUT_MS);
++}
++
++static void parent(void)
++{
++  release_taken();
++  atomic_fetch_sub(&excused, mine_at_fork);
++  forking = 0;
++  atomic_fetch_sub(&gate, 1);
++  futex(&gate, FUTEX_WAKE, INT_MAX, NULL, 0);
++  notify();				// Another fork may wait for the mutexes released above
++}
++
++static void child(void)
++{
++  int i;
++
++  // Only this thread exists now
++  release_taken();
++  for (i = 0; i < MAX_WAITERS; i ++)
++    atomic_store(&waiting[i], NULL);
++  atomic_store(&busy, mine);
++  atomic_store(&excused, 0);
++  atomic_store(&gate, 0);
++  forking       = 0;
++  in_child      = 1;
++  child_threads = 0;
++}
++
++static void __attribute__((constructor)) fork_gate_init(void)
++{
++  pthread_once(&resolved, resolve);
++  pthread_atfork(prepare, parent, child);
++}
