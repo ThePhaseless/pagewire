@@ -270,6 +270,9 @@ describe("Scan view", () => {
     await renderScan(null);
     expect(screen.getByRole("heading", { level: 1, name: "Scan" })).toBeTruthy();
     expect(screen.getByText("Checking the scanner…")).toBeTruthy();
+    // No scanner yet: disabled, not pending.
+    expect(disabled(scanButton())).toBe(true);
+    expect(scanButton().hasAttribute("data-pending")).toBe(false);
   });
 
   test("without a connected scanner the Scan button is disabled and capabilities are not asked", async () => {
@@ -540,6 +543,142 @@ describe("Scan view", () => {
     expect(calls).toContainEqual({ method: "DELETE", path: `/api/v1/scans/${OLD}` });
     await waitFor(() => expect(within(list).getAllByRole("listitem").length).toBe(1));
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  test("each finished scan in Recent scans has its own download", async () => {
+    const ids = ["0000000000000001", "0000000000000002", "0000000000000003"];
+    scans = [
+      scan({ id: ids[0], createdAt: "2026-11-24T17:00:05Z", format: "pdf", pages: 3 }),
+      scan({ id: ids[1], createdAt: "2026-11-24T17:00:01Z", format: "jpeg", pages: 1 }),
+      scan({ id: "0000000000000004", createdAt: "2026-11-24T16:00:00Z", state: "failed" }),
+      scan({ id: "0000000000000005", createdAt: "2026-11-24T15:00:00Z", state: "canceled" }),
+      scan({ id: ids[2], createdAt: "2026-11-24T18:00:00Z", state: "scanning", pages: 0 }),
+    ];
+    await renderScan(ready);
+    const list = await screen.findByRole("list", { name: "Recent scans" });
+    await waitFor(() => expect(within(list).getAllByRole("listitem").length).toBe(5));
+    const rows = within(list).getAllByRole("listitem");
+    const link = (row: HTMLElement) =>
+      within(row).queryByRole("link", { name: /^Download scan from / });
+    // Newest first: scanning, the two completed ones, failed, canceled.
+    const [running, pdf, jpeg, failed, canceled] = rows as HTMLElement[];
+    const names = [pdf, jpeg].map((row, i) => {
+      const a = link(row as HTMLElement);
+      expect(a?.getAttribute("href")).toBe(`/api/v1/scans/${ids[i]}/download`);
+      expect(a?.hasAttribute("download")).toBe(true);
+      expect(a?.textContent).toBe("Download");
+      return a?.getAttribute("aria-label");
+    });
+    expect(names[0]).not.toBe(names[1]);
+    for (const row of [running, failed, canceled]) expect(link(row as HTMLElement)).toBeNull();
+  });
+
+  test("a scan running on another scanner holds the Scan button and says why", async () => {
+    const other = scan({
+      id: OLD,
+      scanner: "lide",
+      state: "scanning",
+      pages: 0,
+      settings: { ...scan().settings, scanner: "lide" },
+    });
+    scans = [other];
+    await renderScan({ ...base, scanners: [scanner(), lide] });
+    await waitFor(() => expect(selected("Resolution")).toBe("75 dpi"));
+    const reason = "CanoScan LiDE 100 is scanning. Wait for that scan to finish.";
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(disabled(scanButton())).toBe(true);
+    expect(scanButton().hasAttribute("data-pending")).toBe(false);
+    expect(screen.getByText(reason)).toBeTruthy();
+
+    await emit("scan", { ...other, state: "completed", pages: 1 });
+    expect(disabled(scanButton())).toBe(false);
+    expect(screen.queryByText(reason)).toBeNull();
+  });
+
+  test("a running scan says nothing about another scanner before the Status arrives", async () => {
+    scans = [scan({ scanner: "lide", state: "scanning", pages: 0 })];
+    await renderScan(null);
+    await waitFor(() => expect(calls.some((c) => c.path === "/api/v1/scans")).toBe(true));
+    expect(screen.getByText("Checking the scanner…")).toBeTruthy();
+    expect(screen.queryByText(/is scanning\. Wait for that scan to finish\./)).toBeNull();
+  });
+
+  test("the busy message goes once no scan is running", async () => {
+    postScan = () => problem(409, "Conflict");
+    await renderScan({ ...base, scanners: [scanner(), lide] });
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    const busy = "The scanner is busy. Wait for the current scan to finish.";
+    expect(screen.getByText(busy)).toBeTruthy();
+    // The scan that caused the 409 shows up, then ends.
+    const other = scan({
+      id: OLD,
+      scanner: "lide",
+      state: "scanning",
+      pages: 0,
+      settings: { ...scan().settings, scanner: "lide" },
+    });
+    await emit("scan", other);
+    // The specific message replaces the generic one while that scan runs.
+    expect(screen.queryByText(busy)).toBeNull();
+    expect(
+      screen.getByText("CanoScan LiDE 100 is scanning. Wait for that scan to finish."),
+    ).toBeTruthy();
+    await emit("scan", { ...other, state: "completed", pages: 1 });
+    expect(screen.queryByText(busy)).toBeNull();
+    expect(disabled(scanButton())).toBe(false);
+  });
+
+  test("a 409 that lands after the other scan shows up says only which scanner is busy", async () => {
+    const other = scan({
+      id: OLD,
+      scanner: "lide",
+      state: "scanning",
+      pages: 0,
+      settings: { ...scan().settings, scanner: "lide" },
+    });
+    // The other scan's event reaches the page before the POST answers 409.
+    postScan = () => {
+      FakeEventSource.last?.emit("scan", other);
+      return problem(409, "Conflict");
+    };
+    await renderScan({ ...base, scanners: [scanner(), lide] });
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    const busy = "The scanner is busy. Wait for the current scan to finish.";
+    expect(
+      screen.getByText("CanoScan LiDE 100 is scanning. Wait for that scan to finish."),
+    ).toBeTruthy();
+    expect(screen.queryByText(busy)).toBeNull();
+    await emit("scan", { ...other, state: "completed", pages: 1 });
+    expect(screen.queryByText(busy)).toBeNull();
+    expect(disabled(scanButton())).toBe(false);
+  });
+
+  test("a 409 while this scanner is processing still says the scanner is busy", async () => {
+    const other = scan({
+      id: OLD,
+      scanner: "lide",
+      state: "scanning",
+      pages: 0,
+      settings: { ...scan().settings, scanner: "lide" },
+    });
+    postScan = () => {
+      FakeEventSource.last?.emit("scan", other);
+      FakeEventSource.last?.emit("status", {
+        ...base,
+        scanners: [scanner({ state: "processing" }), lide],
+      });
+      return problem(409, "Conflict");
+    };
+    await renderScan({ ...base, scanners: [scanner(), lide] });
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    // The other-scanner line hides while this scanner is busy, so the 409 text stays.
+    expect(screen.queryByText(/is scanning\. Wait for that scan to finish\./)).toBeNull();
+    expect(
+      screen.getByText("The scanner is busy. Wait for the current scan to finish."),
+    ).toBeTruthy();
   });
 
   test("a busy scanner answers 409 and the page says so", async () => {

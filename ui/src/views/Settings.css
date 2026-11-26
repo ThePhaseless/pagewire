@@ -40,16 +40,22 @@
     padding-block-start: var(--space-4);
   }
 
+  /* Name, badge and actions share the name's first text baseline; the title takes the free width. */
   .settings-view .settings-entry-head {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: baseline;
     gap: var(--space-2) var(--space-4);
   }
 
   .settings-view .settings-entry-title {
-    flex: 1 1 12rem;
-    min-inline-size: 0;
+    flex: 1 1 0;
+    min-inline-size: min(100%, 10rem);
+  }
+
+  /* A badge too long to sit beside the name wraps to the end of its own line, not the start. */
+  .settings-view .settings-entry-head > .ui-badge {
+    margin-inline-start: auto;
   }
 
   .settings-view .settings-entry-title h3 {
@@ -62,7 +68,17 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-2) var(--space-3);
+    gap: var(--space-2) var(--space-1);
+    /* Wrapped, the group sits at the end of its line; the pull-back puts Remove's quiet padding and
+       border inside the card padding, so its label ends where the badge ends. */
+    margin-inline-start: auto;
+    margin-inline-end: calc(-1 * (var(--space-4) + 1px));
+  }
+
+  /* The switch takes its baseline from its label, not the empty track, so the action labels sit on
+     the name's baseline. */
+  .settings-view .settings-entry-actions .ui-choice-label {
+    align-self: baseline;
   }
 
   /* Edit and Done take the same width, so the switch and badge stay put when a panel opens. */
@@ -174,6 +190,11 @@
     flex-direction: column;
     gap: var(--space-1);
     font-size: var(--text-sm);
+  }
+
+  /* Empty, the live region must stay in the DOM but take no width, so Reset and Save share a line. */
+  .settings-view .settings-actions-status:empty {
+    flex-basis: 0;
   }
 
   .settings-view .settings-unsaved {

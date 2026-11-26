@@ -112,6 +112,8 @@
   .print-view .print-files .print-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
+    /* Icon and remove button stay on the name's first line when the name, problem and help wrap. */
+    align-items: start;
     /* File rows exist only after the user adds a file, so their mount is an arrival. */
     animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
@@ -160,7 +162,14 @@
 
   .print-view .print-file-icon {
     flex: none;
+    /* Centre the 20 px icon on the name's line; the svg inherits the row's line-height. */
+    margin-block-start: calc((1lh - 20px) / 2);
     color: var(--ink-muted);
+  }
+
+  /* Centre the 44 px button on the name's first line. Not 1lh: on a button, lh is --leading-tight. */
+  .print-view .print-files .print-remove {
+    margin-block: calc((var(--leading) * 1em - var(--touch)) / 2);
   }
 
   .print-view .print-row[data-problem] .print-file-icon {

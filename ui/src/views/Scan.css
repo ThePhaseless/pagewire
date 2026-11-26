@@ -35,6 +35,12 @@
     gap: var(--space-4);
   }
 
+  /* Download PDF starts with an icon, which has no text baseline, and the Result title is always one
+     line, so this card keeps a centred head (identical to before at 1440; one line at 360). */
+  .scan-view .scan-result .ui-card-head {
+    align-items: center;
+  }
+
   .scan-view .scan-subtle {
     color: var(--ink-muted);
     font-size: var(--text-sm);
@@ -177,40 +183,33 @@
     list-style: none;
   }
 
+  /* One shape at every width: the date and summary with the badge at the end of the date line, then
+     Download, Show and Delete at the end of their own line. The summary keeps the full width minus
+     the badge, which a column per action left too narrow in wide cards. */
   .scan-view .scan-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2) var(--space-3);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "main badge"
+      "actions actions";
+    align-items: baseline;
+    gap: var(--space-1) var(--space-3);
     padding-block: var(--space-2);
     border-block-end: 1px solid var(--rule);
   }
 
-  /* Narrow cards: the date and summary take the first line, then the badge at the start and Show
-     and Delete at the end of the second, so every row has the same shape. */
-  .scan-view .scan-row > :nth-child(2) {
-    margin-inline-end: auto;
+  .scan-view .scan-row > .ui-badge {
+    grid-area: badge;
   }
 
-  /* In wide cards, rows share one set of columns (subgrid), so the badge, Show and Delete line up
-     from row to row even when a row has no Delete. Narrow cards keep the wrapping row above. */
-  @container (min-width: 31rem) {
-    .scan-view .scan-list {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto auto;
-      column-gap: var(--space-3);
-    }
-
-    .scan-view .scan-row {
-      display: grid;
-      grid-column: 1 / -1;
-      grid-template-columns: subgrid;
-    }
-
-    .scan-view .scan-row > :nth-child(2) {
-      justify-self: end;
-      margin-inline-end: 0;
-    }
+  /* Pulled back by a quiet button's padding and border, so the last label lines up with the badge. */
+  .scan-view .scan-row-actions {
+    grid-area: actions;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0 var(--space-1);
+    margin-inline-end: calc(-1 * (var(--space-4) + 1px));
   }
 
   .scan-view .scan-row:last-child {
@@ -218,8 +217,8 @@
   }
 
   .scan-view .scan-row-main {
+    grid-area: main;
     display: flex;
-    flex: 1 1 100%;
     flex-direction: column;
     gap: var(--space-1);
     min-inline-size: 0;

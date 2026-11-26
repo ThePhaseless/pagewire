@@ -20,6 +20,9 @@ export const scanStrings = {
   ready: (pages: number) => `Scan ready, ${pages} ${pages === 1 ? "page" : "pages"}`,
   failed: "Scan failed",
   busy: "The scanner is busy. Wait for the current scan to finish.",
+  /** Why Scan is off while another scanner's scan runs (pagewire runs one scan at a time). */
+  otherScanRunning: (scanner: string | undefined) =>
+    `${scanner ?? "Another scanner"} is scanning. Wait for that scan to finish.`,
   scanning: (pages: number) =>
     pages === 0 ? "Scanning…" : `Scanning… ${pages} ${pages === 1 ? "page" : "pages"} so far`,
   result: {
@@ -55,6 +58,8 @@ export const scanStrings = {
     emptyBody: "Scans you make are listed here until you delete them or they expire.",
     show: "Show",
     showScan: (when: string) => `Show scan from ${when}`,
+    download: "Download",
+    downloadScan: (when: string) => `Download scan from ${when}`,
     deleteScan: (when: string) => `Delete scan from ${when}`,
     state: {
       scanning: "Scanning",

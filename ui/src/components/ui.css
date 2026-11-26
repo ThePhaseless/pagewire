@@ -453,7 +453,7 @@
 
   /* Tabs */
 
-  /* Tabs wrap onto a second row on narrow screens, so none is cut off. */
+  /* Tabs never get cut off: in cards narrower than 30rem they form an even two-column grid. */
   .ui-tablist {
     display: flex;
     flex-wrap: wrap;
@@ -489,6 +489,32 @@
     border-radius: var(--radius-control);
   }
 
+  /* Each cell draws its own rule; the selected one swaps it for the accent, so no grey line sits
+     over the accent. shortcut: assumes an even tab count (four today); revisit the columns for an
+     odd one. */
+  @container (max-width: 30rem) {
+    .ui-tablist {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0;
+      border-block-end: 0;
+    }
+
+    .ui-tab {
+      justify-content: center;
+      text-align: center;
+      padding-inline: var(--space-2);
+      margin-block-end: 0;
+      border-block-end: 1px solid var(--rule);
+      padding-block-end: 1px;
+    }
+
+    .ui-tab[data-selected] {
+      border-block-end: 2px solid var(--accent);
+      padding-block-end: 0;
+    }
+  }
+
   .ui-tabpanel {
     padding-block-start: var(--space-5);
     outline: none;
@@ -510,6 +536,8 @@
   }
 
   .ui-progress-value {
+    flex: none;
+    white-space: nowrap;
     font-size: var(--text-sm);
     color: var(--ink-muted);
   }
@@ -681,8 +709,12 @@
   }
 
   /* Child combinator: a collapsed panel nested inside an open one stays still. No disclosure starts
-     expanded, and collapsing drops the rule, so the panel hides at once. */
+     expanded, and collapsing drops the rule, so the panel hides at once. Keyed on the open parent,
+     so a collapsed panel keeps its `hidden` and `display: flex` never unhides it. */
   .ui-disclosure[data-expanded] > .ui-disclosure-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
     animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
@@ -709,19 +741,26 @@
   .ui-card-head {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: baseline;
     justify-content: space-between;
     gap: var(--space-2) var(--space-3);
   }
 
+  /* The title takes the free width, so the actions stay at the end of its first line while both
+     fit. An icon-first action has no text baseline; such a card centres its head (Scan Result). */
   .ui-card-title {
+    flex: 1 1 0;
     font-size: var(--text-lg);
   }
 
+  /* Wrapped below the title, the auto margin puts the group at the end of its own line. */
   .ui-card-actions {
     display: flex;
+    flex: 0 1 auto;
     flex-wrap: wrap;
+    justify-content: flex-end;
     gap: var(--space-2);
+    margin-inline-start: auto;
   }
 
   .ui-card-body {
@@ -729,12 +768,6 @@
     flex-direction: column;
     gap: var(--space-3);
     min-inline-size: 0;
-  }
-
-  @container (max-width: 22rem) {
-    .ui-card-actions {
-      inline-size: 100%;
-    }
   }
 
   /* Status badge */
@@ -755,6 +788,11 @@
     flex: none;
     border-radius: 50%;
     background: var(--idle);
+  }
+
+  /* The badge takes its baseline from the label, not the empty dot, in baseline-aligned rows. */
+  .ui-badge-label {
+    align-self: baseline;
   }
 
   .ui-badge[data-tone="ok"] .ui-badge-dot {

@@ -41,15 +41,27 @@
     }
   }
 
+  /* The icon sits on the first line of a wrapped name. The name span is the baseline item, so the
+     card head lines the badge up with the name's text, not the icon's bottom edge. */
   .status-view .status-device-title {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--space-2);
   }
 
   .status-view .status-device-title .ui-icon {
     flex: none;
+    margin-block-start: calc((1lh - 22px) / 2);
     color: var(--ink-muted);
+  }
+
+  .status-view .status-device-title > span {
+    align-self: baseline;
+  }
+
+  /* A long badge drops under the name instead of squeezing it into many lines. */
+  .status-view .status-device .ui-card-title {
+    min-inline-size: min(100%, 12rem);
   }
 
   .status-view .status-error-title {
@@ -198,11 +210,17 @@
     color: var(--ink-muted);
   }
 
+  /* Copy is a quiet button: the negative margin lines its icon up with the address when it wraps,
+     and the wider column gap keeps the inline spacing as before. */
   .status-view .status-address {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-1) var(--space-3);
+    gap: var(--space-1) calc(var(--space-3) + var(--space-4) + 1px);
+  }
+
+  .status-view .status-address > .ui-button {
+    margin-inline-start: calc(-1 * (var(--space-4) + 1px));
   }
 
   .status-view .status-address code {

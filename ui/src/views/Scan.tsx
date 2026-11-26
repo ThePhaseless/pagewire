@@ -67,6 +67,11 @@ const stateTone: Record<ScanDTO["state"], Tone> = {
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 const formatTime = (iso: string) => dateFormat.format(Date.parse(iso));
+// Recent scans rows show no seconds, as on Status; their accessible names keep formatTime.
+const rowDateFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
 /** The effective config (the file's, else its last good version), refreshed on every file change. */
 function useConfig(etag: string | undefined, state: string | undefined) {
@@ -318,16 +323,27 @@ export function Scan() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
 
+  const running = scans.find((s) => s.state === "scanning");
   const busy =
     starting ||
     scanner?.state === "processing" ||
-    scans.some((s) => s.state === "scanning" && s.scanner === id);
+    (running !== undefined && running.scanner === id);
+  // pagewire runs one scan at a time, so another scanner's scan would end in a 409.
+  const otherRunning = id !== undefined && running !== undefined && running.scanner !== id;
   // Not `busy`: the button shows pending instead, so keyboard focus stays on it.
   const reportsRequired =
     caps !== undefined && required.every((k) => optionState(k, caps, "scanner").values.length > 0);
   const canScan = available && connected && reportsRequired;
   const shown = scans.find((s) => s.id === selectedId) ?? scans[0];
   const names = new Map(status?.scanners.map((s) => [s.id, s.name]));
+
+  // The other scanner's message says the same as the 409, whichever of the two arrived first.
+  const shownError = startError === t.busy && otherRunning && !busy ? null : startError;
+  // A 409 from a race is stale once the running scan ends.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the running scan's id is the trigger
+  useEffect(() => {
+    setStartError((e) => (e === t.busy ? null : e));
+  }, [running?.id]);
 
   function pick(scannerId: string) {
     choose(scannerId);
@@ -430,11 +446,14 @@ export function Scan() {
               />
             ))}
           {caps && !reportsRequired && <p className="scan-subtle">{t.options.cannotScan}</p>}
-          {startError && <InlineError>{startError}</InlineError>}
+          {shownError && <InlineError>{shownError}</InlineError>}
+          {otherRunning && !busy && (
+            <p className="scan-subtle">{t.otherScanRunning(names.get(running.scanner))}</p>
+          )}
           <div className="scan-submit">
             <Button
               variant="primary"
-              isDisabled={!canScan && !busy}
+              isDisabled={(!canScan || otherRunning) && !busy}
               isPending={busy}
               onPress={() => void start()}
             >
@@ -473,7 +492,9 @@ export function Scan() {
                     data-arrived={arrived(s.id) || undefined}
                   >
                     <span className="scan-row-main">
-                      <span className="tabular">{when}</span>
+                      <span className="tabular">
+                        {rowDateFormat.format(Date.parse(s.createdAt))}
+                      </span>
                       <span className="scan-subtle">
                         {t.history.from(
                           names.get(s.scanner),
@@ -486,22 +507,34 @@ export function Scan() {
                     <StatusBadge tone={stateTone[s.state]} pulse={s.state === "scanning"}>
                       {t.history.state[s.state]}
                     </StatusBadge>
-                    <Button
-                      variant="quiet"
-                      aria-label={t.history.showScan(when)}
-                      onPress={() => setSelectedId(s.id)}
-                    >
-                      {t.history.show}
-                    </Button>
-                    {s.state !== "scanning" && (
+                    <span className="scan-row-actions">
+                      {s.state === "completed" && (
+                        <LinkButton
+                          variant="quiet"
+                          href={api.scanDownloadUrl(s.id)}
+                          download
+                          aria-label={t.history.downloadScan(when)}
+                        >
+                          {t.history.download}
+                        </LinkButton>
+                      )}
                       <Button
                         variant="quiet"
-                        aria-label={t.history.deleteScan(when)}
-                        onPress={() => setConfirmId(s.id)}
+                        aria-label={t.history.showScan(when)}
+                        onPress={() => setSelectedId(s.id)}
                       >
-                        {strings.buttons.delete}
+                        {t.history.show}
                       </Button>
-                    )}
+                      {s.state !== "scanning" && (
+                        <Button
+                          variant="quiet"
+                          aria-label={t.history.deleteScan(when)}
+                          onPress={() => setConfirmId(s.id)}
+                        >
+                          {strings.buttons.delete}
+                        </Button>
+                      )}
+                    </span>
                   </li>
                 );
               })}
