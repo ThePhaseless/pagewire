@@ -403,51 +403,59 @@ for (const vp of viewports) {
     });
 
     test(`3. print: the job row reaches completed without a reload (${vp.name})`, async () => {
-      await scenario(main, vp, async (s) => {
-        const { page } = s;
-        await s.goto("/");
-        await heading(page, strings.nav.status).waitFor();
-        await nav(page, strings.nav.print).click();
-        await heading(page, strings.nav.print).waitFor();
-        // A marker that a reload would wipe, and a second SSE listener that proves the completed
-        // state arrives as a `job` event (useJobs() could also get it from a refetch).
-        await page.evaluate(
-          () =>
-            new Promise<void>((opened) => {
-              const w = window as unknown as { e2eMarker: boolean; e2eJob: Promise<void> };
-              w.e2eMarker = true;
-              const es = new EventSource("/api/v1/events");
-              w.e2eJob = new Promise<void>((resolve) =>
-                es.addEventListener("job", (e) => {
-                  const job = JSON.parse((e as MessageEvent).data);
-                  if (job.name === "sample.pdf" && job.state === "completed") {
-                    es.close();
-                    resolve();
-                  }
-                }),
-              );
-              es.onopen = () => opened();
-            }),
-        );
-        await page.locator("input[type=file]").setInputFiles(samplePdf);
-        await page.getByText(printStrings.files.ready).waitFor();
-        await page.getByRole("button", { name: printStrings.submit(1, 1, 1), exact: true }).click();
-        await page
-          .getByRole("listitem")
-          .filter({ hasText: "sample.pdf" })
-          .filter({ hasText: printStrings.jobs.state.completed })
-          .first()
-          .waitFor({ timeout: 60_000 });
-        await page.waitForFunction(
-          () => (window as unknown as { e2eJob: Promise<void> }).e2eJob.then(() => true),
-          null,
-          { timeout: 30_000 },
-        );
-        const kept = await page.evaluate(
-          () => (window as unknown as { e2eMarker?: boolean }).e2eMarker === true,
-        );
-        expect(kept).toBe(true);
-      });
+      await scenario(
+        main,
+        vp,
+        async (s) => {
+          const { page } = s;
+          await s.goto("/");
+          await heading(page, strings.nav.status).waitFor();
+          await nav(page, strings.nav.print).click();
+          await heading(page, strings.nav.print).waitFor();
+          // A marker that a reload would wipe, and a second SSE listener that proves the completed
+          // state arrives as a `job` event (useJobs() could also get it from a refetch).
+          await page.evaluate(
+            () =>
+              new Promise<void>((opened) => {
+                const w = window as unknown as { e2eMarker: boolean; e2eJob: Promise<void> };
+                w.e2eMarker = true;
+                const es = new EventSource("/api/v1/events");
+                w.e2eJob = new Promise<void>((resolve) =>
+                  es.addEventListener("job", (e) => {
+                    const job = JSON.parse((e as MessageEvent).data);
+                    if (job.name === "sample.pdf" && job.state === "completed") {
+                      es.close();
+                      resolve();
+                    }
+                  }),
+                );
+                es.onopen = () => opened();
+              }),
+          );
+          await page.locator("input[type=file]").setInputFiles(samplePdf);
+          await page.getByText(printStrings.files.ready).waitFor();
+          await page
+            .getByRole("button", { name: printStrings.submit(1, 1, 1), exact: true })
+            .click();
+          await page
+            .getByRole("listitem")
+            .filter({ hasText: "sample.pdf" })
+            .filter({ hasText: printStrings.jobs.state.completed })
+            .first()
+            .waitFor({ timeout: 60_000 });
+          await page.waitForFunction(
+            () => (window as unknown as { e2eJob: Promise<void> }).e2eJob.then(() => true),
+            null,
+            { timeout: 30_000 },
+          );
+          const kept = await page.evaluate(
+            () => (window as unknown as { e2eMarker?: boolean }).e2eMarker === true,
+          );
+          expect(kept).toBe(true);
+        },
+        // The one e2e path that runs with motion on.
+        { reducedMotion: "no-preference" },
+      );
     });
 
     test(`12. print: a PNG is converted, a .docx gets help, the button counts files (${vp.name})`, async () => {

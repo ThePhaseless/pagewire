@@ -90,6 +90,74 @@
     object-fit: contain;
   }
 
+  /* The one authored moment: a page that arrives while you watch is uncovered from top to bottom
+     behind a thin process-blue line, the scanner's light passing over the sheet. */
+  .scan-view .scan-thumbs li[data-arrived] {
+    animation: none;
+  }
+
+  /* A cover in the empty thumbnail's colour is clipped away from the top, not the image itself:
+     Chrome holds back a lazy image that is fully clipped, so it would load only after the reveal.
+     At rest the cover is clipped to nothing. */
+  .scan-view .scan-thumbs li[data-arrived] .scan-thumb::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: var(--paper-sunken);
+    clip-path: inset(100% 0 0 0);
+    animation: scan-reveal var(--dur-reveal) var(--ease-out);
+  }
+
+  /* Two animations: one move with the reveal's duration and easing keeps the line on the clip
+     edge, and a separate linear fade lets it go at the end without re-easing the move. */
+  .scan-view .scan-thumbs li[data-arrived] .scan-thumb::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent calc(100% - 2px), var(--accent) 0);
+    opacity: 0;
+    animation:
+      scan-light var(--dur-reveal) var(--ease-out),
+      scan-light-fade var(--dur-reveal) var(--ease-linear);
+  }
+
+  /* The cover's top edge moves down with the line: both use --dur-reveal and --ease-out. */
+  @keyframes scan-reveal {
+    from {
+      clip-path: inset(0 0 0 0);
+    }
+  }
+
+  @keyframes scan-light {
+    from {
+      translate: 0 -100%;
+    }
+  }
+
+  @keyframes scan-light-fade {
+    from,
+    80% {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+
+  /* Reduced motion: the page fades in like any arrival; no reveal and no line. */
+  @media (prefers-reduced-motion: reduce) {
+    .scan-view .scan-thumbs li[data-arrived] {
+      animation: ui-arrive var(--dur-arrive) var(--ease-out);
+    }
+
+    .scan-view .scan-thumbs li[data-arrived] .scan-thumb::before,
+    .scan-view .scan-thumbs li[data-arrived] .scan-thumb::after {
+      content: none;
+    }
+  }
+
   .scan-view .scan-thumb-label {
     position: absolute;
     inset-block-end: var(--space-1);

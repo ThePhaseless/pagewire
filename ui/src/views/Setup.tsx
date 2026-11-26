@@ -38,6 +38,7 @@ import {
   type StatusScanner,
   type USBDevice,
 } from "../gen/api";
+import { useHasChanged } from "../lib/motion";
 import {
   type FieldKind,
   type OptionValue,
@@ -428,6 +429,9 @@ export function Setup({
     if (flow !== "form") document.querySelector<HTMLElement>(".setup-view h1")?.focus();
   }, [flow]);
 
+  // Before the early returns below, so the hook count never changes with the flow.
+  const moved = useHasChanged(step);
+
   if (flow === "applying") return <Applying status={status} ids={allIds} timedOut={timedOut} />;
   if (flow === "defaults")
     return (
@@ -585,80 +589,82 @@ export function Setup({
         documentTitle={s.stepTitle(idx + 1, PROGRESS.length, s.steps[step])}
       />
 
-      {step === "devices" && (
-        <Devices
-          setup={setup}
-          status={status}
-          all={all}
-          draft={draft}
-          change={change}
-          detect={detect}
-          onDetect={askDetect}
-        />
-      )}
-      {step === "names" && (
-        <>
-          {!adding && (
-            <Card>
-              <TextField
-                label={s.names.titleLabel}
-                description={s.names.titleHint}
-                value={title}
-                onChange={(t) => change((d) => ({ ...d, title: t }))}
-                errorMessage={tried && !titleOk ? s.names.nameInvalid : undefined}
-                isRequired
-              />
-            </Card>
-          )}
-          {chosen.length === 0 && <p>{s.names.nothingChosen}</p>}
-          {chosen.map((c) => (
-            <Card
-              key={c.ek}
-              title={
-                c.role === "printer"
-                  ? s.names.printerTitle(c.entry.name)
-                  : s.names.scannerTitle(c.entry.name)
-              }
-            >
-              <TextField
-                label={s.names.nameLabel}
-                description={c.role === "printer" ? s.names.printerHint : s.names.scannerHint}
-                value={c.entry.name}
-                onChange={(name) => edit(c.ek, { name })}
-                errorMessage={tried ? nameError(c) : undefined}
-                isRequired
-              />
-              <TextField
-                label={s.names.locationLabel}
-                description={s.names.locationHint}
-                value={c.entry.location}
-                onChange={(location) => edit(c.ek, { location })}
-                errorMessage={tried && !locationOk(c) ? s.names.locationInvalid : undefined}
-              />
-            </Card>
-          ))}
-        </>
-      )}
-      {step === "drivers" && (
-        <Drivers
-          setup={setup}
-          draft={draft}
-          chosen={chosen}
-          accepted={draft.accepted ?? base.licenses.acceptedEulas}
-          edit={edit}
-          setAccepted={(accepted) => change((d) => ({ ...d, accepted }))}
-        />
-      )}
-      {step === "review" && (
-        <Review
-          setup={setup}
-          draft={draft}
-          all={all}
-          chosen={chosen}
-          title={adding ? undefined : title}
-          accepted={draft.accepted ?? base.licenses.acceptedEulas}
-        />
-      )}
+      <div key={step} className="setup-step" data-arrived={moved || undefined}>
+        {step === "devices" && (
+          <Devices
+            setup={setup}
+            status={status}
+            all={all}
+            draft={draft}
+            change={change}
+            detect={detect}
+            onDetect={askDetect}
+          />
+        )}
+        {step === "names" && (
+          <>
+            {!adding && (
+              <Card>
+                <TextField
+                  label={s.names.titleLabel}
+                  description={s.names.titleHint}
+                  value={title}
+                  onChange={(t) => change((d) => ({ ...d, title: t }))}
+                  errorMessage={tried && !titleOk ? s.names.nameInvalid : undefined}
+                  isRequired
+                />
+              </Card>
+            )}
+            {chosen.length === 0 && <p>{s.names.nothingChosen}</p>}
+            {chosen.map((c) => (
+              <Card
+                key={c.ek}
+                title={
+                  c.role === "printer"
+                    ? s.names.printerTitle(c.entry.name)
+                    : s.names.scannerTitle(c.entry.name)
+                }
+              >
+                <TextField
+                  label={s.names.nameLabel}
+                  description={c.role === "printer" ? s.names.printerHint : s.names.scannerHint}
+                  value={c.entry.name}
+                  onChange={(name) => edit(c.ek, { name })}
+                  errorMessage={tried ? nameError(c) : undefined}
+                  isRequired
+                />
+                <TextField
+                  label={s.names.locationLabel}
+                  description={s.names.locationHint}
+                  value={c.entry.location}
+                  onChange={(location) => edit(c.ek, { location })}
+                  errorMessage={tried && !locationOk(c) ? s.names.locationInvalid : undefined}
+                />
+              </Card>
+            ))}
+          </>
+        )}
+        {step === "drivers" && (
+          <Drivers
+            setup={setup}
+            draft={draft}
+            chosen={chosen}
+            accepted={draft.accepted ?? base.licenses.acceptedEulas}
+            edit={edit}
+            setAccepted={(accepted) => change((d) => ({ ...d, accepted }))}
+          />
+        )}
+        {step === "review" && (
+          <Review
+            setup={setup}
+            draft={draft}
+            all={all}
+            chosen={chosen}
+            title={adding ? undefined : title}
+            accepted={draft.accepted ?? base.licenses.acceptedEulas}
+          />
+        )}
+      </div>
 
       {conflict && (
         <InlineError

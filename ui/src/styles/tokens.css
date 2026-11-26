@@ -85,6 +85,18 @@
     --dur-fast: 120ms;
     --dur: 180ms;
     --dur-slow: 240ms;
+    /* Something new landing: a live row, a toast, an opened panel. Kept under reduced motion as a fade. */
+    --dur-arrive: 240ms;
+    /* The one authored moment, a scanned page uncovered. Kept under reduced motion as a fade. */
+    --dur-reveal: 640ms;
+    /* One breath of the pulsing status dot (a state loop). */
+    --dur-breathe: 1.8s;
+    /* One pass of the indeterminate progress bar. */
+    --dur-sweep: 1.4s;
+    /* How far an arrival travels; 0 under reduced motion, so arrivals only fade. */
+    --rise: 6px;
+    /* For fades that must not ease, such as the scan line fading out. */
+    --ease-linear: linear;
 
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
@@ -136,6 +148,7 @@
       --dur-fast: 0ms;
       --dur: 0ms;
       --dur-slow: 0ms;
+      --rise: 0px;
     }
   }
 }

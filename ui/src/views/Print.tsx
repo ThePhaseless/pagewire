@@ -3,13 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Text } from "react-aria-components";
 import { api, problemMessage, uploadPrint } from "../api/client";
-import {
-  useConnected,
-  useEnabledPrinters,
-  useJobs,
-  useNothingFound,
-  useStatus,
-} from "../api/events";
+import { useConnected, useEnabledPrinters, useNothingFound, useStatus } from "../api/events";
 import { DevicePicker } from "../components/DevicePicker";
 import { OptionField } from "../components/OptionField";
 import {
@@ -32,6 +26,7 @@ import {
 import type { Config, Job, PrinterCaps, PrintOptions } from "../gen/api";
 import { useDeviceChoice } from "../lib/devices";
 import { optionLabel, warningText } from "../lib/labels";
+import { useJobsWithArrivals } from "../lib/motion";
 import {
   copiesLimit,
   type OptionGroup,
@@ -173,7 +168,7 @@ function usePrintConfig(etag: string | undefined, state: string | undefined) {
 }
 
 function JobList({ printerId, available }: { printerId: string | undefined; available: boolean }) {
-  const { jobs, error } = useJobs(printerId);
+  const { jobs, error, arrived } = useJobsWithArrivals(printerId);
   const [canceling, setCanceling] = useState<Set<number>>(new Set());
 
   async function cancel(job: Job) {
@@ -201,7 +196,7 @@ function JobList({ printerId, available }: { printerId: string | undefined; avai
       {jobs.length > 0 ? (
         <ul className="print-list">
           {jobs.map((j) => (
-            <li key={j.id} className="print-row">
+            <li key={j.id} className="print-row" data-arrived={arrived(j.id) || undefined}>
               <span className="print-row-main">
                 <span className="print-name">{j.name}</span>
                 <span className="print-subtle tabular">{formatTime(j.createdAt)}</span>

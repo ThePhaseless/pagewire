@@ -766,4 +766,70 @@ describe("Print view", () => {
     expect(screen.getAllByText("boarding-pass.pdf").length).toBe(1);
     expect(screen.queryByRole("button", { name: "Cancel boarding-pass.pdf" })).toBeNull();
   });
+
+  test("job rows from the first load do not arrive; a new job from an event or from Print does", async () => {
+    const old: Job = {
+      id: 7,
+      printer: "hp",
+      name: "old.pdf",
+      state: "completed",
+      reasons: [],
+      createdAt: "2026-11-24T17:00:00Z",
+    };
+    jobs = [old];
+    const { upload, uploads } = fakeUpload();
+    const { container } = await renderPrint(ready, upload);
+    await waitFor(() => expect(screen.getByText("old.pdf")).toBeTruthy());
+    expect(row("old.pdf").hasAttribute("data-arrived")).toBe(false);
+
+    emit("job", { ...old, id: 8, name: "lan.ps", state: "pending" });
+    expect(row("lan.ps").hasAttribute("data-arrived")).toBe(true);
+    // A state change of a job already listed is not an arrival.
+    emit("job", { ...old, state: "aborted" });
+    expect(row("old.pdf").hasAttribute("data-arrived")).toBe(false);
+
+    await pick(container, [new File(["%PDF-1.7\n"], "mine.pdf")]);
+    await waitFor(() => expect(printButton().hasAttribute("disabled")).toBe(false));
+    await press(printButton());
+    await act(async () => uploads[0]?.done());
+    // The upload returns job 1; it reaches the list through the job event that follows.
+    emit("job", { ...old, id: 1, name: "mine.pdf", state: "pending" });
+    const jobRow = within(container.querySelector(".print-jobs") as HTMLElement)
+      .getByText("mine.pdf")
+      .closest("li") as HTMLElement;
+    expect(jobRow.hasAttribute("data-arrived")).toBe(true);
+  });
+
+  test("switching printers takes a fresh first load as the baseline for each", async () => {
+    const job = (id: number, p: string, name: string): Job => ({
+      id,
+      printer: p,
+      name,
+      state: "completed",
+      reasons: [],
+      createdAt: "2026-11-24T17:00:00Z",
+    });
+    jobs = [job(1, "hp", "a1.pdf"), job(2, "samsung", "b1.pdf")];
+    await renderPrint(both);
+    await waitFor(() => expect(screen.getByText("a1.pdf")).toBeTruthy());
+    expect(row("a1.pdf").hasAttribute("data-arrived")).toBe(false);
+
+    await press(screen.getByRole("radio", { name: /^Samsung SCX-4300/ }));
+    await waitFor(() => expect(screen.getByText("b1.pdf")).toBeTruthy());
+    expect(row("b1.pdf").hasAttribute("data-arrived")).toBe(false);
+
+    // A new job on the HP while the Samsung is shown: the HP's next first load includes it.
+    const a2 = job(3, "hp", "a2.pdf");
+    jobs.push(a2);
+    emit("job", a2);
+    expect(screen.queryByText("a2.pdf")).toBeNull();
+
+    await press(screen.getByRole("radio", { name: /^HP OfficeJet/ }));
+    await waitFor(() => expect(screen.getByText("a2.pdf")).toBeTruthy());
+    expect(document.querySelectorAll("[data-arrived]").length).toBe(0);
+
+    emit("job", job(4, "hp", "a3.pdf"));
+    expect(row("a3.pdf").hasAttribute("data-arrived")).toBe(true);
+    expect(row("a1.pdf").hasAttribute("data-arrived")).toBe(false);
+  });
 });

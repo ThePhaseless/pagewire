@@ -212,16 +212,22 @@ export class Session {
 
   /**
    * Waits for the steady state axe should judge: running CSS transitions (a colour-scheme switch
-   * animates colours) and react-aria's live announcements, which it removes after 7 s and which can
-   * still point at a button that has unmounted. Both are waited out, not excluded: whatever is
-   * still there after the wait is checked.
+   * animates colours), every animation with a finite end (arrival fades still run under reduced
+   * motion, and a mid-fade frame can fail contrast) and react-aria's live announcements, which it
+   * removes after 7 s and which can still point at a button that has unmounted. All are waited
+   * out, not excluded: whatever is still there after the wait is checked. Infinite animations
+   * (spinners) are left running.
    */
   private async settle() {
     await this.page.evaluate(() =>
       Promise.all(
         document
           .getAnimations()
-          .filter((a) => a instanceof CSSTransition)
+          .filter(
+            (a) =>
+              a instanceof CSSTransition ||
+              Number.isFinite(a.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY),
+          )
           .map((a) => a.finished.catch(() => {})),
       ),
     );
@@ -298,6 +304,7 @@ export async function scenario(
     viewport: { width: viewport.width, height: viewport.height },
     colorScheme: "light",
     acceptDownloads: true,
+    reducedMotion: "reduce",
     ...extra,
   });
   context.setDefaultTimeout(30_000);

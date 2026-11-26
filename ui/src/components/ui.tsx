@@ -2,6 +2,7 @@
 // Components carry no user-visible copy of their own: labels come from props or strings.ts.
 import type { ReactNode } from "react";
 import * as RAC from "react-aria-components";
+import { useHasChanged } from "../lib/motion";
 import { strings } from "../strings";
 import "./ui.css";
 
@@ -411,7 +412,11 @@ export function ProgressBar({ label, showValue = true, className, ...props }: Pr
             <div
               className="ui-progress-fill"
               data-indeterminate={isIndeterminate || undefined}
-              style={isIndeterminate ? undefined : { inlineSize: `${percentage ?? 0}%` }}
+              style={
+                isIndeterminate
+                  ? undefined
+                  : { transform: `translateX(${(percentage ?? 0) - 100}%)` }
+              }
             />
           </div>
         </>
@@ -439,7 +444,10 @@ export function Meter({ label, color, className, ...props }: MeterProps) {
           <div className="ui-progress-track">
             <div
               className="ui-progress-fill"
-              style={{ inlineSize: `${percentage}%`, ...(color ? { background: color } : {}) }}
+              style={{
+                transform: `translateX(${percentage - 100}%)`,
+                ...(color ? { background: color } : {}),
+              }}
             />
           </div>
         </>
@@ -572,15 +580,32 @@ export function StatusBadge({
   tone,
   children,
   pulse = false,
+  animate = true,
 }: {
   tone: Tone;
   children: ReactNode;
   pulse?: boolean;
+  /** False while the tone is a placeholder; the badge stamps only on changes after the first armed render. */
+  animate?: boolean;
 }) {
+  // A tone change remounts the dot and label (new keys), so their keyframes play again.
+  const changed = useHasChanged(tone, animate);
   return (
     <span className="ui-badge" data-tone={tone}>
-      <span className="ui-badge-dot" data-pulse={pulse || undefined} aria-hidden="true" />
-      <span className="ui-badge-label">{children}</span>
+      <span
+        key={changed ? `dot-${tone}` : undefined}
+        className="ui-badge-dot"
+        data-changed={changed || undefined}
+        data-pulse={pulse || undefined}
+        aria-hidden="true"
+      />
+      <span
+        key={changed ? `label-${tone}` : undefined}
+        className="ui-badge-label"
+        data-changed={changed || undefined}
+      >
+        {children}
+      </span>
     </span>
   );
 }

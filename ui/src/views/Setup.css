@@ -8,6 +8,13 @@
     margin-inline: auto;
   }
 
+  /* The current step's body, re-keyed per step so it fades in (the [data-arrived] rule). */
+  .setup-view .setup-step {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
   .setup-view .ui-page-header {
     margin-block-end: 0;
   }

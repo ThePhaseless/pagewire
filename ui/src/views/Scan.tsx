@@ -136,6 +136,8 @@ function useScans() {
   const [attempt, setAttempt] = useState(0);
   // The last state seen per scan id, to tell a scan finishing from one loaded finished.
   const seen = useRef(new Map<string, ScanDTO["state"]>());
+  // Ids of this mount's first successful load: those rows were there with the page, not arrivals.
+  const firstLoad = useRef<ReadonlySet<string> | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is a refetch trigger
   useEffect(() => {
@@ -145,6 +147,7 @@ function useScans() {
         (list) => {
           if (!live) return;
           for (const s of list) seen.current.set(s.id, s.state);
+          firstLoad.current ??= new Set(list.map((s) => s.id));
           setScans(mergeScans([], list));
           setError(null);
         },
@@ -185,18 +188,21 @@ function useScans() {
     setError(null);
     setAttempt((n) => n + 1);
   };
-  return { scans, setScans, add, error, retry };
+  const arrived = (id: string) => firstLoad.current !== null && !firstLoad.current.has(id);
+  return { scans, setScans, add, error, retry, arrived };
 }
 
 function Thumbnails({ scan }: { scan: ScanDTO }) {
   const [preview, setPreview] = useState<number | null>(null);
+  // Pages already there when this scan is shown; later ones arrive while you watch and reveal.
+  const firstPages = useRef(scan.pages);
   if (scan.pages === 0) return null;
   const pages = Array.from({ length: scan.pages }, (_, i) => i + 1);
   return (
     <>
       <ul className="scan-thumbs">
         {pages.map((n) => (
-          <li key={n}>
+          <li key={n} data-arrived={n > firstPages.current || undefined}>
             <AriaButton
               className="scan-thumb"
               aria-label={t.result.openPage(n)}
@@ -294,7 +300,7 @@ export function Scan() {
   const config = useConfig(status?.config.etag, status?.config.state);
   const { caps: reported, error: capsError, retry: retryCaps } = useCaps(id, available);
   const caps = reported && withDuplex(reported);
-  const { scans, setScans, add, error: listError, retry: retryList } = useScans();
+  const { scans, setScans, add, error: listError, retry: retryList, arrived } = useScans();
   const configured = config?.scanners.find((x) => x.id === id)?.defaults;
 
   // Choices are kept per scanner, so switching scanners recomputes every control from its own.
@@ -460,7 +466,12 @@ export function Scan() {
               {scans.map((s) => {
                 const when = formatTime(s.createdAt);
                 return (
-                  <li key={s.id} className="scan-row" data-current={s === shown || undefined}>
+                  <li
+                    key={s.id}
+                    className="scan-row"
+                    data-current={s === shown || undefined}
+                    data-arrived={arrived(s.id) || undefined}
+                  >
                     <span className="scan-row-main">
                       <span className="tabular">{when}</span>
                       <span className="scan-subtle">

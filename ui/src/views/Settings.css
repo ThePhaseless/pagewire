@@ -77,6 +77,8 @@
     margin-block-start: var(--space-4);
     padding-inline-start: var(--space-4);
     border-inline-start: 2px solid var(--rule);
+    /* The open set starts empty, so this plays only when an editor opens (Edit or a 422). */
+    animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
   .settings-view .settings-option-group {
@@ -184,10 +186,22 @@
     z-index: 20;
     inset-block-end: max(var(--space-3), var(--safe-bottom));
     padding: var(--space-3) var(--space-4);
+    /* Transparent, so the content sits where it did; ::before draws the visible ring. */
+    border: 1px solid transparent;
+  }
+
+  /* The bar's sheet fades in behind Reset and Save, which are often already on screen and must not
+     blink. Opacity only: a translate on a bar at the page bottom can add scroll height. */
+  .settings-view .settings-actions[data-sticky]::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
     border: 1px solid var(--rule);
     border-radius: var(--radius-sheet);
     background: var(--paper-raised);
     box-shadow: var(--shadow-float);
+    animation: ui-fade-in var(--dur-arrive) var(--ease-out);
   }
 
   /* Focused fields scroll clear of the bar, and toasts sit above it. */

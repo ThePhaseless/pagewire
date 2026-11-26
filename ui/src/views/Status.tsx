@@ -1,8 +1,8 @@
 // The Status dashboard: one card per enabled printer and scanner, with recent jobs, recent scans
 // and the system state beside them.
-import { type ReactElement, useContext, useEffect, useState } from "react";
+import { type ReactElement, useContext, useEffect, useRef, useState } from "react";
 import { api, problemMessage } from "../api/client";
-import { EventsContext, useJobs, useStatus } from "../api/events";
+import { EventsContext, useStatus } from "../api/events";
 import {
   Button,
   Card,
@@ -36,6 +36,7 @@ import type {
 } from "../gen/api";
 import { enabled } from "../lib/devices";
 import { type DeviceRole, warningText } from "../lib/labels";
+import { useJobsWithArrivals } from "../lib/motion";
 import { strings } from "../strings";
 import { statusStrings as t } from "./Status.strings";
 import "./Status.css";
@@ -502,7 +503,7 @@ function Connect(props: ConnectProps) {
 
 /** One printer's latest jobs; `named` adds the printer's name for a card listing several. */
 function PrinterJobs({ printer, named }: { printer: StatusPrinter; named: boolean }) {
-  const { jobs, error } = useJobs(printer.id);
+  const { jobs, error, arrived } = useJobsWithArrivals(printer.id);
   const recent = jobs.slice(0, RECENT);
   const body = (
     <>
@@ -510,7 +511,7 @@ function PrinterJobs({ printer, named }: { printer: StatusPrinter; named: boolea
       {recent.length > 0 ? (
         <ul className="status-list">
           {recent.map((j) => (
-            <li key={j.id}>
+            <li key={j.id} data-arrived={arrived(j.id) || undefined}>
               <span className="status-row">
                 <span className="status-job-name">{j.name}</span>
                 <StatusBadge tone={jobTone[j.state]} pulse={j.state === "processing"}>
@@ -568,12 +569,15 @@ function useRecentScans() {
   const store = useContext(EventsContext);
   const [scans, setScans] = useState<Scan[]>([]);
   const [error, setError] = useState<unknown>(null);
+  // Ids of this mount's first successful load: those rows were there with the page, not arrivals.
+  const firstLoad = useRef<ReadonlySet<string> | null>(null);
   useEffect(() => {
     let live = true;
     const load = () =>
       api.getScans().then(
         (list) => {
           if (!live) return;
+          firstLoad.current ??= new Set(list.map((s) => s.id));
           setScans(newestScans(list));
           setError(null);
         },
@@ -592,11 +596,15 @@ function useRecentScans() {
       offScan();
     };
   }, [store]);
-  return { scans, error };
+  return {
+    scans,
+    error,
+    arrived: (id: string) => firstLoad.current !== null && !firstLoad.current.has(id),
+  };
 }
 
 function ScansCard({ scanners }: { scanners: StatusScanner[] }) {
-  const { scans, error } = useRecentScans();
+  const { scans, error, arrived } = useRecentScans();
   const nameOf = (id: string) => scanners.find((s) => s.id === id)?.name ?? id;
   return (
     <Card title={t.scans.title}>
@@ -605,7 +613,7 @@ function ScansCard({ scanners }: { scanners: StatusScanner[] }) {
         <>
           <ul className="status-list">
             {scans.map((s) => (
-              <li key={s.id}>
+              <li key={s.id} data-arrived={arrived(s.id) || undefined}>
                 <span className="status-row">
                   <span className="status-job-name">{nameOf(s.scanner)}</span>
                   <StatusBadge tone={scanTone[s.state]} pulse={s.state === "scanning"}>

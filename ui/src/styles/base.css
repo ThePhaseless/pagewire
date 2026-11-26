@@ -415,6 +415,8 @@
   .app-banner[data-tone="busy"] {
     border-color: var(--busy);
     background: var(--busy-tint);
+    /* Only the offline banner arrives: it shows after 2.5 s without the stream, never at load. */
+    animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
   .app-banner[data-tone="busy"] .app-banner-icon {

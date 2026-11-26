@@ -671,3 +671,68 @@ describe("Scan view", () => {
     expect(await screen.findByRole("link", { name: "Download PDF" })).toBeTruthy();
   });
 });
+
+describe("Scan view motion", () => {
+  const NEW = "00000000000000aa";
+  const rows = () => Array.from(document.querySelectorAll<HTMLElement>("li.scan-row"));
+  const arrivedRows = () => rows().filter((r) => r.hasAttribute("data-arrived"));
+  const thumbs = () => Array.from(document.querySelectorAll<HTMLElement>(".scan-thumbs li"));
+  const arrivedThumbs = () =>
+    thumbs()
+      .filter((li) => li.hasAttribute("data-arrived"))
+      .map((li) => li.querySelector("img")?.alt);
+
+  test("rows from the first load carry no arrival marker", async () => {
+    scans = [scan(), scan({ id: OLD, createdAt: "2026-11-23T09:00:00Z" })];
+    await renderScan(ready);
+    await waitFor(() => expect(rows().length).toBe(2));
+    expect(arrivedRows()).toEqual([]);
+  });
+
+  test("a scan event for a new scan marks only that row", async () => {
+    scans = [scan({ id: OLD, createdAt: "2026-11-23T09:00:00Z" })];
+    await renderScan(ready);
+    await waitFor(() => expect(rows().length).toBe(1));
+    await emit("scan", scan({ id: NEW, createdAt: "2026-11-25T09:00:00Z" }));
+    expect(rows().length).toBe(2);
+    expect(arrivedRows()).toEqual([rows()[0] as HTMLElement]);
+    // A later state change of a loaded scan is not an arrival.
+    await emit("scan", scan({ id: OLD, createdAt: "2026-11-23T09:00:00Z", pages: 3 }));
+    expect(arrivedRows().length).toBe(1);
+  });
+
+  test("pages shown at mount do not reveal; a page that arrives later does", async () => {
+    scans = [scan({ pages: 2 })];
+    const view = await renderScan(ready);
+    await waitFor(() => expect(thumbs().length).toBe(2));
+    expect(arrivedThumbs()).toEqual([]);
+    cleanup();
+    view.unmount();
+
+    scans = [scan({ state: "scanning", pages: 1 })];
+    await renderScan(ready);
+    await waitFor(() => expect(thumbs().length).toBe(1));
+    await emit("scan", scan({ state: "scanning", pages: 2 }));
+    expect(arrivedThumbs()).toEqual(["Page 2"]);
+  });
+
+  test("pages of a scan started here reveal as they arrive", async () => {
+    await renderScan(ready);
+    await waitFor(() => expect(disabled(scanButton())).toBe(false));
+    await press(scanButton());
+    // The user's own new scan was not in the first load.
+    expect(arrivedRows().length).toBe(1);
+    await emit("scan", scan({ state: "scanning", pages: 1 }));
+    await emit("scan", scan({ state: "scanning", pages: 2 }));
+    expect(arrivedThumbs()).toEqual(["Page 1", "Page 2"]);
+  });
+
+  test("an older scan chosen with Show renders its pages without the reveal", async () => {
+    scans = [scan({ pages: 1 }), scan({ id: OLD, createdAt: "2026-11-23T09:00:00Z", pages: 2 })];
+    await renderScan(ready);
+    await waitFor(() => expect(rows().length).toBe(2));
+    await press(within(rows()[1] as HTMLElement).getByRole("button", { name: /^Show scan from/ }));
+    expect(thumbs().length).toBe(2);
+    expect(arrivedThumbs()).toEqual([]);
+  });
+});

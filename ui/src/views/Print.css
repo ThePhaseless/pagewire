@@ -66,6 +66,15 @@
 
   .print-view .print-drop-icon {
     color: var(--ink-muted);
+    transition:
+      translate var(--dur) var(--ease-out),
+      color var(--dur) var(--ease-out);
+  }
+
+  /* The icon lifts while a file is dragged over the zone; the zone itself stays still. */
+  .print-view .ui-dropzone[data-drop-target] .print-drop-icon {
+    translate: 0 calc(var(--rise) * -1);
+    color: var(--accent-text);
   }
 
   .print-view .print-drop-label {
@@ -103,6 +112,8 @@
   .print-view .print-files .print-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
+    /* File rows exist only after the user adds a file, so their mount is an arrival. */
+    animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
   /* In wide cards, job rows share one set of columns (subgrid), so badges and Cancel line up from

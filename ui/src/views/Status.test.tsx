@@ -859,3 +859,98 @@ describe("Status view", () => {
     expect(within(list).getAllByRole("listitem").length).toBe(1);
   });
 });
+
+describe("Status arrivals", () => {
+  const at = "2026-11-24T17:00:00+01:00";
+  const job = (id: number, name: string, state: Job["state"] = "pending"): Job => ({
+    id,
+    printer: "hp",
+    name,
+    state,
+    reasons: [],
+    createdAt: at,
+  });
+  const scanOf = (id: string, scannerId: string, createdAt = at): Scan => ({
+    id,
+    scanner: scannerId,
+    state: "completed",
+    createdAt,
+    pages: 1,
+    format: "pdf",
+    settings: {
+      scanner: scannerId,
+      source: "platen",
+      resolution: 300,
+      colorMode: "color",
+      format: "pdf",
+    },
+    error: null,
+  });
+  const rowOf = (text: string) => screen.getByText(text).closest("li") as HTMLElement;
+  // The scanner's name is also its device card's title, so scan rows are looked up in their card.
+  const scanRow = (text: string) =>
+    within(card("Recent scans")).getByText(text).closest("li") as HTMLElement;
+  const arrivedRows = () => document.querySelectorAll("[data-arrived]").length;
+
+  test("rows from the first load do not arrive; a job event's new row does", async () => {
+    jobsByPrinter = { hp: [job(1, "old.pdf")] };
+    scans = [scanOf("s1", "hp-scanner")];
+    await renderWith(status({ printers: [printer()], scanners: [scanner()] }));
+    await waitFor(() => expect(rowOf("old.pdf")).toBeTruthy());
+    await waitFor(() => expect(scanRow("HP OfficeJet Pro scanner")).toBeTruthy());
+    expect(arrivedRows()).toBe(0);
+
+    emit("job", job(2, "new.pdf"));
+    await waitFor(() => expect(rowOf("new.pdf").hasAttribute("data-arrived")).toBe(true));
+    expect(rowOf("old.pdf").hasAttribute("data-arrived")).toBe(false);
+    expect(arrivedRows()).toBe(1);
+  });
+
+  test("a state change of a loaded job does not arrive", async () => {
+    jobsByPrinter = { hp: [job(1, "old.pdf")] };
+    await renderWith(status({ printers: [printer()] }));
+    await waitFor(() => expect(rowOf("old.pdf")).toBeTruthy());
+    emit("job", job(1, "old.pdf", "completed"));
+    await waitFor(() => expect(within(rowOf("old.pdf")).getByText("Sent to printer")).toBeTruthy());
+    expect(arrivedRows()).toBe(0);
+  });
+
+  test("a scan event's new row arrives, the loaded one does not", async () => {
+    scans = [scanOf("s1", "hp-scanner")];
+    await renderWith(status({ scanners: [scanner()] }));
+    await waitFor(() => expect(scanRow("HP OfficeJet Pro scanner")).toBeTruthy());
+    emit("scan", scanOf("s2", "other", "2026-11-24T18:00:00+01:00"));
+    await waitFor(() => expect(scanRow("other").hasAttribute("data-arrived")).toBe(true));
+    expect(scanRow("HP OfficeJet Pro scanner").hasAttribute("data-arrived")).toBe(false);
+    expect(arrivedRows()).toBe(1);
+  });
+
+  test("a fresh mount takes a fresh baseline", async () => {
+    jobsByPrinter = { hp: [job(1, "old.pdf")] };
+    scans = [scanOf("s1", "hp-scanner")];
+    await renderWith(status({ printers: [printer()], scanners: [scanner()] }));
+    await waitFor(() => expect(rowOf("old.pdf")).toBeTruthy());
+    emit("job", job(2, "new.pdf"));
+    emit("scan", scanOf("s2", "other", "2026-11-24T18:00:00+01:00"));
+    await waitFor(() => expect(arrivedRows()).toBe(2));
+
+    cleanup();
+    jobsByPrinter = { hp: [job(2, "new.pdf"), job(1, "old.pdf")] };
+    scans = [scanOf("s2", "other", "2026-11-24T18:00:00+01:00"), scanOf("s1", "hp-scanner")];
+    await renderWith(status({ printers: [printer()], scanners: [scanner()] }));
+    await waitFor(() => expect(rowOf("new.pdf")).toBeTruthy());
+    await waitFor(() => expect(scanRow("other")).toBeTruthy());
+    expect(arrivedRows()).toBe(0);
+  });
+
+  test("a job that shows up only through a refetch arrives", async () => {
+    jobsByPrinter = { hp: [job(1, "old.pdf")] };
+    await renderWith(status({ printers: [printer()] }));
+    await waitFor(() => expect(rowOf("old.pdf")).toBeTruthy());
+    // IPP jobs arrive this way: the printer's state changes and the list is fetched again.
+    jobsByPrinter = { hp: [job(2, "ipp.pdf", "processing"), job(1, "old.pdf")] };
+    emit("status", status({ printers: [printer({ state: "processing" })] }));
+    await waitFor(() => expect(rowOf("ipp.pdf").hasAttribute("data-arrived")).toBe(true));
+    expect(rowOf("old.pdf").hasAttribute("data-arrived")).toBe(false);
+  });
+});

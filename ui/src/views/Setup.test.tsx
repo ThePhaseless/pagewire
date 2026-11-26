@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createEventStore, type EventStore, EventsContext } from "../api/events";
 import { EulaAccept } from "../components/EulaAccept";
@@ -563,137 +563,170 @@ async function toReview() {
 }
 
 describe("Setup wizard", () => {
-  test("first run: an MFP as printer and scanner, names, licence, review, ready, defaults, done", async () => {
+  test("a step change fades the new step in as a new node; the first step and the heading do not", async () => {
     mockServer(() => hpSetup);
     mount();
     await heading("Choose devices");
-    const item = await waitFor(() => deviceItem("HP LaserJet Professional M1132 MFP"));
-    expect(item.textContent).toContain("USB 03f0:042a");
-    // Every role starts as "Use".
-    for (const name of ["As a printer", "As a scanner"]) {
-      const group = within(item).getByRole("radiogroup", { name });
-      expect(
-        (within(group).getByRole("radio", { name: /^Use as/ }) as HTMLInputElement).checked,
-      ).toBe(true);
-    }
-    expect(screen.getByRole("list", { name: "Setup steps" })).toBeTruthy();
-    expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(
-      "Choose devices",
-    );
+    await waitFor(() => deviceItem("HP LaserJet Professional M1132 MFP"));
+    const h1 = screen.getByRole("heading", { level: 1 });
+    const first = document.querySelector(".setup-step");
+    expect(first).toBeTruthy();
+    expect(first?.hasAttribute("data-arrived")).toBe(false);
 
     press("Next");
     await heading("Names and locations");
-    expect(window.location.hash).toBe("#names");
-    expect(screen.getByRole("heading", { level: 1 }).getAttribute("data-document-title")).toBe(
-      "Step 2 of 5: Names and locations",
-    );
-    // The installation name follows the first chosen device.
-    const title = screen.getByRole("textbox", { name: /Installation name/ }) as HTMLInputElement;
-    expect(title.value).toBe("HP LaserJet Professional M1132 MFP");
-    const [printerName, scannerName] = screen.getAllByRole("textbox", {
-      name: /^Name/,
-    }) as HTMLInputElement[];
-    expect(printerName?.value).toBe("HP LaserJet Professional M1132 MFP");
-    expect(scannerName?.value).toBe("HP LaserJet Professional M1132 MFP scanner");
-    // A visible marker says the field is required.
-    expect(printerName?.closest(".ui-field")?.querySelector(".ui-required")?.textContent).toContain(
-      "required",
-    );
-    fireEvent.change(printerName as HTMLInputElement, { target: { value: "" } });
-    press("Next");
-    expect((await screen.findAllByText(/Enter 1 to 63 characters/)).length).toBeGreaterThan(0);
-    // Next moves focus to the first field with an error.
-    await waitFor(() => expect(document.activeElement).toBe(printerName as HTMLInputElement));
-    expect(window.location.hash).toBe("#names");
-    fireEvent.change(printerName as HTMLInputElement, { target: { value: "Hall printer" } });
-    fireEvent.change(title, { target: { value: "Home" } });
-    fireEvent.change(screen.getAllByRole("textbox", { name: /^Location/ })[0] as HTMLElement, {
-      target: { value: "Hall" },
-    });
-    press("Next");
+    const second = document.querySelector(".setup-step");
+    expect(second).not.toBe(first);
+    expect(second?.hasAttribute("data-arrived")).toBe(true);
+    // The heading (the focus target after navigation) and the buttons stay mounted.
+    expect(screen.getByRole("heading", { level: 1 })).toBe(h1);
+    expect(second?.contains(screen.getByRole("button", { name: "Next" }))).toBe(false);
 
-    await heading("Drivers and licences");
-    expect(screen.getByRole("button", { name: /Printer driver/ }).textContent).toContain(
-      "Automatic: HP (HPLIP)",
-    );
-    // How the driver was chosen is jargon: it sits in a closed disclosure.
-    expect(screen.getByText("Printer model").closest("[hidden]")).toBeTruthy();
-    expect((await screen.findByRole("region", { name: /licence text/ })).textContent).toContain(
-      "HP PLUG-IN LICENSE AGREEMENT",
-    );
-    fireEvent.click(screen.getByRole("checkbox", { name: /accept the HP Linux Imaging/ }));
-    press("Next");
-
-    await heading("Review and save");
-    // Back keeps the edits.
     press("Back");
-    await heading("Drivers and licences");
-    press("Next");
-    await heading("Review and save");
-    expect(document.body.textContent).toContain("Hall printer (Hall)");
-    expect(document.body.textContent).toContain("HP LaserJet Professional M1132 MFP scanner");
-    press("Save");
-    // No pending state on a button that unmounts: its announcement would outlive it.
-    expect(screen.queryByRole("button", { name: "Save" })?.hasAttribute("data-pending")).not.toBe(
-      true,
-    );
+    await heading("Choose devices");
+    const third = document.querySelector(".setup-step");
+    expect(third).not.toBe(second);
+    expect(third?.hasAttribute("data-arrived")).toBe(true);
+  });
 
-    await heading("Starting the devices");
-    const put = lastCall("PUT");
-    expect(put?.headers["If-None-Match"]).toBe("*");
-    const body = put?.body as Config;
-    expect(body.apiVersion).toBe("pagewire/v2");
-    expect(body.name).toBe("Home");
-    expect(body.printers).toEqual([
-      { ...printerEntry("hp", "Hall printer", hpDevice), location: "Hall" },
-    ]);
-    expect(body.scanners).toEqual([
-      scannerEntry("hp-scanner", "HP LaserJet Professional M1132 MFP scanner", hpDevice),
-    ]);
-    expect(body.ignoredDevices).toEqual([]);
-    expect(body.licenses.acceptedEulas).toEqual([
-      { id: "hplip-plugin", version: "3.24.4", textSha256: SHA_A },
-    ]);
+  test("first run: an MFP as printer and scanner, names, licence, review, ready, defaults, done", async () => {
+    // A hook-order mistake across the flows shows only as a React console error.
+    const consoleError = spyOn(console, "error");
+    try {
+      mockServer(() => hpSetup);
+      mount();
+      await heading("Choose devices");
+      const item = await waitFor(() => deviceItem("HP LaserJet Professional M1132 MFP"));
+      expect(item.textContent).toContain("USB 03f0:042a");
+      // Every role starts as "Use".
+      for (const name of ["As a printer", "As a scanner"]) {
+        const group = within(item).getByRole("radiogroup", { name });
+        expect(
+          (within(group).getByRole("radio", { name: /^Use as/ }) as HTMLInputElement).checked,
+        ).toBe(true);
+      }
+      expect(screen.getByRole("list", { name: "Setup steps" })).toBeTruthy();
+      expect(document.querySelector('[aria-current="step"]')?.textContent).toContain(
+        "Choose devices",
+      );
 
-    const printer = body.printers[0] as Printer;
-    const scanner = body.scanners[0] as Scanner;
-    FakeEventSource.last.status(
-      applied({
-        printers: [
-          statusPrinter(printer, hpCaps, {
-            phase: "deploying",
-            message: "Waiting for the device agent",
-          }),
-        ],
-        scanners: [statusScanner(scanner, { phase: "deploying" })],
-      }),
-    );
-    expect(await screen.findByText("Waiting for the device agent")).toBeTruthy();
-    FakeEventSource.last.status(
-      applied({
-        printers: [
-          statusPrinter(printer, hpCaps, {
-            connect: {
-              dnssdName: "Hall printer",
-              ippUris: ["ipp://192.168.1.20:8002/ipp/print/Hall_printer"],
-            },
-          }),
-        ],
-        scanners: [
-          statusScanner(scanner, {
-            connect: { dnssdName: "", esclUrls: ["http://192.168.1.20:8090/eSCL"] },
-          }),
-        ],
-      }),
-    );
-    await heading("Defaults");
-    // Nothing differs from the devices' own defaults, so there is nothing to save.
-    press("Keep these");
-    await heading("pagewire is ready");
-    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
-    expect(document.body.textContent).toContain("ipp://192.168.1.20:8002/ipp/print/Hall_printer");
-    expect(document.body.textContent).toContain("http://192.168.1.20:8090/eSCL");
-    expect(screen.getByRole("link", { name: "Go to Status" }).getAttribute("href")).toBe("/");
+      press("Next");
+      await heading("Names and locations");
+      expect(window.location.hash).toBe("#names");
+      expect(screen.getByRole("heading", { level: 1 }).getAttribute("data-document-title")).toBe(
+        "Step 2 of 5: Names and locations",
+      );
+      // The installation name follows the first chosen device.
+      const title = screen.getByRole("textbox", { name: /Installation name/ }) as HTMLInputElement;
+      expect(title.value).toBe("HP LaserJet Professional M1132 MFP");
+      const [printerName, scannerName] = screen.getAllByRole("textbox", {
+        name: /^Name/,
+      }) as HTMLInputElement[];
+      expect(printerName?.value).toBe("HP LaserJet Professional M1132 MFP");
+      expect(scannerName?.value).toBe("HP LaserJet Professional M1132 MFP scanner");
+      // A visible marker says the field is required.
+      expect(
+        printerName?.closest(".ui-field")?.querySelector(".ui-required")?.textContent,
+      ).toContain("required");
+      fireEvent.change(printerName as HTMLInputElement, { target: { value: "" } });
+      press("Next");
+      expect((await screen.findAllByText(/Enter 1 to 63 characters/)).length).toBeGreaterThan(0);
+      // Next moves focus to the first field with an error.
+      await waitFor(() => expect(document.activeElement).toBe(printerName as HTMLInputElement));
+      expect(window.location.hash).toBe("#names");
+      fireEvent.change(printerName as HTMLInputElement, { target: { value: "Hall printer" } });
+      fireEvent.change(title, { target: { value: "Home" } });
+      fireEvent.change(screen.getAllByRole("textbox", { name: /^Location/ })[0] as HTMLElement, {
+        target: { value: "Hall" },
+      });
+      press("Next");
+
+      await heading("Drivers and licences");
+      expect(screen.getByRole("button", { name: /Printer driver/ }).textContent).toContain(
+        "Automatic: HP (HPLIP)",
+      );
+      // How the driver was chosen is jargon: it sits in a closed disclosure.
+      expect(screen.getByText("Printer model").closest("[hidden]")).toBeTruthy();
+      expect((await screen.findByRole("region", { name: /licence text/ })).textContent).toContain(
+        "HP PLUG-IN LICENSE AGREEMENT",
+      );
+      fireEvent.click(screen.getByRole("checkbox", { name: /accept the HP Linux Imaging/ }));
+      press("Next");
+
+      await heading("Review and save");
+      // Back keeps the edits.
+      press("Back");
+      await heading("Drivers and licences");
+      press("Next");
+      await heading("Review and save");
+      expect(document.body.textContent).toContain("Hall printer (Hall)");
+      expect(document.body.textContent).toContain("HP LaserJet Professional M1132 MFP scanner");
+      press("Save");
+      // No pending state on a button that unmounts: its announcement would outlive it.
+      expect(screen.queryByRole("button", { name: "Save" })?.hasAttribute("data-pending")).not.toBe(
+        true,
+      );
+
+      await heading("Starting the devices");
+      const put = lastCall("PUT");
+      expect(put?.headers["If-None-Match"]).toBe("*");
+      const body = put?.body as Config;
+      expect(body.apiVersion).toBe("pagewire/v2");
+      expect(body.name).toBe("Home");
+      expect(body.printers).toEqual([
+        { ...printerEntry("hp", "Hall printer", hpDevice), location: "Hall" },
+      ]);
+      expect(body.scanners).toEqual([
+        scannerEntry("hp-scanner", "HP LaserJet Professional M1132 MFP scanner", hpDevice),
+      ]);
+      expect(body.ignoredDevices).toEqual([]);
+      expect(body.licenses.acceptedEulas).toEqual([
+        { id: "hplip-plugin", version: "3.24.4", textSha256: SHA_A },
+      ]);
+
+      const printer = body.printers[0] as Printer;
+      const scanner = body.scanners[0] as Scanner;
+      FakeEventSource.last.status(
+        applied({
+          printers: [
+            statusPrinter(printer, hpCaps, {
+              phase: "deploying",
+              message: "Waiting for the device agent",
+            }),
+          ],
+          scanners: [statusScanner(scanner, { phase: "deploying" })],
+        }),
+      );
+      expect(await screen.findByText("Waiting for the device agent")).toBeTruthy();
+      FakeEventSource.last.status(
+        applied({
+          printers: [
+            statusPrinter(printer, hpCaps, {
+              connect: {
+                dnssdName: "Hall printer",
+                ippUris: ["ipp://192.168.1.20:8002/ipp/print/Hall_printer"],
+              },
+            }),
+          ],
+          scanners: [
+            statusScanner(scanner, {
+              connect: { dnssdName: "", esclUrls: ["http://192.168.1.20:8090/eSCL"] },
+            }),
+          ],
+        }),
+      );
+      await heading("Defaults");
+      // Nothing differs from the devices' own defaults, so there is nothing to save.
+      press("Keep these");
+      await heading("pagewire is ready");
+      expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+      expect(document.body.textContent).toContain("ipp://192.168.1.20:8002/ipp/print/Hall_printer");
+      expect(document.body.textContent).toContain("http://192.168.1.20:8090/eSCL");
+      expect(screen.getByRole("link", { name: "Go to Status" }).getAttribute("href")).toBe("/");
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   test("Don't use for a role records it in ignoredDevices; the keyboard is folded away", async () => {

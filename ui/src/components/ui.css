@@ -423,6 +423,10 @@
     animation: ui-pop-in var(--dur-slow) var(--ease-out);
   }
 
+  .ui-modal[data-exiting] {
+    animation: ui-pop-in var(--dur-fast) var(--ease-out) reverse;
+  }
+
   .ui-dialog {
     outline: none;
   }
@@ -522,8 +526,10 @@
   .ui-progress-fill {
     block-size: 100%;
     border-radius: inherit;
+    inline-size: 100%;
     background: var(--accent);
-    transition: inline-size var(--dur-slow) var(--ease-out);
+    /* The fill slides in from the left (translateX set inline), so nothing drives layout. */
+    transition: transform var(--dur-slow) var(--ease-out);
   }
 
   /* A marker's own colour can match the track (black toner on dark paper); the ring keeps the
@@ -534,7 +540,7 @@
 
   .ui-progress-fill[data-indeterminate] {
     inline-size: 35%;
-    animation: ui-indeterminate 1.4s var(--ease-out) infinite;
+    animation: ui-indeterminate var(--dur-sweep) var(--ease-out) infinite;
   }
 
   /* Toasts */
@@ -569,6 +575,8 @@
     box-shadow: var(--shadow-float);
     pointer-events: auto;
     outline: none;
+    /* The queue is empty at load and the region outlives routes, so this plays only for a new toast. */
+    animation: ui-toast-in var(--dur-arrive) var(--ease-out);
   }
 
   .ui-toast[data-focus-visible] {
@@ -670,6 +678,12 @@
   .ui-disclosure-panel[data-expanded],
   .ui-disclosure[data-expanded] .ui-disclosure-panel {
     padding-block-end: var(--space-4);
+  }
+
+  /* Child combinator: a collapsed panel nested inside an open one stays still. No disclosure starts
+     expanded, and collapsing drops the rule, so the panel hides at once. */
+  .ui-disclosure[data-expanded] > .ui-disclosure-panel {
+    animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
   /* Card: a sheet on the paper ground. Container queries let views reflow inside it. */
@@ -788,7 +802,7 @@
     border: 2px solid currentColor;
     color: inherit;
     opacity: 0;
-    animation: ui-pulse 1.8s var(--ease-out) infinite;
+    animation: ui-pulse var(--dur-breathe) var(--ease-out) infinite;
   }
 
   .ui-badge[data-tone="busy"] .ui-badge-dot[data-pulse]::after {
@@ -801,6 +815,20 @@
 
   .ui-badge[data-tone="ok"] .ui-badge-dot[data-pulse]::after {
     color: var(--ok);
+  }
+
+  /* A tone change (useHasChanged): the dot stamps and the label fades in. */
+  .ui-badge-dot[data-changed] {
+    animation: ui-stamp var(--dur-slow) var(--ease-out);
+  }
+
+  .ui-badge-label[data-changed] {
+    animation: ui-fade-in var(--dur) var(--ease-out);
+  }
+
+  /* A live arrival: a row whose id was not in its list's first load. Mount alone never sets it. */
+  [data-arrived] {
+    animation: ui-arrive var(--dur-arrive) var(--ease-out);
   }
 
   /* Page header */
@@ -882,8 +910,14 @@
     flex: 1 1 16rem;
   }
 
-  /* Reduced motion: the dot stops, and the indeterminate bar becomes a static striped track. */
+  /* Reduced motion: the dot stops, the indeterminate bar becomes a static striped track, and the
+     badge stamp becomes a fade (--dur and --dur-slow are 0 here, --dur-arrive is not). */
   @media (prefers-reduced-motion: reduce) {
+    .ui-badge-dot[data-changed],
+    .ui-badge-label[data-changed] {
+      animation: ui-fade-in var(--dur-arrive) var(--ease-out);
+    }
+
     .ui-badge-dot[data-pulse]::after,
     .ui-progress-fill[data-indeterminate] {
       animation: none;
@@ -929,6 +963,27 @@
     }
     to {
       transform: translateX(300%);
+    }
+  }
+
+  @keyframes ui-arrive {
+    from {
+      opacity: 0;
+      translate: 0 calc(var(--rise) * -1);
+    }
+  }
+
+  @keyframes ui-stamp {
+    from {
+      opacity: 0.4;
+      scale: 0.4;
+    }
+  }
+
+  @keyframes ui-toast-in {
+    from {
+      opacity: 0;
+      translate: 0 var(--rise);
     }
   }
 }

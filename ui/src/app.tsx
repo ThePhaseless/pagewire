@@ -229,7 +229,7 @@ function Shell({ views }: { views: Views }) {
           </svg>
           <p className="app-name">{name ?? strings.appName}</p>
         </div>
-        <StatusBadge tone={health.tone} pulse={health.pulse}>
+        <StatusBadge tone={health.tone} pulse={health.pulse} animate={connected && status !== null}>
           {health.label}
         </StatusBadge>
       </header>

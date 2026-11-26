@@ -213,6 +213,63 @@ describe("components", () => {
     expect(screen.getByRole("meter", { name: "Black toner" })).toBeTruthy();
   });
 
+  test("ProgressBar and Meter fills move by transform, not size", () => {
+    render(
+      <>
+        <ProgressBar label="Uploading" value={40} />
+        <Meter label="Black toner" value={40} color="black" />
+      </>,
+    );
+    const fill = (role: string, name: string) =>
+      screen.getByRole(role, { name }).querySelector<HTMLElement>(".ui-progress-fill");
+    for (const el of [fill("progressbar", "Uploading"), fill("meter", "Black toner")]) {
+      expect(el?.style.transform).toBe("translateX(-60%)");
+      expect(el?.style.inlineSize).toBe("");
+    }
+    expect(fill("meter", "Black toner")?.style.background).toBe("black");
+  });
+
+  test("StatusBadge stamps its dot and label only when the tone changes", () => {
+    const { rerender } = render(<StatusBadge tone="ok">Ready</StatusBadge>);
+    const parts = () => [
+      document.querySelector(".ui-badge-dot"),
+      document.querySelector(".ui-badge-label"),
+    ];
+    expect(document.querySelectorAll("[data-changed]")).toHaveLength(0);
+    const [dot, label] = parts();
+    rerender(<StatusBadge tone="problem">Needs attention</StatusBadge>);
+    const [dot2, label2] = parts();
+    expect(dot2?.hasAttribute("data-changed")).toBe(true);
+    expect(label2?.hasAttribute("data-changed")).toBe(true);
+    expect(dot2).not.toBe(dot);
+    expect(label2).not.toBe(label);
+    rerender(<StatusBadge tone="problem">Needs attention</StatusBadge>);
+    const [dot3, label3] = parts();
+    expect(dot3).toBe(dot2);
+    expect(label3).toBe(label2);
+  });
+
+  test("a placeholder tone does not count as a change (the header before Status)", () => {
+    const { rerender } = render(
+      <StatusBadge tone="idle" animate={false}>
+        Offline
+      </StatusBadge>,
+    );
+    rerender(
+      <StatusBadge tone="ok" animate>
+        Ready
+      </StatusBadge>,
+    );
+    expect(document.querySelectorAll("[data-changed]")).toHaveLength(0);
+    rerender(
+      <StatusBadge tone="problem" animate>
+        Needs attention
+      </StatusBadge>,
+    );
+    expect(document.querySelectorAll(".ui-badge-dot[data-changed]")).toHaveLength(1);
+    expect(document.querySelectorAll(".ui-badge-label[data-changed]")).toHaveLength(1);
+  });
+
   test("layout pieces expose headings, alerts and text labels", () => {
     render(
       <>
@@ -433,6 +490,16 @@ describe("app shell", () => {
 
   test("the fixtures match the generated schema", () => {
     expect(StatusSchema.parse(baseStatus)).toEqual(baseStatus);
+  });
+
+  test("the header badge stamps on a real phase change, not on the first Status", async () => {
+    const es = mount("/");
+    const header = () => document.querySelector(".app-header") as HTMLElement;
+    act(() => es.status(baseStatus));
+    await waitFor(() => expect(within(header()).getByText("Ready")).toBeTruthy());
+    expect(header().querySelectorAll("[data-changed]")).toHaveLength(0);
+    act(() => es.status({ ...baseStatus, phase: "error" }));
+    expect(header().querySelectorAll("[data-changed]")).toHaveLength(2);
   });
 
   test("redirects to setup while the config is missing and hides navigation", async () => {
