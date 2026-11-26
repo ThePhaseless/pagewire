@@ -71,6 +71,7 @@ RUN groupadd --system --gid "${MESSAGEBUS_UID}" messagebus \
  && useradd --uid "${NONROOT_UID}" --gid nonroot --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin nonroot
 # The UTC times before and after the apt run name the Ubuntu snapshots
 # (snapshot.ubuntu.com) that hold the image's package versions, for sources-fetch.
+# shortcut: a mirror lagging the publisher can make both times name a newer state; record each suite's InRelease Date if sources-fetch ever names such a line.
 RUN mkdir -p /usr/share/pagewire \
  && date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt \
  && apt-get update \
@@ -222,7 +223,9 @@ COPY --from=pushed-arm64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/
 FROM lists-${SOURCES_LISTS} AS lists
 
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sources-fetch
-RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+# docker-clean turns apt's binary caches off; without them each apt-get call below takes 10 times as long.
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+ && rm /etc/apt/apt.conf.d/docker-clean
 COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
 # Lines are source package names (--only-source: never mapped through binary names,
