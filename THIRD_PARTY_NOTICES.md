@@ -258,7 +258,7 @@ Each is built from the `sources` stage of the image's Dockerfile and holds under
 - `ubuntu/`: the Ubuntu source packages (`.dsc`, orig and Debian tarballs) for every line of the image's `source-packages.txt`, fetched with `apt-get source`. A version the Ubuntu archive has replaced since the image was built comes from the Ubuntu snapshot service (https://snapshot.ubuntu.com) at one of the times in the image's `/usr/share/pagewire/apt-snapshots.txt`, taken before and after each package installation. In CI the list is the union of the amd64 and arm64 lists read from the images that the same run pushed (`sha-<commit>`), so it matches the published binaries. A local build of the `sources` target uses the lists of the targets it builds, the union of all five for the driver Dockerfile;
 - `upstream/`: `git archive` tarballs of everything built from upstream git, at the pinned commit (ipp-usb and AirSane; PAPPL, pappl-retrofit, which also holds legacy-printer-app, and the four other applications). The device image's rebuilt xerox_mfp backend comes from the sane-backends package in `ubuntu/` with its patch in `patches/`;
 - `patches/`: the driver images' PAPPL and pappl-retrofit patches and the device image's sane-backends patch;
-- `build/`: the Dockerfile and, for the device image, its config files.
+- `build/`: the Dockerfile, `apt-source-fetch.sh` (which downloads the Ubuntu source packages) and, for the device image, its config files.
 
 To extract one: `docker buildx build -f images/driver/Dockerfile --target sources -o type=local,dest=out .` from a checkout of the same commit, or copy `/sources` out of the published `-sources` image. Use the `-sources` image with the same tag as the image it covers.
 

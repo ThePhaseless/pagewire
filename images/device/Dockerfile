@@ -96,13 +96,12 @@ FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da0
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends bzip2 xz-utils
-COPY --from=device-base /usr/share/pagewire/source-packages.txt /src/source-packages.txt
+COPY images/apt-source-fetch.sh /usr/local/bin/
+COPY --from=device-base /usr/share/pagewire/source-packages.txt /usr/share/pagewire/apt-snapshots.txt /src/
 WORKDIR /src
-RUN pkg="$(grep '^sane-backends=' source-packages.txt)" \
- && test -n "${pkg}" \
+RUN grep '^sane-backends=' source-packages.txt > sane-backends.txt \
  && chown _apt /src \
- && apt-get update \
- && apt-get source --only-source --download-only "${pkg}" \
+ && sh /usr/local/bin/apt-source-fetch.sh sane-backends.txt apt-snapshots.txt \
  && mkdir -p /out \
  && tar -xf "$(ls sane-backends_*.orig.tar.* | grep -v '\.asc$')" -C /out --strip-components=2 \
       --wildcards '*/doc/descriptions/*.desc' '*/doc/descriptions-external/*.desc' \
@@ -225,28 +224,14 @@ FROM lists-${SOURCES_LISTS} AS lists
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS sources-fetch
 # docker-clean turns apt's binary caches off; without them each apt-get call below takes 10 times as long.
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
- && rm /etc/apt/apt.conf.d/docker-clean
+ && rm -f /etc/apt/apt.conf.d/docker-clean
+COPY images/apt-source-fetch.sh /usr/local/bin/
 COPY --from=lists /lists/ /sources/lists/
 WORKDIR /sources/ubuntu
-# Lines are source package names (--only-source: never mapped through binary names,
-# e.g. coreutils vs coreutils-from). A version the live archive has superseded since
-# the build comes from the newest snapshot recorded in the images that still has it
-# (snapshot.ubuntu.com, https only, hence ca-certificates). A line no snapshot
-# resolves is named and fails the build.
+# apt-source-fetch.sh falls back to the recorded snapshots for versions Ubuntu has superseded.
 RUN sort -u /sources/lists/*.txt > /sources/source-packages.txt \
  && chown _apt /sources/ubuntu \
- && apt-get update \
- && if ! xargs apt-get source --only-source --download-only < /sources/source-packages.txt; then \
-      apt-get install -y --no-install-recommends ca-certificates \
-      && while read -r p; do apt-get source --only-source --download-only "$p" >&2 || echo "$p"; done < /sources/source-packages.txt > /tmp/missing \
-      && for s in $(sort -ru /sources/lists/snapshots/*.txt); do \
-           [ -s /tmp/missing ] || break; \
-           apt-get update --snapshot "$s" || exit 1; \
-           while read -r p; do apt-get source --snapshot "$s" --only-source --download-only "$p" >&2 || echo "$p"; done < /tmp/missing > /tmp/left; \
-           mv /tmp/left /tmp/missing; \
-         done \
-      && if [ -s /tmp/missing ]; then echo "in no recorded snapshot:" >&2; cat /tmp/missing >&2; exit 1; fi; \
-    fi \
+ && sh /usr/local/bin/apt-source-fetch.sh /sources/source-packages.txt /sources/lists/snapshots/*.txt \
  && test "$(ls *.dsc | wc -l)" = "$(wc -l < /sources/source-packages.txt)"
 # Upstream sources as git archives of the pinned commits the binaries were built from.
 COPY --from=ipp-usb /out/upstream/ /sources/upstream/
@@ -254,7 +239,7 @@ COPY --from=airsane /out/upstream/ /sources/upstream/
 # The patches applied to Ubuntu source packages built here.
 COPY images/device/patches/ /sources/patches/
 # How the image was built.
-COPY images/device/Dockerfile images/device/dbus.conf images/device/avahi-daemon.conf /sources/build/
+COPY images/device/Dockerfile images/device/dbus.conf images/device/avahi-daemon.conf images/apt-source-fetch.sh /sources/build/
 
 FROM scratch AS sources
 COPY --from=sources-fetch /sources /sources

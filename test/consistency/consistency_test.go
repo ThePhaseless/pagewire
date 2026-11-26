@@ -514,6 +514,7 @@ func TestUpstreamPinsAreCommits(t *testing.T) {
 // fetch a version the live archive has since superseded from the snapshot of that time.
 func TestAptSnapshotsRecorded(t *testing.T) {
 	const rec = "date -u +%Y%m%dT%H%M%SZ >> /usr/share/pagewire/apt-snapshots.txt"
+	aptChange := regexp.MustCompile(`apt-get (update|install|upgrade)\b`)
 	listCopy := regexp.MustCompile(`^COPY --from=(\S+) /usr/share/pagewire/(source-packages|apt-snapshots)\.txt /lists/`)
 	for _, file := range []string{"images/device/Dockerfile", "images/driver/Dockerfile"} {
 		stages := parseDockerfile(t, file)
@@ -544,11 +545,12 @@ func TestAptSnapshotsRecorded(t *testing.T) {
 		}
 		for name := range shipped {
 			for _, l := range findStage(stages, name).lines {
-				if !strings.Contains(l, "apt-get update") {
+				first := aptChange.FindStringIndex(l)
+				if first == nil {
 					continue
 				}
 				i, j := strings.Index(l, rec), strings.LastIndex(l, rec)
-				if i < 0 || i == j || i > strings.Index(l, "apt-get update") || j < strings.LastIndex(l, "apt-get") {
+				if i < 0 || i == j || i > first[0] || j < strings.LastIndex(l, "apt-get") {
 					t.Errorf("%s: stage %s runs apt-get without recording the time before and after it: %s", file, name, strings.Join(strings.Fields(l), " "))
 				}
 			}
@@ -573,9 +575,7 @@ func TestSourcesListSwitch(t *testing.T) {
 			`sort -u /sources/lists/\*`,
 			`(?m)^COPY --from=pushed-amd64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/`,
 			`(?m)^COPY --from=pushed-arm64 /usr/share/pagewire/apt-snapshots.txt /lists/snapshots/`,
-			// A superseded version is gone from the live Sources index; the snapshot of its build keeps it.
-			`apt-get update --snapshot "\$s"`,
-			`apt-get source --snapshot "\$s" --only-source --download-only`,
+			`sh /usr/local/bin/apt-source-fetch.sh /sources/source-packages.txt /sources/lists/snapshots/\*`,
 			`(?m)^COPY .*\b` + regexp.QuoteMeta(file) + `\b.* /sources/build/`,
 		} {
 			if !regexp.MustCompile(want).MatchString(text) {
@@ -586,6 +586,56 @@ func TestSourcesListSwitch(t *testing.T) {
 		for _, name := range []string{"lists-local", "lists-pushed"} {
 			if s := findStage(stages, name); s == nil || s.image != "scratch" {
 				t.Errorf("%s: stage %s missing or not FROM scratch", file, name)
+			}
+		}
+	}
+}
+
+// Ubuntu source packages are downloaded only through images/apt-source-fetch.sh, which each
+// stage that downloads them COPYs and runs: it falls back to the recorded snapshots, because a
+// superseded version is gone from the live Sources index while the snapshot of its build keeps it.
+func TestAptSourceFetchShared(t *testing.T) {
+	const script = "images/apt-source-fetch.sh"
+	text := read(t, script)
+	for _, want := range []string{
+		`(?m)^set -eu$`,
+		`(?m)^apt-get .*\bupdate$`,
+		`\bsort -ru\b`,
+		`apt-get .*\bupdate --snapshot \S+`,
+		`apt-get .*\bsource --snapshot \S+ --only-source --download-only`,
+		`Acquire::Retries=`,
+		`in no recorded snapshot`,
+	} {
+		if !regexp.MustCompile(want).MatchString(text) {
+			t.Errorf("%s: no line matching %s", script, want)
+		}
+	}
+	for file, names := range map[string][]string{
+		"images/device/Dockerfile": {"sane-desc", "sources-fetch"},
+		"images/driver/Dockerfile": {"sources-fetch"},
+	} {
+		stages := parseDockerfile(t, file)
+		for _, s := range stages {
+			for _, l := range s.lines {
+				if strings.Contains(l, "apt-get source") {
+					t.Errorf("%s: stage %s runs apt-get source itself, not through %s", file, s.name, script)
+				}
+			}
+		}
+		for _, name := range names {
+			s := findStage(stages, name)
+			if s == nil {
+				t.Errorf("%s: no stage %s", file, name)
+				continue
+			}
+			text := strings.Join(s.lines, "\n")
+			for _, want := range []string{
+				`(?m)^COPY ` + regexp.QuoteMeta(script) + ` /usr/local/bin/\s*$`,
+				`(?m)^RUN .*\bsh /usr/local/bin/apt-source-fetch\.sh \S+ \S*snapshots`,
+			} {
+				if !regexp.MustCompile(want).MatchString(text) {
+					t.Errorf("%s: stage %s has no line matching %s", file, name, want)
+				}
 			}
 		}
 	}
