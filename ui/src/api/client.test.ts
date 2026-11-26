@@ -688,6 +688,34 @@ describe("SSE store", () => {
     expect(lastSource().closed).toBe(true);
   });
 
+  test("dispatches a well-formed eula event and drops a malformed one", () => {
+    const store = fakeStore();
+    const got: string[] = [];
+    store.on("eula", (e) => got.push(`${e.id} ${e.state}`));
+    store.start();
+    lastSource().emit("eula", {
+      id: "hplip-plugin",
+      version: "3.24.4",
+      title: "HP plug-in",
+      vendor: "HP",
+      summary: "",
+      state: "available",
+      message: "",
+      textSha256: "a".repeat(64),
+      text: "Licence.",
+    });
+    expect(got).toEqual(["hplip-plugin available"]);
+    expect(store.latest("eula")?.text).toBe("Licence.");
+    const realError = console.error;
+    const logged = mock(() => {});
+    console.error = logged;
+    lastSource().emit("eula", { id: "hplip-plugin", state: "done" });
+    console.error = realError;
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(got).toEqual(["hplip-plugin available"]);
+    store.stop();
+  });
+
   test("useStatus and useEvent re-render on events", async () => {
     const store = fakeStore();
     store.start();

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/ippcaps"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 )
 
 // PAPPL vendor operations, from pappl/base.h at v1.4.12.
@@ -81,9 +83,9 @@ type Device struct{ URI, Info, DeviceID string }
 type Driver struct{ Name, Description string }
 
 // Client talks to one PAPPL system service. It remembers Reconcile's last
-// Find-Devices choice per queue and when it was made, and the location and
-// refused defaults it sent each queue, so reuse one Client per system URL for
-// the agent's life.
+// Find-Devices choice per queue and when it was made, and the location,
+// refused defaults and accepted-but-not-read-back defaults it sent each
+// queue, so reuse one Client per system URL for the agent's life.
 type Client struct {
 	uri string
 	now func() time.Time // nil: time.Now
@@ -106,6 +108,27 @@ func New(systemURI string) *Client { return &Client{uri: systemURI} }
 
 // URI returns the system URI the client was made with.
 func (c *Client) URI() string { return c.uri }
+
+// Watch subscribes to the system's queue events (printer-created,
+// printer-deleted, printer-config-changed) and calls changed after subscribing
+// and on each batch of events, until ctx ends. Job events stay out, so printing
+// never triggers a reconcile. It returns as ippnotify.Watch does: ctx.Err(), or
+// an error wrapping ippnotify.ErrUnsupported or ippnotify.ErrRefused.
+func (c *Client) Watch(ctx context.Context, changed func()) error {
+	return ippnotify.Watch(ctx, ippnotify.Target{
+		URI: c.uri, URIAttr: "system-uri", Op: goipp.OpCreateSystemSubscriptions,
+		Events: []string{ippnotify.EventPrinterCreated, ippnotify.EventPrinterDeleted, ippnotify.EventPrinterConfigChanged},
+	}, func([]goipp.Attributes) { changed() })
+}
+
+// DeviceChanged tells c a USB device was added: the next Reconcile may ask
+// Find-Devices again, once, for the queues it listed nothing for, without
+// waiting out findBackoff. Settled picks stay.
+func (c *Client) DeviceChanged() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	maps.DeleteFunc(c.picks, func(_ string, p pick) bool { return p.uri == "" })
+}
 
 var requestID atomic.Uint32
 

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	appsv1 "k8s.io/api/apps/v1"
@@ -157,9 +158,10 @@ func checkCalls(t *testing.T, label string, c *fake.Clientset, role, cluster []r
 	}
 }
 
-// TestRoleAllowsEveryCall runs every Backend method against a fake clientset and
-// checks each recorded call against deploy/base/role.yaml and clusterrole.yaml,
-// resourceNames included, in single-node and multi-node mode.
+// TestRoleAllowsEveryCall runs every Backend method, Notify included, against a
+// fake clientset and checks each recorded call against deploy/base/role.yaml
+// and clusterrole.yaml, resourceNames included, in single-node and multi-node
+// mode.
 func TestRoleAllowsEveryCall(t *testing.T) {
 	ctx := context.Background()
 	rules, cluster := loadRules(t, "role.yaml"), loadRules(t, "clusterrole.yaml")
@@ -186,6 +188,7 @@ func TestRoleAllowsEveryCall(t *testing.T) {
 		if err := b.Apply(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
+		driveNotify(t, b, c, "pods")
 		checkCalls(t, name, c, rules, cluster, nil)
 	}
 
@@ -219,6 +222,7 @@ func TestRoleAllowsEveryCall(t *testing.T) {
 	if _, err := b.USBNodes(ctx); err != nil {
 		t.Fatal(err)
 	}
+	driveNotify(t, b, c, "pods", "nodes")
 	if err := b.Apply(ctx, specs[:1]); err != nil {
 		t.Fatal(err)
 	}
@@ -253,8 +257,30 @@ func TestRoleAllowsEveryCall(t *testing.T) {
 	}
 }
 
+// driveNotify runs b.Notify until it has watched every resource, then stops it.
+func driveNotify(t *testing.T, b *Backend, c *fake.Clientset, resources ...string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.Notify(ctx, func() {}, func(string) {})
+	}()
+	for _, r := range resources {
+		waitFor(t, "watch "+r, func() bool { return watched(c, r) })
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Notify did not return after ctx end")
+	}
+}
+
 // TestOldRoleAllowsSingleNode: an install with the pre-multi-node Role and
 // no ClusterRole keeps working; only the refused node list falls outside it.
+// It does not drive Notify: the pods watch is new, the pre-slot Role refuses
+// it, and notify_test.go covers the 403 degrade.
 func TestOldRoleAllowsSingleNode(t *testing.T) {
 	c := singleNodeColdStart(t)
 	nodesList := func(a k8stesting.Action) bool { return a.GetVerb() == "list" && a.GetResource().Resource == "nodes" }
@@ -284,8 +310,8 @@ func TestRoleNamesEverySlot(t *testing.T) {
 		t.Errorf("%d rules name %s, want 3 (deployments get, deployments write, configmaps)", n, DeviceName)
 	}
 	cluster := loadRules(t, "clusterrole.yaml")
-	if len(cluster) != 1 || !allowed(cluster, "", "nodes", "list", "") || allowed(cluster, "", "nodes", "get", "x") {
-		t.Errorf("clusterrole rules %+v, want nodes list only", cluster)
+	if len(cluster) != 1 || !slices.Equal(cluster[0].Resources, []string{"nodes"}) || !slices.Equal(cluster[0].Verbs, []string{"list", "watch"}) {
+		t.Errorf("clusterrole rules %+v, want list and watch on nodes only", cluster)
 	}
 }
 

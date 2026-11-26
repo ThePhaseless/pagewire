@@ -167,7 +167,7 @@ func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
 	s.Blobs, s.AcceptedEULAs = slices.Clone(spec.Blobs), slices.Clone(spec.AcceptedEULAs)
 	b.spec, b.hash = &s, hash
 	if b.core != nil {
-		b.core.Wake() // the next cycle reads the new papplURLs
+		b.core.Wake() // Wake forces a reconcile, which reads the new papplURLs
 		return nil
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -183,7 +183,7 @@ func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
 		Keys: func(string) (openpgp.EntityList, error) { return b.keys, nil },
 	}
 	core.Stage = stager.Stage
-	// Read every cycle: a re-Apply's fakes listen on new ports, and the agent
+	// Read on every reconcile: a re-Apply's fakes listen on new ports, and the agent
 	// keys a new PAPPL client by the new URL. Unknown URIs give "".
 	core.SystemURL = func(u string) string {
 		b.mu.Lock()

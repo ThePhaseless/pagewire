@@ -18,22 +18,25 @@ import (
 )
 
 // findBackoff is how long a queue the application did not list waits before
-// Find-Devices is asked again for it.
-// shortcut: a 30 s delay before a newly listed printer gets its queue; shorten it if users notice.
+// Find-Devices is asked again for it; a USB add (Client.DeviceChanged) lifts it.
+// shortcut: a printer the application lists late without a USB add (one that
+// warms up while plugged in) waits up to 30 s for its queue; shorten it if users notice.
 const findBackoff = 30 * time.Second
 
 // Reconcile makes the PAPPL system hold exactly one queue per want, named
 // want.Name, on the want's device with its driver, applies the defaults the
 // queue supports, and deletes the queues no want names. It returns one result
 // per want, in order. It is idempotent and never panics on IPP failures: every
-// failure becomes a QueueResult with State "error", retried on the agent's
-// next cycle. All wants belong to c's printer application.
+// failure becomes a QueueResult with State "error", retried by the agent on
+// the next event or its retry backoff. All wants belong to c's printer
+// application.
 //
 // Find-Devices makes the application run every CUPS backend, and each claims
 // its printer's USB interface, so asking competes with a job that is printing.
 // Reconcile therefore asks at most once per call, only for the wants whose
 // queue is not settled (settledURI), and not again within findBackoff for
-// wants it listed nothing for. A settled want is never held back by a sibling.
+// wants it listed nothing for, unless Client.DeviceChanged reported a USB add
+// since. A settled want is never held back by a sibling.
 func Reconcile(ctx context.Context, c *Client, wants []device.QueueSpec) []device.QueueResult {
 	out := make([]device.QueueResult, len(wants))
 	printers, err := c.Printers(ctx)
@@ -171,10 +174,11 @@ func reconcileQueue(ctx context.Context, c *Client, printers []Printer, want dev
 	return r
 }
 
-// queueMemo is what reconcileQueue sent one queue: the defaults PAPPL refused
-// and the last location set.
+// queueMemo is what reconcileQueue sent one queue: the defaults PAPPL refused,
+// those it accepted but did not read back, and the last location set.
 type queueMemo struct {
 	refused map[string]string // attribute name -> refused value (goipp.Values.String)
+	sent    map[string]string // attribute name -> value accepted by the last Set that sent it
 	// location was set while the queue read back locationSeen. PAPPL 1.4.12
 	// accepts printer-location but stores it as printer-geo-location
 	// (printer-ipp.c), so the read-back never changes.
@@ -184,10 +188,13 @@ type queueMemo struct {
 
 // setDefaults sets the queue's location and the defaults it supports, sending
 // only those that differ from what it reports: PAPPL rewrites its state file
-// on every Set-Printer-Attributes. A value PAPPL refused is not sent again
-// until the wanted value or the queue changes; it is reported in refused on
-// every cycle instead, by option kind. The controller warns about the defaults
-// the queue does not support.
+// on every Set-Printer-Attributes. A value PAPPL refused, or accepted but
+// reads back as another (one it normalizes), is not sent again until the
+// wanted value or the queue changes; it is reported in refused on every
+// reconcile instead, by option kind. Resending an accepted value would loop:
+// each Set emits printer-config-changed, which the agent's watch turns into
+// another reconcile. The controller warns about the defaults the queue does
+// not support.
 func setDefaults(ctx context.Context, c *Client, keep *Printer, want device.QueueSpec) (warnings []string, refusedOpts []device.Dropped) {
 	m := c.memo(keep.ID)
 	var send goipp.Attributes
@@ -198,30 +205,45 @@ func setDefaults(ctx context.Context, c *Client, keep *Printer, want device.Queu
 	ch := changed(keep.Caps, fitted)
 	send = append(send, ippcaps.Defaults(ch)...)
 
-	// Only refusals of values still wanted and still differing are kept.
-	refused := map[string]string{}
+	// Only memos of values still wanted and still differing are kept.
+	refused, sent := map[string]string{}, map[string]string{}
+	notHeld := map[string]string{} // refused, or accepted by an earlier Set yet not read back
 	send = slices.DeleteFunc(send, func(a goipp.Attribute) bool {
-		v, ok := m.refused[a.Name]
-		if !ok || v != a.Values.String() {
-			return false
+		v := a.Values.String()
+		if r, ok := m.refused[a.Name]; ok && r == v {
+			refused[a.Name], notHeld[a.Name] = v, v
+			return true
 		}
-		refused[a.Name] = v
-		return true
+		if s, ok := m.sent[a.Name]; ok && s == v {
+			sent[a.Name], notHeld[a.Name] = v, v
+			return true
+		}
+		return false
 	})
 	if len(send) > 0 {
 		rejected, err := c.SetDefaults(ctx, keep.URI, send)
+		isRejected := func(a goipp.Attribute) bool {
+			return slices.ContainsFunc(rejected, func(r goipp.Attribute) bool { return r.Name == a.Name })
+		}
 		for _, a := range rejected {
-			refused[a.Name] = a.Values.String()
+			refused[a.Name], notHeld[a.Name] = a.Values.String(), a.Values.String()
 		}
 		if err != nil {
 			warnings = append(warnings, "Could not set the printer's defaults: "+err.Error())
-		} else if send[0].Name == "printer-location" && !slices.ContainsFunc(rejected, func(a goipp.Attribute) bool { return a.Name == "printer-location" }) {
-			m.location, m.locationSeen, m.locationSet = want.Location, keep.Location, true
+		} else {
+			for _, a := range send {
+				if !isRejected(a) {
+					sent[a.Name] = a.Values.String()
+				}
+			}
+			if send[0].Name == "printer-location" && !isRejected(send[0]) {
+				m.location, m.locationSeen, m.locationSet = want.Location, keep.Location, true
+			}
 		}
 	}
-	m.refused = refused
+	m.refused, m.sent = refused, sent
 	c.setMemo(keep.ID, m)
-	for _, name := range slices.Sorted(maps.Keys(refused)) {
+	for _, name := range slices.Sorted(maps.Keys(notHeld)) {
 		if name == "printer-location" {
 			warnings = append(warnings, "The printer refused the location “"+want.Location+"”: it keeps its own.")
 		} else {

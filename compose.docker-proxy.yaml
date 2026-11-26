@@ -23,6 +23,8 @@ services:
     userns_mode: host
     # Exactly the calls internal/backend/docker/engine.go makes. The proxy
     # anchors each pattern; the client prefixes all but /_ping with /v1.NN.
+    # /events is the long-lived stream that wakes the backend when a device
+    # container changes; without it pagewire re-checks every 30 s.
     command:
       - '-proxysocketendpoint=/run/docker-proxy/docker.sock'
       - '-proxysocketendpointfilemode=0600'
@@ -33,6 +35,7 @@ services:
       - '-allowGET=(/v1\.[0-9]+)?/containers/[^/]+/json'
       - '-allowGET=(/v1\.[0-9]+)?/images/.+/json' # image names hold slashes
       - '-allowGET=(/v1\.[0-9]+)?/volumes/[^/]+'
+      - '-allowGET=(/v1\.[0-9]+)?/events'
       - '-allowPOST=(/v1\.[0-9]+)?/containers/create'
       - '-allowPOST=(/v1\.[0-9]+)?/containers/[^/]+/(start|stop|wait)'
       - '-allowPOST=(/v1\.[0-9]+)?/images/create'

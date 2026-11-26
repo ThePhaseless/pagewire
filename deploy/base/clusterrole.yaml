@@ -7,9 +7,10 @@ metadata:
 # above 0, and runs one device workload pinned to each. Without this ClusterRole
 # (and its binding) the list is refused and pagewire runs one unpinned device
 # workload, pagewire-device, as before. Nodes are cluster-scoped, so the rule cannot
-# be narrowed by resourceNames; it grants list only.
+# be narrowed by resourceNames; it grants list and watch only; the watch lets
+# pagewire react when a node's USB resource changes.
 # internal/backend/k8s/policy_test.go checks every client call against this file.
 rules:
   - apiGroups: [""]
     resources: [nodes]
-    verbs: [list]
+    verbs: [list, watch]

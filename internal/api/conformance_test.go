@@ -880,6 +880,7 @@ func TestConformanceSSEPayloads(t *testing.T) {
 			ID: "00000000000000aa", Scanner: "s1", State: "failed", CreatedAt: time.Now().In(cet), Format: "pdf",
 			Settings: apitypes.ScanSettings{Source: "platen", Resolution: 300, ColorMode: "color", Format: "pdf"}, Error: &errMsg,
 		}},
+		{apitypes.EventEULA, "EULA", apitypes.EULA{ID: "brother", Version: "1", Title: "Brother EULA", Vendor: "Brother", State: "failed", Message: "fetch failed"}},
 	}
 	for _, p := range payloads {
 		frame, err := sseFrame(p.event, p.v)

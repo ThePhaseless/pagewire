@@ -35,6 +35,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/config/watch"
 	"github.com/ThePhaseless/pagewire/internal/controller"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
 	"github.com/ThePhaseless/pagewire/ui"
@@ -330,6 +331,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		usbAvailable = f.simDevice != "none"
 	}
 
+	hub := api.NewHub()
 	ctrl := controller.New(controller.Options{
 		Backend: backend, BackendName: f.backend,
 		USBAvailable: usbAvailable, USBUnavailable: usbUnavailable,
@@ -340,6 +342,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 			}
 			return s
 		},
+		PublishEULA: func(e apitypes.EULA) { hub.Publish(apitypes.EventEULA, e) },
 	})
 	if simBackend != nil {
 		simBackend.SetReporter(ctrl.AgentReport)
@@ -357,7 +360,25 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 
 	checkDataDir(f.dataDir, ctrl)
 
-	scanEvents := make(chan apitypes.Scan, 16)
+	// The scan service writes to scanIn; the relay forwards each event to the
+	// API and refreshes the controller, so Status follows a pagewire scan at once.
+	scanIn, scanEvents := make(chan apitypes.Scan, 16), make(chan apitypes.Scan, 16)
+	var wg sync.WaitGroup // every goroutine below; waited for on return
+	wg.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sc := <-scanIn:
+				select {
+				case scanEvents <- sc:
+				case <-ctx.Done():
+					return
+				}
+				ctrl.Refresh()
+			}
+		}
+	})
 	scans := scanning.New(scanning.Options{
 		Dir: filepath.Join(f.dataDir, "scans"),
 		Scanner: func(id string) scanning.Scanner {
@@ -374,11 +395,10 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		Retention: func() time.Duration {
 			return time.Duration(ctrl.Config().Scan.RetentionDays) * 24 * time.Hour
 		},
-		Events:  scanEvents,
+		Events:  scanIn,
 		Context: ctx,
 	})
 
-	hub := api.NewHub()
 	// One store for the API and the v1 rewrite: every write is migrated to v2
 	// first, so a v1 PUT answers the ETag of the v2 file it wrote.
 	st := store.New(f.configPath, func(b []byte) error { _, err := check(b); return err }, store.WithNormalize(migrateAdapter))
@@ -402,6 +422,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		},
 		OnApply: func(c config.Config, etag string) {
 			ctrl.ConfigApplied(&c, etag)
+			scans.RetentionChanged()
 			rewriteV1(st, f.configPath, etag, ctrl, &migrationFailed)
 			seen(etag)
 		},
@@ -442,6 +463,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		Agent:       api.Agent{Report: ctrl.AgentReport, Tokens: tokens},
 		UI:          uiFS,
 		Hub:         hub,
+		OnJob:       ctrl.Refresh,
 		Ready:       ready.Load,
 		BaseContext: ctx,
 
@@ -463,7 +485,6 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 			ctrl.SetReconcileItem("config", false, err.Error())
 		}
 	}
-	var wg sync.WaitGroup
 	wg.Go(func() { ctrl.Run(ctx) })
 	if dockerBackend != nil {
 		// The worker stops with ctx and never tears the device containers down.
@@ -493,6 +514,7 @@ func serve(ctx context.Context, args []string, onListen func(public, internal ne
 		intAddr = intLn.Addr()
 		intDesc = intAddr.String()
 		listeners = append(listeners, intLn)
+		// device.AgentWait (the agent's long-poll hold) must stay below this WriteTimeout.
 		servers = append(servers, &http.Server{Handler: internal, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, BaseContext: base})
 	} else if f.internalListenSet {
 		// The sim agent reports in-process; the flag stays accepted for scripts that pass it.
@@ -682,6 +704,16 @@ func printerURI(st apitypes.Status, id string) (string, error) {
 	return "", api.ErrUnknownPrinter
 }
 
+// servedByIPPUSB reports whether printer id's decided family is ipp-usb.
+func servedByIPPUSB(st apitypes.Status, id string) bool {
+	for _, p := range st.Printers {
+		if p.ID == id {
+			return p.Decision != nil && p.Decision.Family == "ipp-usb"
+		}
+	}
+	return false
+}
+
 // scannerURL is the endpoint of enabled scanner id: api.ErrUnknownScanner
 // for an unknown or disabled id, scanning.ErrNoScanner while it has none.
 func scannerURL(st apitypes.Status, id string) (string, error) {
@@ -752,6 +784,24 @@ func (p printerAdapter) Cancel(ctx context.Context, id int) error {
 		return err
 	}
 	return c.Cancel(ctx, id)
+}
+
+var _ api.JobWatcher = printerAdapter{}
+
+// WatchJob follows job id through the printer's IPP job notifications
+// (api.JobWatcher), on the printer's current URI. An ipp-usb printer answers
+// ippnotify.ErrUnsupported, so the job is polled: ipp-usb ties up one of the
+// device's few IPP-USB interfaces per request in flight, and a held
+// Get-Notifications would leave the print job and LAN clients without one.
+func (p printerAdapter) WatchJob(ctx context.Context, id int, changed func()) error {
+	if servedByIPPUSB(p.ctrl.Current(), p.id) {
+		return fmt.Errorf("printer %s is served by ipp-usb: %w", p.id, ippnotify.ErrUnsupported)
+	}
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	return c.WatchJob(ctx, id, changed)
 }
 
 func (p printerAdapter) Formats(ctx context.Context) ([]string, error) {

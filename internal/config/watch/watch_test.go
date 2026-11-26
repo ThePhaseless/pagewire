@@ -290,19 +290,66 @@ func TestStartInvalidWithoutLastGoodFile(t *testing.T) {
 	}
 }
 
-func TestResyncCatchesDroppedEvents(t *testing.T) {
-	h := newHarness(t)
-	h.w.Resync = 50 * time.Millisecond
-	// The fake source never delivers: every fsnotify event is dropped.
-	h.w.watch = func(string) (<-chan fsnotify.Event, <-chan error, func() error, error) {
-		return nil, nil, func() error { return nil }, nil
+// fakeSource is an event source that never delivers a file event.
+func fakeSource(events chan fsnotify.Event, errs chan error) func(string) (<-chan fsnotify.Event, <-chan error, func() error, error) {
+	return func(string) (<-chan fsnotify.Event, <-chan error, func() error, error) {
+		return events, errs, func() error { return nil }, nil
 	}
+}
+
+// While watching a local directory nothing re-reads the file on a timer; an
+// inotify overflow (events were lost) re-reads it at once.
+func TestOverflowSyncsWithoutResync(t *testing.T) {
+	h := newHarness(t)
+	h.w.Resync = 20 * time.Millisecond
+	errs := make(chan error)
+	h.w.watch = fakeSource(make(chan fsnotify.Event), errs)
+	h.w.remoteFS = func(string) bool { return false }
 	h.write("pagewire.yaml", "name: a\n")
 	h.start()
 	h.next("apply")
 	h.write("pagewire.yaml", "name: b\n")
+	time.Sleep(10 * h.w.Resync)
+	h.noneQueued()
+	errs <- fsnotify.ErrEventOverflow
 	if e := h.next("apply"); e.name != "b" {
 		t.Fatalf("applied %q, want b", e.name)
+	}
+}
+
+// The resync runs when events cannot be trusted: on a network or FUSE
+// filesystem, or once the event stream has ended.
+func TestResyncInFallback(t *testing.T) {
+	for name, setup := range map[string]func(w *Watcher[doc]){
+		"remote filesystem": func(w *Watcher[doc]) {
+			w.watch = fakeSource(make(chan fsnotify.Event), make(chan error))
+			w.remoteFS = func(string) bool { return true }
+		},
+		"events closed": func(w *Watcher[doc]) {
+			events := make(chan fsnotify.Event)
+			close(events)
+			w.watch = fakeSource(events, make(chan error))
+			w.remoteFS = func(string) bool { return false }
+		},
+		"errors closed": func(w *Watcher[doc]) {
+			errs := make(chan error)
+			close(errs)
+			w.watch = fakeSource(make(chan fsnotify.Event), errs)
+			w.remoteFS = func(string) bool { return false }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.w.Resync = 50 * time.Millisecond
+			setup(h.w)
+			h.write("pagewire.yaml", "name: a\n")
+			h.start()
+			h.next("apply")
+			h.write("pagewire.yaml", "name: b\n")
+			if e := h.next("apply"); e.name != "b" {
+				t.Fatalf("applied %q, want b", e.name)
+			}
+		})
 	}
 }
 

@@ -16,7 +16,7 @@ pagewire supports USB printers and multifunction devices that speak IPP over USB
 |---|---|---|
 | Control plane | Deployment `pagewire`, image `pagewire` | Web UI and REST API on `:8080`, the agent endpoint on `:8081`. Reads `/data/pagewire.yaml`, picks drivers from its catalog and renders the device pods through the Kubernetes API |
 | Device pod | One Deployment per node with USB devices, owned by the control plane: `pagewire-device`, then `pagewire-device-1` to `-3` (at most 4 nodes) | Host network, so mDNS and the IPP and eSCL ports sit on the node's LAN address. Holds dbus, Avahi and the agent, plus one daemon per kind that serves all of that node's devices: ipp-usb, one PAPPL printer application per driver family in use, AirSane |
-| Agent | Sidecar in the device pod, same image as the control plane | Probes USB, sets up one PAPPL print queue per printer over loopback IPP, browses DNS-SD, downloads and checks vendor archives so their licence can be shown, and reports to the control plane every 5 s. It opens no port |
+| Agent | Sidecar in the device pod, same image as the control plane | Probes USB, sets up one PAPPL print queue per printer over loopback IPP, browses DNS-SD, downloads and checks vendor archives so their licence can be shown, and reports to the control plane when something changes, and at least every 20 s. It opens no port |
 | Device containers (docker backend) | `pagewire-device-*` containers created by the control plane through the Engine API | Same daemons as the device pod, on the host network |
 | Simulated backend | Inside the control plane, outside Kubernetes | In-process virtual printers and scanners, for trying pagewire and for tests |
 
@@ -38,7 +38,7 @@ You can override all of this per device in the config: a printer's `driver` pick
 - Kubernetes 1.33 or newer (the device pod uses native sidecars).
 - A namespace with the `privileged` Pod Security level, because the device pod uses the host network. It mounts no host paths; `deploy/examples/admission-policy.yaml` enforces that.
 - [generic-device-plugin](https://github.com/squat/generic-device-plugin) exposing the printers and scanners as an extended resource, with one group that lists all of them. Its `--domain` and device name must match `PAGEWIRE_USB_RESOURCE`: `--domain=devic.es` with a device named `printer` gives `devic.es/printer`. If they differ, the device pod stays Pending and looks like an unplugged device. Use `count: 8`, because up to eight containers of a device pod request the resource at once. See `deploy/examples/generic-device-plugin.yaml`.
-- Two ReadWriteOnce volumes: one for the config and scans, one for vendor files. The config watcher relies on inotify, which network RWX file systems do not deliver. One device pod mounts the vendor-file volume, so it must be mountable on that pod's node: the node with the USB devices, or with several nodes the one whose printer needs or offers a vendor file, else the first node in name order.
+- Two ReadWriteOnce volumes: one for the config and scans, one for vendor files. The config watcher relies on inotify, which network RWX file systems do not deliver; on a network or FUSE volume pagewire re-reads the config file every 30 s instead. One device pod mounts the vendor-file volume, so it must be mountable on that pod's node: the node with the USB devices, or with several nodes the one whose printer needs or offers a vendor file, else the first node in name order.
 - An auth proxy in front of the web UI (see Security).
 
 This list is for Kubernetes. For a single Docker or Podman host, see [Deploying with Docker or Podman](#deploying-with-docker-or-podman).
@@ -119,7 +119,7 @@ CI runs this path: the Docker Compose CLI against rootful Podman's socket. `podm
 Also:
 
 - Image pinning: set `PAGEWIRE_IMAGE=ghcr.io/thephaseless/pagewire:<version>@sha256:<digest>` and, for the device and driver images, `PAGEWIRE_IMAGE_OVERRIDES` (see Images). The probe, agent and fetch-blobs containers run the image of the control-plane container (named `pagewire`), so they always match its build. Upgrading the control-plane image, or any change to the device images, their config or the agent URL, recreates the device containers once. A control-plane restart with the same image and config keeps them running.
-- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB device that can print or scan. The control plane starts nothing until one appears, and checks again every 5 s. "waiting for the USB device nodes of <ids>" means pagewire knows which devices to use but cannot find the device nodes of the entries named, for example while one is being plugged in again. A daemon that serves only those devices stays stopped until a node is back; the others keep running.
+- The status message "Printer not plugged in or not visible to the device plugin" means, on Docker, that the host has no USB device that can print or scan. The control plane starts nothing until one appears, and checks again when a USB device is plugged in (every 5 s if the kernel's USB events are not available). "waiting for the USB device nodes of <ids>" means pagewire knows which devices to use but cannot find the device nodes of the entries named, for example while one is being plugged in again. A daemon that serves only those devices stays stopped until a node is back; the others keep running.
 - Connect URIs and the printer addresses use the source address of the host's default route, read again each time the control plane checks the device. On a host with several networks, or IPv6 only, set `PAGEWIRE_HOST_IP` to the address clients should use.
 - Vendor files, such as HP's plug-in, go into the `pagewire-blobs` volume, never into an image. The control plane creates the volume when it is missing and never removes it, and a volume of that name you create yourself is used as it is.
 - Memory: the control plane sets its Go memory limit to 80% of its container memory limit (256Mi on Kubernetes), read from the cgroup; `GOMEMLIMIT` overrides it. `compose.docker.yaml` sets no memory limit for the control plane by default, so there is none; add `mem_limit` to get one. The device containers get the same limits as on Kubernetes.
@@ -137,7 +137,7 @@ With the socket proxy, add `-f compose.docker-proxy.yaml` to the `down` command 
 
 ### Socket proxy
 
-The Engine socket is root-equivalent: whoever can use it can start a privileged container. `compose.docker-proxy.yaml` adds [socket-proxy](https://github.com/wollomatic/socket-proxy) between the control plane and the socket. The proxy passes only the Engine API calls the docker backend makes (`SECURITY.md` lists them) and refuses bind mounts from any host path other than `/dev/bus/usb`. The control plane then holds neither the socket nor its group. Start the stack with both files:
+The Engine socket is root-equivalent: whoever can use it can start a privileged container. `compose.docker-proxy.yaml` adds [socket-proxy](https://github.com/wollomatic/socket-proxy) between the control plane and the socket. The proxy passes only the Engine API calls the docker backend makes (`SECURITY.md` lists them; among them the `/events` stream, which tells pagewire when a device container stops or changes) and refuses bind mounts from any host path other than `/dev/bus/usb`. The control plane then holds neither the socket nor its group. Start the stack with both files:
 
 ```sh
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) \
@@ -233,13 +233,13 @@ What happens when a value changes:
 
 | Change | Effect |
 |---|---|
-| A printer's `defaults` and `location` | Reach the PAPPL queue on the agent's next cycle, within about 5 s. Nothing restarts |
+| A printer's `defaults` and `location` | Reach the PAPPL queue right away. Nothing restarts |
 | A scanner's `defaults` and `location` | Apply on the next visit to the Scan page |
 | `print.maxUploadMiB` | Applies to the next upload |
-| `scan.retentionDays` | Applies on the next hourly cleanup; `0` keeps scans forever |
+| `scan.retentionDays` | Applies right away: expired scans are deleted when the file is applied, then each scan as it expires; `0` keeps scans forever |
 | A printer's `name` with a PAPPL driver | The queue is deleted and recreated under the new name, which drops jobs still waiting in it |
 | Adding, removing, enabling or disabling a device; `mode`, `usb`, `driver` or `backend`; accepted EULAs; `name` and `location` of a simulated printer | The device pod of that device's node rolls once if the change alters what runs in it |
-| A printer's `driverName` | Within the same driver family, the queue is deleted and recreated with the new driver on the agent's next cycle, which drops jobs still waiting in it. When the name belongs to another family, the device pod rolls as for `driver` |
+| A printer's `driverName` | Within the same driver family, the queue is deleted and recreated with the new driver right away, which drops jobs still waiting in it. When the name belongs to another family, the device pod rolls as for `driver` |
 
 The control plane itself never restarts for a config change. An invalid file keeps the last valid config running. The UI shows each error with its line and column and offers to restore the last working settings. While the file is invalid, the upload limit and scan retention follow the last valid config. While it is missing, they follow the defaults.
 

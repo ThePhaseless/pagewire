@@ -4,10 +4,21 @@
 // /ipp/system (Get-Printers, Find-Devices, Find-Drivers, Create-Printer,
 // Delete-Printer), queues at /ipp/print/<name>, device schemes limited to
 // what the retrofit apps register ("cups" by default), any named driver
-// accepted by Create-Printer, and driver "auto" stored as "auto". Jobs are completed as soon as their document arrives.
+// accepted by Create-Printer, and driver "auto" stored as "auto". Jobs are
+// completed as soon as their document arrives.
+//
+// It also serves ippget subscriptions as PAPPL does: Create-System-Subscriptions
+// at /ipp/system, Create-Printer- and Create-Job-Subscriptions on a queue,
+// Get-Notifications (notify-wait held until any event, Options.NotifyWait or
+// the request's end), Renew- and Cancel-Subscription on either path. Events:
+// printer-created, printer-deleted, printer-config-changed on every successful
+// Set-Printer-Attributes (changed or not), job-state-changed and job-completed.
+// Leases never expire, and a deleted queue's subscriptions stay, as in PAPPL
+// until their lease ends.
 package papplfake
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +36,7 @@ import (
 
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/ippcaps"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/pappl"
 )
 
@@ -58,6 +70,21 @@ type Options struct {
 	// DropLocation accepts printer-location without storing it, as PAPPL
 	// 1.4.12 does (it passes the value to papplPrinterSetGeoLocation).
 	DropLocation bool
+	// NotifyWait is how long a Get-Notifications with notify-wait is held
+	// without events; default 30 s, as PAPPL.
+	NotifyWait time.Duration
+	// NoSubscriptions answers every subscription operation
+	// operation-not-supported, like a server without IPP notifications.
+	NoSubscriptions bool
+	// MaxSubscriptions caps live subscriptions (0: 100, PAPPL's default); a
+	// Create above it answers client-error-ignored-all-subscriptions.
+	MaxSubscriptions int
+	// ReadBack maps a keyword default (media-default, sides-default,
+	// print-color-mode-default, print-quality-default,
+	// print-content-optimize-default, orientation-requested-default,
+	// output-bin-default) or printer-location to the value the queue stores
+	// whatever a Set sent; the Set is accepted, as for a value PAPPL normalizes.
+	ReadBack map[string]string
 }
 
 // defaultCaps are the caps of a fake without Options.Caps.
@@ -94,6 +121,14 @@ type queue struct {
 	jobs []*job
 }
 
+// subscription is one ippget subscription; printer and job are 0 when it is
+// not bound to one.
+type subscription struct {
+	printer, job int
+	events       map[string]bool
+	log          []goipp.Attributes // event groups; notify-sequence-number is index+1
+}
+
 // System is the fake. It is an http.Handler; serve it with httptest or any
 // listener and use ipp://<host:port>/ipp/system as the system URI.
 type System struct {
@@ -105,6 +140,10 @@ type System struct {
 	nextJob int
 	finds   int
 	sets    [][]string // the attribute names of each Set-Printer-Attributes
+	subs    map[int]*subscription
+	nextSub int
+	wake    chan struct{} // closed and replaced on every event, like PAPPL's broadcast
+	gets    int           // Get-Notifications served
 }
 
 // New returns a fake system with no queues.
@@ -115,7 +154,44 @@ func New(o Options) *System {
 	if reflect.ValueOf(o.Caps).IsZero() {
 		o.Caps = defaultCaps()
 	}
-	return &System{opts: o, nextID: 1, nextJob: 1}
+	if o.NotifyWait == 0 {
+		o.NotifyWait = 30 * time.Second
+	}
+	if o.MaxSubscriptions == 0 {
+		o.MaxSubscriptions = 100
+	}
+	return &System{opts: o, nextID: 1, nextJob: 1, nextSub: 1, subs: map[int]*subscription{}, wake: make(chan struct{})}
+}
+
+// GetNotificationsCalls returns how many Get-Notifications requests the system
+// has served.
+func (s *System) GetNotificationsCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets
+}
+
+// Subscriptions returns how many subscriptions are live (created, not cancelled).
+func (s *System) Subscriptions() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.subs)
+}
+
+// DeleteExternally deletes the queue named name and emits printer-deleted, as
+// a user deleting it in PAPPL's web UI would. Unknown names do nothing.
+func (s *System) DeleteExternally(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i := slices.IndexFunc(s.queues, func(q *queue) bool { return q.Name == name }); i >= 0 {
+		s.deleteQueue(i)
+	}
+}
+
+func (s *System) deleteQueue(i int) {
+	q := s.queues[i]
+	s.queues = slices.Delete(s.queues, i, i+1)
+	s.emit(ippnotify.EventPrinterDeleted, q, nil)
 }
 
 // FindDevicesCalls returns how many Find-Devices requests the system has served.
@@ -165,7 +241,7 @@ func (s *System) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rsp := s.handle(req, r.Body, r.Host)
+	rsp := s.handle(r.Context(), req, r.Body, r.Host)
 	if rsp.Groups != nil { // goipp encodes only Groups once it is set
 		rsp.Groups = append(goipp.Groups{{Tag: goipp.TagOperationGroup, Attrs: rsp.Operation}}, rsp.Groups...)
 	}
@@ -173,7 +249,7 @@ func (s *System) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = rsp.Encode(w)
 }
 
-func (s *System) handle(req *goipp.Message, body io.Reader, host string) *goipp.Message {
+func (s *System) handle(ctx context.Context, req *goipp.Message, body io.Reader, host string) *goipp.Message {
 	rsp := goipp.NewResponse(goipp.DefaultVersion, goipp.StatusOk, req.RequestID)
 	rsp.Operation.Add(goipp.MakeAttribute("attributes-charset", goipp.TagCharset, goipp.String("utf-8")))
 	rsp.Operation.Add(goipp.MakeAttribute("attributes-natural-language", goipp.TagLanguage, goipp.String("en")))
@@ -191,6 +267,9 @@ func (s *System) handle(req *goipp.Message, body io.Reader, host string) *goipp.
 		if !strings.HasSuffix(uri, "/ipp/system") {
 			return fail(goipp.StatusErrorAttributesOrValues, "Bad system-uri value '%s'.", uri)
 		}
+		if subscriptionOps[op] {
+			return s.subscriptionOp(ctx, op, nil, req, rsp, fail)
+		}
 		return s.systemOp(op, req, rsp, host, fail)
 	}
 	uri := pappl.First(req.Operation, "printer-uri")
@@ -202,6 +281,9 @@ func (s *System) handle(req *goipp.Message, body io.Reader, host string) *goipp.
 	}
 	if q == nil {
 		return fail(goipp.StatusErrorNotFound, "printer-uri %s not found.", uri)
+	}
+	if subscriptionOps[op] {
+		return s.subscriptionOp(ctx, op, q, req, rsp, fail)
 	}
 	return s.printerOp(op, q, req, rsp, body, host, fail)
 }
@@ -258,7 +340,7 @@ func (s *System) systemOp(op goipp.Op, req, rsp *goipp.Message, host string, fai
 		if i < 0 {
 			return fail(goipp.StatusErrorNotFound, "Printer not found.")
 		}
-		s.queues = slices.Delete(s.queues, i, i+1)
+		s.deleteQueue(i)
 	default:
 		return fail(goipp.StatusErrorOperationNotSupported, "This operation is not supported.")
 	}
@@ -320,6 +402,7 @@ func (s *System) createPrinter(req, rsp *goipp.Message, fail failFunc) *goipp.Me
 		return r
 	}
 	s.queues = append(s.queues, q)
+	s.emit(ippnotify.EventPrinterCreated, q, nil)
 	rsp.Printer.Add(goipp.MakeAttribute("printer-id", goipp.TagInteger, goipp.Integer(int32(q.ID)))) //nolint:gosec // small counter
 	return rsp
 }
@@ -349,6 +432,9 @@ func (s *System) set(q *queue, attrs goipp.Attributes) (st goipp.Status, msg str
 	for _, a := range attrs {
 		if a.Name == "printer-name" || a.Name == "printer-device-id" {
 			continue
+		}
+		if _, ok := s.opts.ReadBack[a.Name]; ok && readBackField(&d, &loc, a.Name) != nil {
+			continue // accepted whatever its value; stored below
 		}
 		if !settable[a.Name] || len(a.Values) != 1 {
 			st, msg = goipp.StatusErrorAttributesOrValues, "Unsupported attribute '"+a.Name+"'."
@@ -427,9 +513,40 @@ func (s *System) set(q *queue, attrs goipp.Attributes) (st goipp.Status, msg str
 		}
 	}
 	if st == goipp.StatusOk {
+		for _, a := range attrs {
+			if v, ok := s.opts.ReadBack[a.Name]; ok {
+				if p := readBackField(&d, &loc, a.Name); p != nil {
+					*p = v
+				}
+			}
+		}
 		q.Defaults, q.Location = d, loc
 	}
 	return st, msg, unsupported
+}
+
+// readBackField is the stored field Options.ReadBack can substitute for the
+// attribute name, or nil.
+func readBackField(d *device.PrintSettings, loc *string, name string) *string {
+	switch name {
+	case "printer-location":
+		return loc
+	case "media-default":
+		return &d.Media
+	case "sides-default":
+		return &d.Sides
+	case "print-color-mode-default":
+		return &d.ColorMode
+	case "print-quality-default":
+		return &d.Quality
+	case "print-content-optimize-default":
+		return &d.ContentOptimize
+	case "orientation-requested-default":
+		return &d.Orientation
+	case "output-bin-default":
+		return &d.OutputBin
+	}
+	return nil
 }
 
 func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body io.Reader, host string, fail failFunc) *goipp.Message {
@@ -447,6 +564,7 @@ func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body 
 			r.Unsupported = bad
 			return r
 		}
+		s.emit(ippnotify.EventPrinterConfigChanged, q, nil) // even when nothing changed, as PAPPL
 	case goipp.OpCreateJob:
 		j := &job{id: s.nextJob, name: pappl.First(req.Operation, "job-name"), state: 3, created: time.Now()}
 		s.nextJob++
@@ -460,7 +578,7 @@ func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body 
 		if j.state != 3 {
 			return fail(goipp.StatusErrorNotPossible, "Job is not pending.")
 		}
-		j.state = 5 // processing
+		s.setJobState(q, j, 5) // processing
 		path := ""
 		if s.opts.OutputDir != "" {
 			path = filepath.Join(s.opts.OutputDir, q.Resource+"-"+strconv.Itoa(j.id)+".bin")
@@ -470,10 +588,10 @@ func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body 
 		err := save(path, body)
 		s.mu.Lock()
 		if err != nil {
-			j.state = 8 // aborted
+			s.setJobState(q, j, 8) // aborted
 			return fail(goipp.StatusErrorInternal, "%v", err)
 		}
-		j.state = 9 // completed
+		s.setJobState(q, j, 9) // completed
 		rsp.Job = jobAttrs(j)
 	case goipp.OpGetJobAttributes:
 		j := q.job(req)
@@ -496,11 +614,188 @@ func (s *System) printerOp(op goipp.Op, q *queue, req, rsp *goipp.Message, body 
 		case j.state >= 7:
 			return fail(goipp.StatusErrorNotPossible, "Job is already finished.")
 		}
-		j.state = 7 // canceled
+		s.setJobState(q, j, 7) // canceled
 	default:
 		return fail(goipp.StatusErrorOperationNotSupported, "This operation is not supported.")
 	}
 	return rsp
+}
+
+// setJobState moves j to state and emits job-state-changed, plus
+// job-completed for a terminal state.
+func (s *System) setJobState(q *queue, j *job, state goipp.Integer) {
+	j.state = state
+	s.emit(ippnotify.EventJobStateChanged, q, j)
+	if state >= 7 {
+		s.emit(ippnotify.EventJobCompleted, q, j)
+	}
+	if state == 5 || state >= 7 { // the printer starts or stops processing it, as PAPPL reports
+		s.emit(ippnotify.EventPrinterStateChanged, q, nil)
+	}
+}
+
+// subscriptionOps are the operations subscriptionOp serves.
+var subscriptionOps = map[goipp.Op]bool{
+	goipp.OpCreateSystemSubscriptions: true, goipp.OpCreatePrinterSubscriptions: true, goipp.OpCreateJobSubscriptions: true,
+	goipp.OpGetNotifications: true, goipp.OpRenewSubscription: true, goipp.OpCancelSubscription: true,
+}
+
+// subscriptionOp serves a subscription operation on the system (q nil) or on q.
+func (s *System) subscriptionOp(ctx context.Context, op goipp.Op, q *queue, req, rsp *goipp.Message, fail failFunc) *goipp.Message {
+	unsupported := func() *goipp.Message {
+		return fail(goipp.StatusErrorOperationNotSupported, "This operation is not supported.")
+	}
+	if s.opts.NoSubscriptions {
+		return unsupported()
+	}
+	switch op {
+	case goipp.OpCreateSystemSubscriptions:
+		if q != nil {
+			return unsupported()
+		}
+	case goipp.OpCreatePrinterSubscriptions, goipp.OpCreateJobSubscriptions:
+		if q == nil {
+			return unsupported()
+		}
+	case goipp.OpGetNotifications:
+		return s.notifications(ctx, req, rsp, fail)
+	case goipp.OpRenewSubscription, goipp.OpCancelSubscription:
+		ids := pappl.Ints(req.Operation, "notify-subscription-id")
+		if len(ids) == 0 {
+			return fail(goipp.StatusErrorBadRequest, "Missing \"notify-subscription-id\" attribute.")
+		}
+		if s.subs[ids[0]] == nil {
+			return fail(goipp.StatusErrorNotFound, "Subscription #%d was not found.", ids[0])
+		}
+		if op == goipp.OpCancelSubscription {
+			delete(s.subs, ids[0])
+		}
+		return rsp
+	}
+
+	sub := &subscription{events: map[string]bool{}}
+	if q != nil {
+		sub.printer = q.ID
+	}
+	if op == goipp.OpCreateJobSubscriptions {
+		ids := pappl.Ints(req.Operation, "notify-job-id")
+		if len(ids) == 0 {
+			return fail(goipp.StatusErrorBadRequest, "Missing \"notify-job-id\" attribute.")
+		}
+		if !slices.ContainsFunc(q.jobs, func(j *job) bool { return j.id == ids[0] }) {
+			return fail(goipp.StatusErrorNotFound, "Job #%d not found.", ids[0])
+		}
+		sub.job = ids[0]
+	}
+	for _, a := range req.Subscription {
+		if a.Name == "notify-events" {
+			for _, v := range a.Values {
+				sub.events[v.V.String()] = true
+			}
+		}
+	}
+	// PAPPL answers a bad subscription group, or one past the cap, with a
+	// notify-status-code and ignored-all-subscriptions.
+	bad := goipp.StatusOk
+	switch {
+	case pappl.First(req.Subscription, "notify-pull-method") != "ippget" || len(sub.events) == 0:
+		bad = goipp.StatusErrorBadRequest
+	case len(s.subs) >= s.opts.MaxSubscriptions:
+		bad = goipp.StatusErrorInternal
+	}
+	if bad != goipp.StatusOk {
+		r := fail(goipp.StatusErrorIgnoredAllSubscriptions, "No subscriptions created.")
+		r.Subscription.Add(goipp.MakeAttribute("notify-status-code", goipp.TagEnum, goipp.Integer(bad)))
+		return r
+	}
+	id := s.nextSub
+	s.nextSub++
+	s.subs[id] = sub
+	rsp.Subscription.Add(goipp.MakeAttribute("notify-subscription-id", goipp.TagInteger, goipp.Integer(int32(id)))) //nolint:gosec // small counter
+	return rsp
+}
+
+// notifications serves Get-Notifications: the events of each subscription
+// from its asked sequence number on, waiting once (with notify-wait) for any
+// event, NotifyWait or the end of the request when there are none.
+func (s *System) notifications(ctx context.Context, req, rsp *goipp.Message, fail failFunc) *goipp.Message {
+	s.gets++
+	ids := pappl.Ints(req.Operation, "notify-subscription-ids")
+	seqs := pappl.Ints(req.Operation, "notify-sequence-numbers")
+	if len(ids) == 0 {
+		return fail(goipp.StatusErrorBadRequest, "Missing \"notify-subscription-ids\" attribute.")
+	}
+	wait := false
+	for _, a := range req.Operation {
+		if a.Name == "notify-wait" && len(a.Values) == 1 {
+			b, _ := a.Values[0].V.(goipp.Boolean)
+			wait = bool(b)
+		}
+	}
+	for {
+		var groups goipp.Groups
+		for i, id := range ids {
+			sub := s.subs[id]
+			if sub == nil {
+				r := fail(goipp.StatusErrorNotFound, "Subscription #%d was not found.", id)
+				r.Unsupported.Add(goipp.MakeAttribute("notify-subscription-ids", goipp.TagInteger, goipp.Integer(int32(id)))) //nolint:gosec // client value
+				return r
+			}
+			from := 1
+			if i < len(seqs) {
+				from = max(seqs[i], 1)
+			}
+			for _, e := range sub.log[min(from-1, len(sub.log)):] {
+				groups.Add(goipp.Group{Tag: goipp.TagEventNotificationGroup, Attrs: e})
+			}
+		}
+		if len(groups) > 0 {
+			rsp.Operation.Add(goipp.MakeAttribute("notify-get-interval", goipp.TagInteger, goipp.Integer(30)))
+			rsp.Groups = groups
+			return rsp
+		}
+		if !wait {
+			return rsp
+		}
+		wait = false // PAPPL waits once
+		wake := s.wake
+		s.mu.Unlock()
+		t := time.NewTimer(s.opts.NotifyWait)
+		select {
+		case <-wake:
+		case <-t.C:
+		case <-ctx.Done():
+		}
+		t.Stop()
+		s.mu.Lock()
+	}
+}
+
+// emit records event for every subscription it matches and wakes every
+// waiting Get-Notifications, matched or not, as PAPPL's broadcast does. q is
+// the queue and j the job it concerns (nil: none).
+func (s *System) emit(event string, q *queue, j *job) {
+	for id, sub := range s.subs {
+		if !sub.events[event] || sub.printer != 0 && sub.printer != q.ID || sub.job != 0 && (j == nil || j.id != sub.job) {
+			continue
+		}
+		e := goipp.Attributes{
+			goipp.MakeAttribute("notify-subscription-id", goipp.TagInteger, goipp.Integer(int32(id))),             //nolint:gosec // small counter
+			goipp.MakeAttribute("notify-sequence-number", goipp.TagInteger, goipp.Integer(int32(len(sub.log)+1))), //nolint:gosec // small counter
+			goipp.MakeAttribute("notify-subscribed-event", goipp.TagKeyword, goipp.String(event)),
+		}
+		if j != nil {
+			name := "job-id"
+			if sub.job != 0 {
+				name = "notify-job-id" // as PAPPL names it for a job subscription
+			}
+			e.Add(goipp.MakeAttribute(name, goipp.TagInteger, goipp.Integer(int32(j.id)))) //nolint:gosec // small counter
+			e.Add(goipp.MakeAttribute("job-state", goipp.TagEnum, j.state))
+		}
+		sub.log = append(sub.log, e)
+	}
+	close(s.wake)
+	s.wake = make(chan struct{})
 }
 
 // save writes the document to path, or discards it when path is "".

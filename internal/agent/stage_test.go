@@ -239,7 +239,7 @@ func TestStageFromSyntheticVendor(t *testing.T) {
 }
 
 // TestCoreReportsStagedEULAs: the report carries the desired refs' texts, and
-// a finished staging wakes the loop instead of waiting for the interval.
+// a finished staging wakes the loop instead of waiting for the heartbeat.
 func TestCoreReportsStagedEULAs(t *testing.T) {
 	ref := hplipRef(t)
 	p := newPlane(device.DesiredState{Browse: device.BrowseTypes, StageEULAs: []device.EULARef{ref}})
@@ -255,7 +255,7 @@ func TestCoreReportsStagedEULAs(t *testing.T) {
 	core.Stage = s.Stage
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); core.Loop(ctx, p.report) }() // default 5 s interval
+	go func() { defer close(done); core.Loop(ctx, p.report) }() // the plane answers at once: a 20 s heartbeat
 	defer func() { cancel(); <-done }()
 	waitReport(t, p.reports, "a pending EULA", func(r device.AgentReport) bool {
 		return len(r.EULAs) == 1 && r.EULAs[0].State == device.EULAPending
@@ -269,4 +269,33 @@ func TestCoreReportsStagedEULAs(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("staging did not wake the loop")
 	}
+}
+
+// TestStageRetryWakes: a failure arms a timer that calls Wake when the retry
+// is due, also after a second failure that changes nothing, so a Loop that
+// only cycles on events still retries.
+func TestStageRetryWakes(t *testing.T) {
+	var wakes atomic.Int32
+	woken := make(chan struct{}, 10)
+	s := &Stager{
+		Dir: t.TempDir(), retry: 50 * time.Millisecond,
+		Wake: func() { wakes.Add(1); woken <- struct{}{} },
+		text: func(context.Context, device.EULARef) ([]byte, error) { return nil, errors.New("vendor down") },
+	}
+	refs := []device.EULARef{hplipRef(t)}
+	wait := func(n int32) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for wakes.Load() < n {
+			select {
+			case <-woken:
+			case <-deadline:
+				t.Fatalf("wakes = %d, want %d", wakes.Load(), n)
+			}
+		}
+	}
+	s.Stage(context.Background(), refs)
+	wait(2)                             // pending to failed, then the retry timer
+	s.Stage(context.Background(), refs) // due: starts the second run
+	wait(3)                             // the second failure changed nothing, its timer still fires (after 100 ms)
 }

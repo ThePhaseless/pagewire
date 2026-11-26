@@ -2,10 +2,16 @@
 // observations into the desired device workloads (one device.Spec per node),
 // applies them, and aggregates everything into the API's Status and Setup DTOs.
 //
+// The loop steps on events (config, changed agent reports, backend
+// notifications, endpoint watchers, Refresh) and at the deadlines its time
+// rules record (wakeAt); it has no periodic tick. The endpoint watchers
+// re-query each printer and scanner every endpointPoll and wake the loop
+// only when the answer differs from the last step's (watchers.go).
+//
 // Concurrency: the loop is one goroutine. It holds mu only to read or write
 // its own fields, never across a backend call (USBNodes, Observe, Apply,
 // SetUSBDevices, RestartPod) or a printer or scanner query. AgentReport never
-// calls the backend.
+// calls the backend, and holds a long-poll without holding mu.
 package controller
 
 import (
@@ -27,13 +33,12 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/catalog"
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
 )
 
 const (
-	resync       = 30 * time.Second // resync, apply retry, agent gap, start-up grace and replug delay
-	pendingWait  = 5 * time.Minute  // how long a pending or running pod is waited for before the first report
 	queryTimeout = 5 * time.Second
 	applyTimeout = time.Minute
 )
@@ -59,7 +64,12 @@ type Options struct {
 	Printer        func(uri string) PrinterObserver
 	Scanner        func(url string) ScannerObserver
 	Publish        func(apitypes.Status) // optional; called (without locks) when Status changes
-	Now            func() time.Time
+	// PublishEULA is optional; called (without locks) when an agent report
+	// changed a catalog EULA's state, version or text.
+	PublishEULA func(apitypes.EULA)
+	// AgentWait bounds an AgentReport hold (AgentReport.Wait); 0: device.AgentWait.
+	AgentWait time.Duration
+	Now       func() time.Time
 }
 
 // reportState is the latest report of one workload.
@@ -78,9 +88,10 @@ type lossState struct {
 
 // scanCaps is a cached ScannerObserver.Capabilities result.
 type scanCaps struct {
-	caps apitypes.ScannerCaps
-	ok   bool
-	at   time.Time
+	caps  apitypes.ScannerCaps
+	ok    bool
+	at    time.Time
+	fails int // consecutive failed asks
 }
 
 // Controller is the control loop. Create it with New and run Run in a goroutine.
@@ -93,9 +104,15 @@ type Controller struct {
 	printer        func(string) PrinterObserver
 	scanner        func(string) ScannerObserver
 	publish        func(apitypes.Status)
+	publishEULA    func(apitypes.EULA)
+	agentWait      time.Duration
 	now            func() time.Time
 	started        time.Time
-	wake           chan struct{}
+	wake           chan struct{} // a step is due
+	rearm          chan struct{} // a heartbeat moved the agent gap: re-arm without a step
+	pollEvery      time.Duration // endpointPoll; tests shorten it
+	pollRetry      time.Duration // the endpoint watchers' first retry, 1 s; tests shorten it
+	leaseWait      time.Duration // ippnotify.Lease; tests shorten it
 
 	// Touched only by the loop goroutine.
 	applied     bool              // a successful Apply of appliedHash happened
@@ -105,12 +122,18 @@ type Controller struct {
 	failHash    string
 	failAt      time.Time
 	failMsg     string
+	failCount   int                 // consecutive failed Applies of failHash
 	failW       map[string]string   // workload -> its Apply error, from device.WorkloadErrors
-	failLogged  string              // the last Apply error logged, so a failure that repeats each resync logs once
+	failLogged  string              // the last Apply error logged, so a failure that repeats on each retry logs once
 	nodesFailed bool                // the nodes reconcile item is false
 	nodesBlip   bool                // the node list failed transiently (logged once per streak)
+	blipCount   int                 // consecutive steps with a node-list blip or an Observe error
 	itemsFailed map[string]bool     // workload items last set false
 	caps        map[string]scanCaps // scanner caps by eSCL URL
+	next        time.Time           // the last step's earliest recorded deadline, zero none
+	stepAt      time.Time           // the last step's now
+	watchWant   []watchTarget       // the last step's endpoints, for syncWatchers
+	watchers    map[string]*watcher // running endpoint watchers by URI
 
 	mu          sync.Mutex
 	cfgRead     bool // a Config* input has arrived; until then the specs are left alone
@@ -135,6 +158,8 @@ type Controller struct {
 	published   apitypes.Status            // the last Status sent to Publish and subscribers
 	reconcile   []apitypes.ReconcileItem
 	subs        map[chan apitypes.Status]struct{}
+	desiredCh   chan struct{}   // closed and replaced whenever the desired states may have changed
+	capsReset   map[string]bool // workloads whose Attached key set changed: their scanners' caps retry at once
 }
 
 // New creates a controller. It calls nothing on the backend.
@@ -142,8 +167,10 @@ func New(o Options) *Controller {
 	c := &Controller{
 		backend: o.Backend, backendName: o.BackendName, cat: o.Catalog,
 		usbAvailable: o.USBAvailable, usbUnavailable: o.USBUnavailable,
-		printer: o.Printer, scanner: o.Scanner, publish: o.Publish, now: o.Now,
-		wake: make(chan struct{}, 1), cfgState: apitypes.ConfigMissing, cfgErrors: []config.FieldError{},
+		printer: o.Printer, scanner: o.Scanner, publish: o.Publish, publishEULA: o.PublishEULA, agentWait: o.AgentWait, now: o.Now,
+		wake: make(chan struct{}, 1), rearm: make(chan struct{}, 1), pollEvery: endpointPoll, pollRetry: time.Second, leaseWait: ippnotify.Lease * time.Second,
+		watchers: map[string]*watcher{}, desiredCh: make(chan struct{}), capsReset: map[string]bool{},
+		cfgState: apitypes.ConfigMissing, cfgErrors: []config.FieldError{},
 		appliedBy: map[string]string{}, caps: map[string]scanCaps{}, itemsFailed: map[string]bool{}, reported: map[string]bool{},
 		reports: map[string]*reportState{}, idCache: map[device.USBKey]string{}, loss: map[string]*lossState{},
 		specs: map[string]*device.Spec{}, placed: map[string]catalog.Placed{},
@@ -167,6 +194,9 @@ func New(o Options) *Controller {
 	if c.now == nil {
 		c.now = time.Now
 	}
+	if c.agentWait <= 0 {
+		c.agentWait = device.AgentWait
+	}
 	c.started = c.now()
 	return c
 }
@@ -181,19 +211,56 @@ func (e errScanner) Capabilities(context.Context) (scanning.Caps, error) {
 	return scanning.Caps{}, e.err
 }
 
-// Run runs the loop until ctx is done: at once, after every input and every 30 s.
+// Run runs the loop until ctx is done. It steps at once, then after every
+// input (config, a changed agent report, a backend notification, an endpoint
+// watcher, Refresh) and at the earliest deadline the last step recorded or
+// the live agent gap (deadline). It runs the backend's Notify when the
+// backend is a device.Notifier, and the endpoint watchers (syncWatchers).
 func (c *Controller) Run(ctx context.Context) {
-	t := time.NewTicker(resync)
+	if n, ok := c.backend.(device.Notifier); ok {
+		go n.Notify(ctx, c.poke, c.backendDegraded)
+	}
+	defer c.syncWatchers(ctx, nil) // cancel every watcher
+	t := time.NewTimer(time.Hour)
 	defer t.Stop()
 	for {
 		c.step(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.wake:
-		case <-t.C:
+		c.syncWatchers(ctx, c.watchWant)
+		for due := false; !due; {
+			if d := c.deadline(); d.IsZero() {
+				t.Stop()
+			} else {
+				t.Reset(d.Sub(c.now()))
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.wake:
+				due = true
+			case <-c.rearm:
+			case <-t.C:
+				// A heartbeat may have moved the agent gap since the timer was set.
+				d := c.deadline()
+				due = !d.IsZero() && !d.After(c.now())
+			}
 		}
 	}
+}
+
+// deadline is when the loop must step without an event: the last step's
+// earliest recorded deadline or the live agent gap, zero for none.
+func (c *Controller) deadline() time.Time { return earliest(c.next, c.gapDeadline()) }
+
+// gapDeadline is the earliest instant a report not shown silent at the last
+// step becomes silent. Computed live, so heartbeats move it without a step.
+func (c *Controller) gapDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var w wakeAt
+	for _, rs := range c.reports {
+		w.at(rs.at.Add(agentGap), c.stepAt)
+	}
+	return w.t
 }
 
 func (c *Controller) poke() {
@@ -203,11 +270,36 @@ func (c *Controller) poke() {
 	}
 }
 
+// Refresh asks the loop for a step, for inputs it has no event for (a
+// pagewire job or scan changing a printer's or scanner's state).
+func (c *Controller) Refresh() { c.poke() }
+
+func (c *Controller) signalRearm() {
+	select {
+	case c.rearm <- struct{}{}:
+	default:
+	}
+}
+
+// backendDegraded is the backend's Notify degraded callback: the
+// backend-events reconcile item, failed with msg while it is not "".
+func (c *Controller) backendDegraded(msg string) {
+	c.SetReconcileItem("backend-events", msg == "", msg)
+}
+
+// desiredChanged wakes every held AgentReport to recompute its desired
+// state. Callers hold mu.
+func (c *Controller) desiredChanged() {
+	close(c.desiredCh)
+	c.desiredCh = make(chan struct{})
+}
+
 // ConfigApplied records a valid config file.
 func (c *Controller) ConfigApplied(cfg *config.Config, etag string) {
 	c.mu.Lock()
 	c.cfgRead, c.cfgState, c.cfg, c.lastGood = true, apitypes.ConfigApplied, cfg, nil
 	c.etag, c.appliedEtag, c.cfgErrors, c.changedAt = etag, etag, []config.FieldError{}, c.now()
+	c.desiredChanged()
 	c.mu.Unlock()
 	c.poke()
 }
@@ -222,6 +314,7 @@ func (c *Controller) ConfigInvalid(err error, etag string, lastGood *config.Conf
 	c.mu.Lock()
 	c.cfgRead, c.cfgState, c.cfg, c.lastGood = true, apitypes.ConfigInvalid, nil, lastGood
 	c.etag, c.cfgErrors, c.changedAt = etag, errs, c.now()
+	c.desiredChanged()
 	c.mu.Unlock()
 	c.poke()
 }
@@ -231,6 +324,7 @@ func (c *Controller) ConfigMissing() {
 	c.mu.Lock()
 	c.cfgRead, c.cfgState, c.cfg, c.lastGood = true, apitypes.ConfigMissing, nil, nil
 	c.etag, c.cfgErrors, c.changedAt = "", []config.FieldError{}, c.now()
+	c.desiredChanged()
 	c.mu.Unlock()
 	c.poke()
 }
@@ -257,16 +351,30 @@ func (c *Controller) Config() config.Config {
 // AgentReport handles an agent report (a device.ReportFunc): it stores the
 // report, learns the probe's device IDs, updates the replug keys of the
 // entries on the report's workload and returns that workload's desired state.
-// It never calls the backend.
-func (c *Controller) AgentReport(_ context.Context, r device.AgentReport) (device.DesiredState, error) {
+// A stale report (staleReport) is answered without being stored. Only a
+// changed report wakes the loop; an identical heartbeat only moves the agent
+// gap. With r.Wait and r.DesiredVersion equal to the current version, it
+// holds the answer (without mu) until the desired state changes, AgentWait
+// passes or ctx ends. It never calls the backend.
+func (c *Controller) AgentReport(ctx context.Context, r device.AgentReport) (device.DesiredState, error) {
 	c.mu.Lock()
 	if r.Workload == "" && c.alias != "" {
 		r.Workload = c.alias // the legacy agent of the unpinned workload (legacyAlias)
 	}
 	now := c.now()
+	old := c.reports[r.Workload]
+	if old != nil && staleReport(old.r, r) {
+		ds := c.desiredFor(r.Workload)
+		c.mu.Unlock()
+		return ds, nil
+	}
 	first := now
-	if old := c.reports[r.Workload]; old != nil && old.r.PodUID == r.PodUID {
+	if old != nil && old.r.PodUID == r.PodUID {
 		first = old.firstAt
+	}
+	changed := old == nil || silent(now, old.at) || !sameReport(old.r, r)
+	if old != nil && !sameKeys(old.r.Attached, r.Attached) {
+		c.capsReset[r.Workload] = true // a returning device's scanner is asked at once
 	}
 	c.reports[r.Workload] = &reportState{r: r, at: now, firstAt: first}
 	c.reported[r.Workload] = true
@@ -275,26 +383,101 @@ func (c *Controller) AgentReport(_ context.Context, r device.AgentReport) (devic
 			c.idCache[d.Key()] = d.DeviceID
 		}
 	}
-	c.storeTexts(r.EULAs)
+	eulas := c.storeTexts(r.EULAs)
 	cfg := c.effective()
 	set := c.workloads
 	if len(set) == 0 {
 		set = []string{r.Workload}
 	}
 	v := c.view(set, c.reports)
-	if slices.Contains(set, r.Workload) {
-		c.updateLoss(cfg, v, &r, now)
+	if slices.Contains(set, r.Workload) && c.updateLoss(cfg, v, &r, now) {
+		changed = true
 	}
 	ds := c.desiredState(r.Workload, cfg, v)
+	ch := c.desiredCh
 	c.mu.Unlock()
-	c.poke()
-	return ds, nil
+	if changed {
+		c.poke()
+	} else {
+		c.signalRearm()
+	}
+	if c.publishEULA != nil {
+		for _, e := range eulas {
+			c.publishEULA(e)
+		}
+	}
+	if !r.Wait || ds.Version != r.DesiredVersion {
+		return ds, nil
+	}
+	return c.hold(ctx, r.Workload, r.DesiredVersion, ds, ch), nil
+}
+
+// hold waits for workload w's desired state to leave version: it recomputes
+// it each time ch closes, and returns the latest one when it differs, after
+// AgentWait, or when ctx ends.
+func (c *Controller) hold(ctx context.Context, w, version string, ds device.DesiredState, ch <-chan struct{}) device.DesiredState {
+	t := time.NewTimer(c.agentWait)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ds
+		case <-t.C:
+			return ds
+		case <-ch:
+		}
+		c.mu.Lock()
+		ds, ch = c.desiredFor(w), c.desiredCh
+		c.mu.Unlock()
+		if ds.Version != version {
+			return ds
+		}
+	}
+}
+
+// desiredFor is workload w's desired state now. Callers hold mu.
+func (c *Controller) desiredFor(w string) device.DesiredState {
+	set := c.workloads
+	if len(set) == 0 {
+		set = []string{w}
+	}
+	return c.desiredState(w, c.effective(), c.view(set, c.reports))
+}
+
+// staleReport reports whether r is older than the stored report old: the
+// same PodUID and non-empty Instance, and a lower non-zero Seq. A different
+// Instance (a restarted agent) is never stale.
+func staleReport(old, r device.AgentReport) bool {
+	return r.Instance != "" && r.Seq != 0 && old.PodUID == r.PodUID && old.Instance == r.Instance && r.Seq < old.Seq
+}
+
+// sameReport reports whether a and b say the same, apart from the fields
+// that change on every heartbeat.
+func sameReport(a, b device.AgentReport) bool {
+	a.Seq, a.Wait, a.DesiredVersion = 0, false, ""
+	b.Seq, b.Wait, b.DesiredVersion = 0, false, ""
+	return reflect.DeepEqual(a, b)
+}
+
+// sameKeys reports whether two device lists hold the same USB keys.
+func sameKeys(a, b []device.USBDevice) bool {
+	keys := func(l []device.USBDevice) map[device.USBKey]bool {
+		m := map[device.USBKey]bool{}
+		for _, d := range l {
+			m[d.Key()] = true
+		}
+		return m
+	}
+	return maps.Equal(keys(a), keys(b))
 }
 
 // updateLoss recomputes the replug key of every entry bound on r's workload
-// and clears the keys of entries no longer bound there. Callers hold mu.
-func (c *Controller) updateLoss(cfg *config.Config, v view, r *device.AgentReport, now time.Time) {
+// and clears the keys of entries no longer bound there. It reports whether a
+// key changed, since a new key needs a step to record its deadline. Callers
+// hold mu.
+func (c *Controller) updateLoss(cfg *config.Config, v view, r *device.AgentReport, now time.Time) bool {
 	seen := map[string]bool{}
+	mod := false
 	if cfg != nil {
 		k8s, docker := c.backendName == BackendK8s, c.backendName == BackendDocker
 		check := func(id string, p catalog.Placed, ok, printer bool) {
@@ -307,11 +490,14 @@ func (c *Controller) updateLoss(cfg *config.Config, v view, r *device.AgentRepor
 			st := c.loss[id]
 			switch {
 			case k == "":
+				mod = mod || st != nil
 				delete(c.loss, id)
 			case st == nil:
 				c.loss[id] = &lossState{workload: r.Workload, key: k, since: now}
+				mod = true
 			case st.key != k:
 				st.workload, st.key, st.since = r.Workload, k, now
+				mod = true
 			}
 		}
 		for _, p := range cfg.Printers {
@@ -326,8 +512,10 @@ func (c *Controller) updateLoss(cfg *config.Config, v view, r *device.AgentRepor
 	for id, st := range c.loss {
 		if st.workload == r.Workload && !seen[id] {
 			delete(c.loss, id)
+			mod = true
 		}
 	}
+	return mod
 }
 
 // lossKey is A8's replug key for the device key bound to an entry, from the
@@ -414,6 +602,7 @@ func (c *Controller) desiredState(w string, cfg *config.Config, v view) device.D
 	if w == c.blobWorkload(w) {
 		ds.StageEULAs = stageEULAs(c.cat, c.printerDecisions(cfg, v), acc)
 	}
+	ds.Version = device.DesiredStateVersion(ds)
 	return ds
 }
 
@@ -449,22 +638,30 @@ func (c *Controller) eulaFamily(s *device.Spec) bool {
 	})
 }
 
-// storeTexts keeps the latest text per EULA id. A pending report does not
-// replace a known text of the same version: a rolled pod's agent reports
-// pending until it has re-verified its staged archive. Callers hold mu.
-func (c *Controller) storeTexts(texts []device.EULAText) {
+// storeTexts keeps the latest text per EULA id and returns the EULA DTOs
+// that changed. A pending report does not replace a known text of the same
+// version: a rolled pod's agent reports pending until it has re-verified its
+// staged archive. Callers hold mu.
+func (c *Controller) storeTexts(texts []device.EULAText) []apitypes.EULA {
 	if c.eulaTexts == nil {
 		c.eulaTexts = map[string]device.EULAText{}
 	}
+	var changed []apitypes.EULA
 	for _, t := range texts {
-		if _, known := c.cat.EULA(t.ID); !known {
+		e, known := c.cat.EULA(t.ID)
+		if !known {
 			continue // only catalog EULAs are ever shown, so the map stays bounded
 		}
 		if old, ok := c.eulaTexts[t.ID]; ok && t.State == device.EULAPending && old.Version == t.Version {
 			continue
 		}
+		before := eulaDTO(e, c.eulaTexts)
 		c.eulaTexts[t.ID] = t
+		if after := eulaDTO(e, c.eulaTexts); !reflect.DeepEqual(before, after) {
+			changed = append(changed, after)
+		}
 	}
+	return changed
 }
 
 // EULA returns the licence text DTO of catalog EULA id, false for an id not
@@ -550,7 +747,7 @@ func (c *Controller) Setup() apitypes.Setup {
 }
 
 // Detect re-runs device detection (POST /setup/detect): it restarts every
-// workload, so each probe looks at the USB bus again. At most once per resync;
+// workload, so each probe looks at the USB bus again. At most once per detectLimit;
 // a no-op on backends that cannot restart (sim).
 func (c *Controller) Detect(ctx context.Context) error {
 	r, ok := c.backend.(device.PodRestarter)
@@ -559,7 +756,7 @@ func (c *Controller) Detect(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	now := c.now()
-	if !c.detectAt.IsZero() && now.Sub(c.detectAt) < resync {
+	if !c.detectAt.IsZero() && now.Sub(c.detectAt) < detectLimit { // a rate limit: it wakes nothing
 		c.mu.Unlock()
 		return nil
 	}
@@ -671,8 +868,9 @@ func known(r device.AgentReport, ids map[device.USBKey]string) []device.USBDevic
 // workloads that report or run a device-serving spec, sorted; or [""] when
 // the node list is unknown (no lister, an error) or empty with no named
 // workload. An unlisted node stays while its agent reported within
-// pendingWait or its applied spec serves a device, so a node can leave.
-func workloadSet(listed bool, nodes []string, reports map[string]*reportState, applied map[string]*device.Spec, now time.Time) []string {
+// pendingWait (recorded in wake) or its applied spec serves a device, so a
+// node can leave.
+func workloadSet(listed bool, nodes []string, reports map[string]*reportState, applied map[string]*device.Spec, now time.Time, wake *wakeAt) []string {
 	if !listed {
 		return []string{""}
 	}
@@ -682,13 +880,13 @@ func workloadSet(listed bool, nodes []string, reports map[string]*reportState, a
 			set[n] = true
 		}
 	}
-	for w, rs := range reports {
-		if w != "" && now.Sub(rs.at) < pendingWait {
+	for w, s := range applied {
+		if w != "" && s != nil && s.Mode != device.ModeProbe {
 			set[w] = true
 		}
 	}
-	for w, s := range applied {
-		if w != "" && s != nil && s.Mode != device.ModeProbe {
+	for w, rs := range reports {
+		if w != "" && !set[w] && wake.within(now, rs.at, pendingWait) {
 			set[w] = true
 		}
 	}
@@ -904,9 +1102,9 @@ func (c *Controller) decide(in snapshot, v view, obs map[string]device.Observati
 		d.wait = true
 		return d
 	}
-	if usbEntries && in.now.Sub(c.started) < pendingWait {
+	if usbEntries {
 		for w, o := range obs {
-			if !in.reported[w] && (o.Phase == device.PhasePending || o.Phase == device.PhaseRunning) {
+			if !in.reported[w] && (o.Phase == device.PhasePending || o.Phase == device.PhaseRunning) && in.wake.within(in.now, c.started, pendingWait) {
 				d.wait = true
 				return d
 			}
@@ -1028,25 +1226,28 @@ func (c *Controller) applyErr(w string) string {
 }
 
 // due is the Apply rule: the hash differs from the last successful Apply, or
-// the last Apply failed (retried at the next resync).
-func (c *Controller) due(hash string, now time.Time) bool {
+// the last Apply of it failed and its retry delay (retryDelay of failCount)
+// passed, which wake records.
+func (c *Controller) due(hash string, now time.Time, wake *wakeAt) bool {
 	if c.failed && hash == c.failHash {
-		return now.Sub(c.failAt) >= resync
+		return !wake.within(now, c.failAt, retryDelay(c.failCount))
 	}
 	return !c.applied || hash != c.appliedHash
 }
 
 // snapshot is the loop's copy of its inputs.
 type snapshot struct {
-	now      time.Time
-	cfgRead  bool
-	cfgState string
-	cfg      *config.Config
-	specs    map[string]*device.Spec
-	placed   map[string]catalog.Placed
-	loss     map[string]lossState
-	idCache  map[device.USBKey]string
-	reported map[string]bool
+	now       time.Time
+	wake      *wakeAt         // the step's deadlines
+	capsReset map[string]bool // workloads whose scanners' caps retry at once
+	cfgRead   bool
+	cfgState  string
+	cfg       *config.Config
+	specs     map[string]*device.Spec
+	placed    map[string]catalog.Placed
+	loss      map[string]lossState
+	idCache   map[device.USBKey]string
+	reported  map[string]bool
 }
 
 // step is one loop iteration.
@@ -1072,11 +1273,12 @@ func (c *Controller) step(ctx context.Context) {
 
 	c.mu.Lock()
 	now := c.now()
+	wake := &wakeAt{}
 	applied := map[string]*device.Spec{}
 	for w := range c.appliedBy {
 		applied[w] = c.specs[w]
 	}
-	set := workloadSet(hasLister && nodesErr == nil, nodes, c.reports, applied, now)
+	set := workloadSet(hasLister && nodesErr == nil, nodes, c.reports, applied, now, wake)
 	if blip && len(c.workloads) > 0 {
 		set = slices.Clone(c.workloads)
 	}
@@ -1103,10 +1305,11 @@ func (c *Controller) step(ctx context.Context) {
 	}
 	c.workloads = set
 	in := snapshot{
-		now: now, cfgRead: c.cfgRead, cfgState: c.cfgState, cfg: c.effective(),
+		now: now, wake: wake, capsReset: c.capsReset, cfgRead: c.cfgRead, cfgState: c.cfgState, cfg: c.effective(),
 		specs: maps.Clone(c.specs), placed: maps.Clone(c.placed), idCache: maps.Clone(c.idCache), loss: map[string]lossState{},
 		reported: maps.Clone(c.reported),
 	}
+	c.capsReset = map[string]bool{}
 	for id, st := range c.loss {
 		in.loss[id] = *st
 	}
@@ -1117,6 +1320,7 @@ func (c *Controller) step(ctx context.Context) {
 		d.specs, d.apply = in.specs, false
 	}
 	c.specs, c.placed = d.specs, d.placed
+	c.desiredChanged()
 	c.mu.Unlock()
 
 	hash := combinedHash(d.specs)
@@ -1125,7 +1329,7 @@ func (c *Controller) step(ctx context.Context) {
 		// want is these specs, the devices wait for the Apply that brings them.
 		t.SetUSBDevices(d.present, !c.applied || hash != c.appliedHash)
 	}
-	if d.apply && c.due(hash, now) {
+	if d.apply && c.due(hash, now, wake) {
 		list := make([]*device.Spec, 0, len(d.specs))
 		for _, w := range slices.Sorted(maps.Keys(d.specs)) {
 			list = append(list, d.specs[w])
@@ -1136,9 +1340,16 @@ func (c *Controller) step(ctx context.Context) {
 		// A WorkloadErrors failed only the workloads it names; the rest applied.
 		var we device.WorkloadErrors
 		partial := errors.As(err, &we)
+		again := c.failed && c.failHash == hash
 		c.failed, c.failMsg, c.failW = err != nil, "", map[string]string{}
 		if err != nil {
+			if again {
+				c.failCount++
+			} else {
+				c.failCount = 1
+			}
 			c.applied, c.failHash, c.failAt = false, hash, now
+			wake.at(now.Add(retryDelay(c.failCount)), now)
 			if partial {
 				for w, e := range we {
 					c.failW[w] = e.Error()
@@ -1151,7 +1362,7 @@ func (c *Controller) step(ctx context.Context) {
 				c.failLogged = err.Error()
 			}
 		} else {
-			c.applied, c.appliedHash, c.failLogged = true, hash, ""
+			c.applied, c.appliedHash, c.failLogged, c.failCount = true, hash, "", 0
 		}
 		if err == nil || partial {
 			c.appliedBy = map[string]string{}
@@ -1211,6 +1422,16 @@ func (c *Controller) step(ctx context.Context) {
 	if c.failed && d.apply {
 		applyErr = c.applyErr
 	}
+	// A transient node-list error or an Observe error has no event of its
+	// own when it clears: retry with the same backoff as Apply. In k8s
+	// single-node mode this step's USBNodes also re-arms the backend's
+	// node-list re-check.
+	if blip || obsErr != nil {
+		c.blipCount++
+		wake.at(now.Add(retryDelay(c.blipCount)), now)
+	} else {
+		c.blipCount = 0
+	}
 
 	c.restart(ctx, in, d)
 
@@ -1219,7 +1440,8 @@ func (c *Controller) step(ctx context.Context) {
 		in.loss[id] = *st
 	}
 	c.mu.Unlock()
-	st := c.observe(ctx, in, v, d, obs, obsErr, applyErr)
+	st, want := c.observe(ctx, in, v, d, obs, obsErr, applyErr)
+	c.watchWant, c.next, c.stepAt = want, wake.t, now
 
 	c.mu.Lock()
 	c.status = st
@@ -1265,7 +1487,7 @@ func (c *Controller) restart(ctx context.Context, in snapshot, d desired) {
 	c.mu.Lock()
 	due := map[string][]string{} // workload -> entry ids
 	for id, st := range c.loss {
-		if st.key != "" && st.key != st.restartedKey && in.now.Sub(st.since) >= resync && d.specs[st.workload] != nil {
+		if st.key != "" && st.key != st.restartedKey && d.specs[st.workload] != nil && !in.wake.within(in.now, st.since, replugDelay) {
 			due[st.workload] = append(due[st.workload], id)
 		}
 	}

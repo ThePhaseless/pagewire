@@ -853,6 +853,8 @@ func TestLegacyQueueReachesOK(t *testing.T) {
 	}
 
 	finds, sets := second.FindDevicesCalls(), second.SetCalls()
+	// The exported Wake forces a full reconcile, so these are three real
+	// reconciles: the pin proves they send no extra Find-Devices or Set.
 	r.cycles(t, b, 3)
 	if got := second.FindDevicesCalls(); got != 1 || finds != 1 {
 		t.Errorf("Find-Devices calls = %d then %d, want 1", finds, got)

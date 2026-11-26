@@ -11,9 +11,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/mount"
@@ -35,6 +38,11 @@ type fakeEngine struct {
 	health    map[string]*container.Health // container name → health after start; a nil value means none
 	errs      map[string]error             // "Method name" → error
 	pullHook  func(ctx context.Context, ref string) error
+
+	evOpts  []client.EventsListOptions // every Events call, in order
+	evErr   error                      // what each Events call fails with; nil: a stream
+	evMsgs  chan events.Message        // shared by every stream; emit sends on it
+	evBreak chan error                 // the current stream's error channel
 }
 
 type fakeContainer struct {
@@ -62,6 +70,60 @@ func newFake() *fakeEngine {
 		exitCodes:  map[string]int{},
 		health:     map[string]*container.Health{},
 		errs:       map[string]error{},
+		evErr:      errors.New("events not supported"),
+		evMsgs:     make(chan events.Message),
+	}
+}
+
+// Events records its options and answers like the client: a buffered error
+// channel that gets one error and is then closed, and a message channel that
+// is never closed. It applies no filters, so emitted events reach the
+// backend's client-side guard.
+func (f *fakeEngine) Events(_ context.Context, o client.EventsListOptions) client.EventsResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.evOpts = append(f.evOpts, o)
+	errc := make(chan error, 1)
+	if f.evErr != nil {
+		errc <- f.evErr
+		close(errc)
+	} else {
+		f.evBreak = errc
+	}
+	return client.EventsResult{Messages: f.evMsgs, Err: errc}
+}
+
+// setEventsErr makes the following Events calls fail with err, or stream (nil).
+func (f *fakeEngine) setEventsErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.evErr = err
+}
+
+// breakEvents ends the current stream with err.
+func (f *fakeEngine) breakEvents(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.evBreak != nil {
+		f.evBreak <- err
+		close(f.evBreak)
+		f.evBreak = nil
+	}
+}
+
+func (f *fakeEngine) eventsCalls() []client.EventsListOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.evOpts)
+}
+
+// emit hands m to the backend's open stream, failing after 5 s.
+func (f *fakeEngine) emit(t *testing.T, m events.Message) {
+	t.Helper()
+	select {
+	case f.evMsgs <- m:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no stream read event %s", m.Action)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
@@ -121,15 +122,50 @@ func TestDockerBackend(t *testing.T) {
 
 	t.Run("self-heal", func(t *testing.T) {
 		old := dockerIDs(dockerOwned(ctx, t, eng))["sim-printer-0"]
+		reacted := dockerReaction(ctx, t, eng, docker.Prefix+"sim-printer-0")
+		filtered := dockerFiltered(ctx, t, eng, docker.Prefix+"sim-printer-0")
+		removed := time.Now()
 		if _, err := eng.ContainerRemove(ctx, docker.Prefix+"sim-printer-0", client.ContainerRemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 			t.Fatal(err)
+		}
+		// The backend's own stream filters on the server by type, label and
+		// event; this engine must pass the removed container's die or destroy
+		// through them, or the backend never hears of it.
+		select {
+		case ev := <-filtered:
+			if ev.err != nil {
+				t.Fatalf("Engine events with the backend's filters: %v", ev.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no die or destroy of sim-printer-0 within 10 s on a stream with docker.EventFilters: this engine's server-side event filter drops it")
+		}
+		// The fallback re-check runs every 30 s, so a rollout step this fast
+		// comes from an event: the backend's stream, or the agent reporting
+		// the vanished printer service (either makes the controller re-apply).
+		// The rollout itself may take longer: it stops each container with a
+		// 10 s timeout, and AirSane was seen to wait out that timeout in runs
+		// that scanned first.
+		select {
+		case ev := <-reacted:
+			if ev.err != nil {
+				t.Fatalf("Engine events: %v", ev.err)
+			}
+			t.Logf("backend reacted %s after the remove: %s %s", time.Since(removed).Round(time.Millisecond), ev.Action, ev.Actor.Attributes["name"])
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no rollout step within 10 s of removing sim-printer-0; state: %s", dockerState(dockerOwned(ctx, t, eng)))
 		}
 		waitFor(ctx, t, 3*time.Minute, "a new sim-printer and every device container running", func() (bool, string) {
 			owned := dockerOwned(ctx, t, eng)
 			id := dockerIDs(owned)["sim-printer-0"]
 			return id != "" && id != old && dockerAllRunning(owned), dockerState(owned)
 		})
-		dockerWaitReady(ctx, t, base, 3*time.Minute)
+		t.Logf("new sim-printer-0 and every device container running %s after the remove", time.Since(removed).Round(time.Millisecond))
+		st := dockerWaitReady(ctx, t, base, 3*time.Minute)
+		for _, r := range st.Reconcile {
+			if r.Item == "backend-events" && !r.OK {
+				t.Errorf("reconcile item backend-events failed: %s", r.Message)
+			}
+		}
 	})
 
 	t.Run("spec change rolls the workload", func(t *testing.T) {
@@ -155,6 +191,79 @@ func TestDockerBackend(t *testing.T) {
 		})
 		dockerWaitReady(ctx, t, base, 3*time.Minute)
 	})
+}
+
+// dockerReaction follows the Engine's events for the backend's containers and
+// delivers the first rollout step that is not the removal of gone (its own
+// kill, die and destroy): another device container stopped, or one created.
+// A stream error is delivered instead. The stream replays from now, so an
+// event that comes before the request is connected is not missed.
+func dockerReaction(ctx context.Context, t *testing.T, eng *client.Client, gone string) <-chan dockerEvent {
+	t.Helper()
+	ectx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	now := time.Now()
+	r := eng.Events(ectx, client.EventsListOptions{Since: fmt.Sprintf("%d.%09d", now.Unix(), now.Nanosecond()), Filters: make(client.Filters).
+		Add("type", "container").Add("label", docker.LabelManagedBy+"="+docker.ManagedBy)})
+	out := make(chan dockerEvent, 1)
+	go func() {
+		for {
+			select {
+			case <-ectx.Done():
+				return
+			case err := <-r.Err:
+				out <- dockerEvent{err: fmt.Errorf("stream ended: %w", err)}
+				return
+			case m := <-r.Messages:
+				name := m.Actor.Attributes["name"]
+				switch m.Action {
+				case events.ActionKill, events.ActionStop, events.ActionDie, events.ActionDestroy:
+					if name == gone {
+						continue
+					}
+				case events.ActionCreate:
+				default:
+					continue
+				}
+				out <- dockerEvent{Message: m}
+				return
+			}
+		}
+	}()
+	return out
+}
+
+// dockerFiltered sends the first die or destroy of container gone on a
+// stream with the backend's own filters (docker.EventFilters).
+func dockerFiltered(ctx context.Context, t *testing.T, eng *client.Client, gone string) <-chan dockerEvent {
+	t.Helper()
+	ectx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	now := time.Now()
+	r := eng.Events(ectx, client.EventsListOptions{Since: fmt.Sprintf("%d.%09d", now.Unix(), now.Nanosecond()), Filters: docker.EventFilters()})
+	out := make(chan dockerEvent, 1)
+	go func() {
+		for {
+			select {
+			case <-ectx.Done():
+				return
+			case err := <-r.Err:
+				out <- dockerEvent{err: fmt.Errorf("stream ended: %w", err)}
+				return
+			case m := <-r.Messages:
+				if (m.Action == events.ActionDie || m.Action == events.ActionDestroy) && m.Actor.Attributes["name"] == gone {
+					out <- dockerEvent{Message: m}
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+type dockerEvent struct {
+	events.Message
+	err error
 }
 
 // dockerHardeningErr checks one device container's host config, normalised for

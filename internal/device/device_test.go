@@ -322,13 +322,13 @@ func TestJSONNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := slices.Sorted(maps.Keys(report))
-	if want := []string{"appliedHash", "attached", "blobs", "eulas", "inventory", "podUid", "probeNodes", "queues", "services", "workload"}; !reflect.DeepEqual(keys, want) {
+	if want := []string{"appliedHash", "attached", "blobs", "desiredVersion", "eulas", "instance", "inventory", "podUid", "probeNodes", "queues", "seq", "services", "wait", "workload"}; !reflect.DeepEqual(keys, want) {
 		t.Errorf("AgentReport keys %v, want %v", keys, want)
 	}
 	if report["attached"] != nil || report["probeNodes"] != nil {
 		t.Errorf("nil Attached and ProbeNodes must encode as null: %v", report)
 	}
-	if got := mustJSON(DesiredState{}); !strings.Contains(got, `"stageEulas"`) || !strings.Contains(got, `"queues"`) {
+	if got := mustJSON(DesiredState{}); !strings.Contains(got, `"stageEulas"`) || !strings.Contains(got, `"queues"`) || !strings.Contains(got, `"version":""`) {
 		t.Errorf("DesiredState JSON: %s", got)
 	}
 	got = mustJSON(QueueSpec{})
@@ -356,5 +356,55 @@ func TestJSONNames(t *testing.T) {
 	if got := mustJSON(PrinterDecision{}); !strings.Contains(got, `"family"`) || !strings.Contains(got, `"requiredEulas"`) || !strings.Contains(got, `"optionalEulas"`) ||
 		!strings.Contains(got, `"driver":""`) || !strings.Contains(got, `"driverDescription":""`) {
 		t.Errorf("PrinterDecision JSON: %s", got)
+	}
+}
+
+func TestDesiredStateVersion(t *testing.T) {
+	base := func() DesiredState {
+		return DesiredState{
+			Hash:       "h",
+			Queues:     []QueueSpec{{ID: "office", Name: "Office", Schemes: []string{"hp", "usb"}, Device: USBDevice{VendorID: "03f0", ProductID: "2b17"}}},
+			Browse:     BrowseTypes,
+			StageEULAs: []EULARef{{ID: "hplip-plugin", Version: "3.24.4"}},
+		}
+	}
+	ds := base()
+	v := DesiredStateVersion(ds)
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(v) {
+		t.Fatalf("version %q is not 64 lowercase hex characters", v)
+	}
+	ds.Version = v
+	if DesiredStateVersion(ds) != v {
+		t.Error("the Version field changes the version")
+	}
+	if ds.Queues[0].Schemes == nil || ds.Queues[0].Device.Interfaces != nil {
+		t.Error("DesiredStateVersion modified its argument's queues")
+	}
+
+	empty := DesiredState{Queues: []QueueSpec{{ID: "q", Schemes: []string{}, Device: USBDevice{Interfaces: []USBInterface{}}}}, Browse: []string{}, StageEULAs: []EULARef{}}
+	nils := DesiredState{Queues: []QueueSpec{{ID: "q"}}}
+	if DesiredStateVersion(empty) != DesiredStateVersion(nils) {
+		t.Error("nil and empty slices version differently")
+	}
+	if DesiredStateVersion(DesiredState{Queues: []QueueSpec{}}) != DesiredStateVersion(DesiredState{}) {
+		t.Error("nil and empty queues version differently")
+	}
+
+	changes := map[string]func(*DesiredState){
+		"queue name":   func(ds *DesiredState) { ds.Queues[0].Name = "Hall" },
+		"queue added":  func(ds *DesiredState) { ds.Queues = append(ds.Queues, QueueSpec{ID: "laser"}) },
+		"no queues":    func(ds *DesiredState) { ds.Queues = nil },
+		"queue device": func(ds *DesiredState) { ds.Queues[0].Device.Serial = "S1" },
+		"hash":         func(ds *DesiredState) { ds.Hash = "other" },
+		"stage EULAs":  func(ds *DesiredState) { ds.StageEULAs = nil },
+	}
+	for name, change := range changes {
+		t.Run("changes on "+name, func(t *testing.T) {
+			ds := base()
+			change(&ds)
+			if DesiredStateVersion(ds) == v {
+				t.Errorf("changing %s did not change the version", name)
+			}
+		})
 	}
 }

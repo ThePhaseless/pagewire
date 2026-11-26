@@ -295,6 +295,17 @@ type NodeLister interface {
 	USBNodes(ctx context.Context) ([]string, error)
 }
 
+// Notifier is an optional Backend capability, found by type assertion. The
+// k8s and docker backends implement it; sim does not, because its
+// observations change only inside Apply.
+type Notifier interface {
+	// Notify calls changed (no locks held, never blocking) whenever an Observe
+	// or USBNodes result may differ, and degraded(msg) when an event source is
+	// unavailable and a periodic re-check replaces it, until ctx is done. msg
+	// joins the problems of every degraded source; "" means none is left.
+	Notify(ctx context.Context, changed func(), degraded func(msg string))
+}
+
 // WorkloadErrors is an Apply error that failed only the workloads it names
 // (Spec.Node, "" for the node-less one); every other spec was applied. Any
 // other Apply error fails every workload.

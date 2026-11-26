@@ -358,6 +358,84 @@ func TestServiceJanitorSkipsRunning(t *testing.T) {
 	h.wait(t, sc.ID, ScanCompleted)
 }
 
+func TestServiceJanitorDeadline(t *testing.T) {
+	h := newHarness(t, 1)
+	if next := h.svc.sweep(); !next.IsZero() {
+		t.Fatalf("retention off: next sweep %v, want none", next)
+	}
+	h.svc = h.newService(func() time.Duration { return 48 * time.Hour })
+	if next := h.svc.sweep(); !next.IsZero() {
+		t.Fatalf("no scans: next sweep %v, want none", next)
+	}
+	t0 := h.clock.Now()
+	h.scanDone(t, "pdf")
+	h.clock.Set(t0.Add(10 * time.Hour))
+	h.scanDone(t, "pdf")
+	h.clock.Set(t0.Add(20 * time.Hour))
+	if next, want := h.svc.sweep(), t0.Add(48*time.Hour); !next.Equal(want) {
+		t.Fatalf("next sweep %v, want the oldest expiry %v", next, want)
+	}
+}
+
+func TestServiceJanitorRetentionChangedSweeps(t *testing.T) {
+	h := newHarness(t, 1)
+	var mu sync.Mutex
+	retention, calls := 48*time.Hour, 0
+	h.svc = h.newService(func() time.Duration { mu.Lock(); defer mu.Unlock(); calls++; return retention })
+	sc := h.scanDone(t, "pdf")
+	select {
+	case <-h.svc.kick: // drained so only RetentionChanged can wake the janitor below
+	default:
+		t.Fatal("a finished scan did not kick the janitor")
+	}
+	h.clock.Set(h.clock.Now().Add(24 * time.Hour))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.svc.RunJanitor(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	waitFor("the first sweep", func() bool { mu.Lock(); defer mu.Unlock(); return calls >= 1 })
+	if _, err := h.svc.Get(sc.ID); err != nil {
+		t.Fatalf("a 1-day-old scan was deleted under 2-day retention: %v", err)
+	}
+	mu.Lock()
+	retention = 12 * time.Hour
+	mu.Unlock()
+	h.svc.RetentionChanged()
+	waitFor("the scan to be deleted", func() bool { _, err := h.svc.Get(sc.ID); return err != nil })
+}
+
+func TestServiceJanitorDeleteFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can delete anywhere")
+	}
+	h := newHarness(t, 1)
+	h.svc = h.newService(func() time.Duration { return time.Hour })
+	sc := h.scanDone(t, "pdf")
+	h.clock.Set(h.clock.Now().Add(110 * time.Minute))
+	h.scanDone(t, "pdf")                             // a younger scan that expires before the floor
+	h.clock.Set(h.clock.Now().Add(10 * time.Minute)) // first scan expired, second due in 50 min
+	if err := os.Chmod(h.dir, 0o500); err != nil {   //nolint:gosec // the test needs a directory it cannot delete from
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(h.dir, 0o700) }) //nolint:gosec // restore for TempDir cleanup
+	if next, want := h.svc.sweep(), h.clock.Now().Add(janitorRetry); !next.Equal(want) {
+		t.Fatalf("next sweep %v, want now+janitorRetry %v", next, want)
+	}
+	if _, err := h.svc.Get(sc.ID); err != nil {
+		t.Fatalf("the undeletable scan vanished from the list: %v", err)
+	}
+}
+
 func TestServiceFailures(t *testing.T) {
 	t.Run("scanner refuses the job", func(t *testing.T) {
 		h := newHarness(t, 1)

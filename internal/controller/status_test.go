@@ -40,8 +40,12 @@ func TestEndpointsByBackend(t *testing.T) {
 		{BackendDocker, "ipp://192.168.1.20:60000/ipp/print", "http://192.168.1.20:60000/eSCL"},
 		{BackendSim, "ipp://sim/printer", "http://sim/eSCL"},
 	} {
-		if got := printerEndpoint(cat, tc.backend, w, p, ps, hp).uri; got != tc.ipp {
-			t.Errorf("%s printer URI %q, want %q", tc.backend, got, tc.ipp)
+		e := printerEndpoint(cat, tc.backend, w, p, ps, hp)
+		if e.uri != tc.ipp {
+			t.Errorf("%s printer URI %q, want %q", tc.backend, e.uri, tc.ipp)
+		}
+		if want := tc.backend != BackendSim; e.ippUSB != want { // sim serves the family itself
+			t.Errorf("%s printer ippUSB = %v, want %v", tc.backend, e.ippUSB, want)
 		}
 		if got := scannerEndpoint(cat, tc.backend, w, sc, ss, hp, nil).uri; got != tc.escl {
 			t.Errorf("%s scanner URL %q, want %q", tc.backend, got, tc.escl)
@@ -210,8 +214,18 @@ func TestWorkloadSet(t *testing.T) {
 		"serving spec stays":         {listed: true, applied: serving, want: []string{"n5"}},
 		"empty list with a reporter": {listed: true, reports: fresh, want: []string{"n3"}},
 	} {
-		if got := workloadSet(tc.listed, tc.nodes, tc.reports, tc.applied, now); !reflect.DeepEqual(got, tc.want) {
+		if got := workloadSet(tc.listed, tc.nodes, tc.reports, tc.applied, now, nil); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)
 		}
+	}
+	// Only an unlisted reporter's stay records a deadline.
+	var w wakeAt
+	workloadSet(true, []string{"n3"}, fresh, nil, now, &w)
+	if !w.t.IsZero() {
+		t.Errorf("a listed node recorded %v", w.t)
+	}
+	workloadSet(true, nil, fresh, nil, now, &w)
+	if !w.t.Equal(now.Add(pendingWait)) {
+		t.Errorf("deadline %v, want the unlisted report's pendingWait", w.t)
 	}
 }

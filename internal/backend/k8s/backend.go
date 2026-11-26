@@ -27,7 +27,7 @@ import (
 // Backend runs the device workloads through the Kubernetes API: one
 // Deployment per node with USB devices, in the fixed slots SlotName(0) to
 // SlotName(MaxSlots-1). It implements device.Backend, device.PodRestarter,
-// device.NodeLister and device.AgentTokenSource.
+// device.NodeLister, device.AgentTokenSource and device.Notifier.
 //
 // Single-node mode (the default, and whenever listing nodes fails, such as
 // without the optional pagewire-nodes ClusterRole) runs slot 0 alone, unpinned,
@@ -45,7 +45,7 @@ type Backend struct {
 	multi      bool           // set by the last USBNodes call
 	recovered  bool           // slots was read from the Deployments since multi turned true
 	slots      map[int]string // multi-node: slot -> node; "" is an unpinned slot (0 only)
-	nodesErr   error          // the last node-list failure, returned until nodesAt+nodeBackoff
+	nodesErr   error          // the last 403/404 node-list failure, returned until nodesAt+nodeBackoff
 	nodesAt    time.Time
 	nodesFails bool         // the last node list failed; latches the log line
 	warned     map[int]bool // slots whose pods were skipped for want of a node, logged once
@@ -55,6 +55,9 @@ type Backend struct {
 	tokErr error
 	tokAt  time.Time
 	now    func() time.Time
+
+	nodesSig chan nodesState                                     // latest-wins mode signal from USBNodes to Notify
+	newTimer func(time.Duration) (<-chan time.Time, func() bool) // every Notify wait; tests replace it
 }
 
 // tokenTTL bounds how often AgentToken reads the Secret, so unauthenticated
@@ -63,19 +66,44 @@ const tokenTTL = 5 * time.Second
 
 // nodeBackoff is how long a failed node list is reused before the next try,
 // so single-node installs (no ClusterRole) call the API every 5 minutes at most.
+// Notify re-arms a one-shot re-check from each failed list, so a ClusterRole
+// added later is found without an event.
 const nodeBackoff = 5 * time.Minute
+
+// nodesState is the node mode USBNodes signals to Notify: multi-node, or
+// single-node after the failed list at at.
+type nodesState struct {
+	multi bool
+	at    time.Time
+}
 
 var (
 	_ device.Backend          = (*Backend)(nil)
 	_ device.PodRestarter     = (*Backend)(nil)
 	_ device.NodeLister       = (*Backend)(nil)
 	_ device.AgentTokenSource = (*Backend)(nil)
+	_ device.Notifier         = (*Backend)(nil)
 )
 
 // New returns a Backend. It makes no API call; the owner Deployment is read on
 // the first Apply with a spec.
 func New(client kubernetes.Interface, p Params) *Backend {
-	return &Backend{client: client, p: p, now: time.Now}
+	return &Backend{client: client, p: p, now: time.Now, nodesSig: make(chan nodesState, 1), newTimer: func(d time.Duration) (<-chan time.Time, func() bool) {
+		t := time.NewTimer(d)
+		return t.C, t.Stop
+	}}
+}
+
+// signalNodes replaces any unread signal with s; it never blocks. Callers hold b.mu.
+func (b *Backend) signalNodes(s nodesState) {
+	select {
+	case <-b.nodesSig:
+	default:
+	}
+	select {
+	case b.nodesSig <- s:
+	default:
+	}
 }
 
 // slotSelector lists the pods of one slot.
@@ -97,6 +125,8 @@ func allSlotsSelector() metav1.ListOptions {
 // single-node mode with an error wrapping device.ErrSingleNode, returned
 // again without an API call for nodeBackoff. Any other error (a timeout, a
 // 5xx) is transient: the mode and slot map stay, and the next call retries.
+// Each 403/404 and each switch to multi-node mode signals Notify, which arms
+// or drops the single-node re-check; cached and transient errors send nothing.
 func (b *Backend) USBNodes(ctx context.Context) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -114,6 +144,7 @@ func (b *Backend) USBNodes(ctx context.Context) ([]string, error) {
 		}
 		b.nodesErr, b.nodesAt, b.nodesFails = err, b.now(), true
 		b.multi, b.recovered, b.slots = false, false, nil
+		b.signalNodes(nodesState{at: b.nodesAt})
 		return nil, err
 	}
 	if b.nodesFails {
@@ -122,15 +153,22 @@ func (b *Backend) USBNodes(ctx context.Context) ([]string, error) {
 	b.nodesErr, b.nodesFails = nil, false
 	if !b.multi {
 		b.multi, b.recovered, b.slots = true, false, nil
+		b.signalNodes(nodesState{multi: true})
 	}
 	var names []string
-	for _, n := range list.Items {
-		if q, ok := n.Status.Allocatable[corev1.ResourceName(b.p.USBResource)]; b.p.USBResource != "" && ok && q.Sign() > 0 {
-			names = append(names, n.Name)
+	for i := range list.Items {
+		if hasUSB(&list.Items[i], b.p.USBResource) {
+			names = append(names, list.Items[i].Name)
 		}
 	}
 	slices.Sort(names)
 	return names, nil
+}
+
+// hasUSB reports whether node n's allocatable resource res is above 0.
+func hasUSB(n *corev1.Node, res string) bool {
+	q, ok := n.Status.Allocatable[corev1.ResourceName(res)]
+	return res != "" && ok && q.Sign() > 0
 }
 
 // recoverSlots reads the slot -> node map from the Deployments' node

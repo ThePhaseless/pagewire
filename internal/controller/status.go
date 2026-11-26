@@ -178,7 +178,10 @@ func queueResult(r *device.AgentReport, id string) *device.QueueResult {
 
 // endpoint is one entry's matched address: the URI or URL and the DNS-SD
 // instance name it came from ("" none).
-type endpoint struct{ uri, dnssd string }
+type endpoint struct {
+	uri, dnssd string
+	ippUSB     bool // served by ipp-usb, which ties up one of the device's few IPP-USB interfaces per request in flight
+}
 
 // workloadIn is what the endpoint and phase rules read of one workload.
 type workloadIn struct {
@@ -231,7 +234,7 @@ func printerEndpoint(cat *catalog.Catalog, backend string, w workloadIn, p confi
 		return endpoint{}
 	case fam.ID == "ipp-usb":
 		if s, ok := pick(r.Services, device.ServiceIPP, "rp", ippUSBPort, ippUSBScore(dev)); ok {
-			return endpoint{uri: serviceURL("ipp", w.obs.HostIP, s, "rp"), dnssd: s.Name}
+			return endpoint{uri: serviceURL("ipp", w.obs.HostIP, s, "rp"), dnssd: s.Name, ippUSB: true}
 		}
 		return endpoint{}
 	}
@@ -339,6 +342,7 @@ type phaseIn struct {
 	available   bool
 	waitMessage string
 	now         time.Time
+	wake        *wakeAt // records the start grace's end
 }
 
 // entryPhase is A10's per-device phase, highest priority first.
@@ -365,7 +369,7 @@ func entryPhase(in phaseIn) (string, string) {
 		// Connection refused: the printer application is still starting while
 		// the pod is young or a container is still waiting.
 		waiting := o.Message != "" && o.Phase != device.PhaseFailed && !o.Unschedulable
-		if in.queue.Unreachable && (rs != nil && in.now.Sub(rs.firstAt) < resync || waiting) {
+		if in.queue.Unreachable && (rs != nil && in.wake.within(in.now, rs.firstAt, startGrace) || waiting) {
 			return apitypes.PhaseDeploying, msgStartingApp
 		}
 		return apitypes.PhaseError, in.queue.Message
@@ -377,7 +381,7 @@ func entryPhase(in phaseIn) (string, string) {
 		return apitypes.PhaseError, orDefault(o.Message, msgPodFailed)
 	case o.Unschedulable:
 		return apitypes.PhaseProbing, msgUnschedulable
-	case rs != nil && in.now.Sub(rs.at) > resync:
+	case rs != nil && silent(in.now, rs.at):
 		return apitypes.PhaseDegraded, msgNotReporting
 	case rs == nil:
 		return apitypes.PhaseDeploying, msgWaitingAgent
@@ -416,7 +420,7 @@ func workloadMessage(w workloadIn, obsErr error, applyErr string, now time.Time)
 		return w.obs.Message, false
 	case w.rs == nil:
 		return msgWaitingAgent, false
-	case now.Sub(w.rs.at) > resync:
+	case silent(now, w.rs.at):
 		return msgNotReporting, false
 	}
 	return "", false
@@ -494,9 +498,20 @@ type scannerQuery struct {
 	asked   bool // Capabilities was called
 }
 
+// absentKey reports whether an entry's device key is known to be unplugged:
+// the key is non-zero and missing from a non-nil Attached list of its
+// workload's latest report. A zero key (or no list) counts as present.
+func absentKey(key device.USBKey, rs *reportState) bool {
+	if key == (device.USBKey{}) || rs == nil || rs.r.Attached == nil {
+		return false
+	}
+	return !slices.ContainsFunc(rs.r.Attached, func(d device.USBDevice) bool { return d.Key() == key })
+}
+
 // observe matches endpoints, queries every printer and scanner (no lock held,
-// concurrently) and builds the loop's parts of Status.
-func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired, obs map[string]device.Observation, obsErr error, applyErr func(workload string) string) apitypes.Status {
+// concurrently) and builds the loop's parts of Status, and the endpoint
+// watchers' targets with this step's results as their baselines.
+func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired, obs map[string]device.Observation, obsErr error, applyErr func(workload string) string) (apitypes.Status, []watchTarget) {
 	st := initialStatus()
 	cfg := in.cfg
 	wl := func(w string) workloadIn {
@@ -511,11 +526,14 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 	}
 	pEnd := make([]endpoint, len(printers))
 	sEnd := make([]endpoint, len(scanners))
+	pAbsent := make([]bool, len(printers))
+	sAbsent := make([]bool, len(scanners))
 	for i, p := range printers {
 		w := d.workloadW[p.ID]
 		if s := d.specs[w]; s != nil && p.Enabled {
 			if j := slices.IndexFunc(s.Printers, func(ps device.PrinterSpec) bool { return ps.ID == p.ID }); j >= 0 {
 				pEnd[i] = printerEndpoint(c.cat, c.backendName, wl(w), p, s.Printers[j], d.placed[p.ID].Device)
+				pAbsent[i] = absentKey(s.Printers[j].USB, v.reports[w])
 			}
 		}
 	}
@@ -523,6 +541,7 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 		w := d.workloadW[sc.ID]
 		if s := d.specs[w]; s != nil && sc.Enabled {
 			if j := slices.IndexFunc(s.Scanners, func(ss device.ScannerSpec) bool { return ss.ID == sc.ID }); j >= 0 {
+				sAbsent[i] = absentKey(s.Scanners[j].USB, v.reports[w])
 				var usb []device.USBDevice
 				for _, ss := range s.Scanners {
 					if ss.Family == "airsane" && ss.USB != (device.USBKey{}) {
@@ -553,7 +572,13 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 			continue
 		}
 		cached, ok := c.caps[u]
-		ask := !ok || !cached.ok && in.now.Sub(cached.at) >= resync
+		if ok && in.capsReset[d.workloadW[scanners[i].ID]] {
+			cached.fails = 0
+			c.caps[u] = cached
+		}
+		// A failed ask is retried after retryDelay(fails), but never while
+		// the device is unplugged: its return resets fails (capsReset).
+		ask := !ok || !cached.ok && !sAbsent[i] && !in.wake.within(in.now, cached.at, retryDelay(cached.fails))
 		wg.Go(func() {
 			qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 			defer cancel()
@@ -575,7 +600,14 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 		}
 		inUse[u] = true
 		if sq[i].asked {
-			c.caps[u] = scanCaps{caps: scannerCaps(sq[i].caps), ok: sq[i].capsErr == nil, at: in.now}
+			fails := 0
+			if sq[i].capsErr != nil {
+				fails = c.caps[u].fails + 1
+				if !sAbsent[i] {
+					in.wake.at(in.now.Add(retryDelay(fails)), in.now)
+				}
+			}
+			c.caps[u] = scanCaps{caps: scannerCaps(sq[i].caps), ok: sq[i].capsErr == nil, at: in.now, fails: fails}
 		}
 	}
 	for u := range c.caps {
@@ -585,7 +617,7 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 	}
 
 	phase := func(p *phaseIn, w string) {
-		p.w, p.wait, p.unreported, p.now, p.obsErr = wl(w), d.wait, unreported, in.now, obsErr
+		p.w, p.wait, p.unreported, p.now, p.wake, p.obsErr = wl(w), d.wait, unreported, in.now, in.wake, obsErr
 		p.applyErr, p.leftOut = applyErr(w), d.leftOut[w]
 	}
 	for i, p := range printers {
@@ -707,7 +739,19 @@ func (c *Controller) observe(ctx context.Context, in snapshot, v view, d desired
 	}
 	st.Devices = detect(c.cat, cfg, v, c.usbAvailable)
 	st.Phase, st.Message = overall(cfg, st, wlErr, probe, probeMsg)
-	return st
+
+	var want []watchTarget
+	for i := range printers {
+		if u := pEnd[i].uri; u != "" {
+			want = append(want, watchTarget{uri: u, absent: pAbsent[i], pull: pEnd[i].ippUSB, seed: printerResult(pq[i].attrs, pq[i].err)})
+		}
+	}
+	for i := range scanners {
+		if u := sEnd[i].uri; u != "" {
+			want = append(want, watchTarget{uri: u, scanner: true, absent: sAbsent[i], seed: scannerResult(sq[i].state, sq[i].ok)})
+		}
+	}
+	return st, want
 }
 
 // overall is A10's Status phase: the first matching row wins.

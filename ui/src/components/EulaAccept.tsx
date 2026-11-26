@@ -1,7 +1,9 @@
-// Consent to one vendor licence (catalog EULA). The text comes from GET /eulas/{id}: the device
-// agent reads it from the verified vendor archive. Accepting records the sha256 of that text.
-import { useEffect, useState } from "react";
+// Consent to one vendor licence (catalog EULA). The text comes from GET /eulas/{id} and the `eula`
+// SSE event: the device agent reads it from the verified vendor archive. Accepting records the
+// sha256 of that text.
+import { useContext, useEffect, useState } from "react";
 import { api, problemMessage } from "../api/client";
+import { EventsContext } from "../api/events";
 import type { EULA, EULARef, SetupEULA } from "../gen/api";
 import { strings } from "../strings";
 import { eulaStrings as t } from "./EulaAccept.strings";
@@ -26,36 +28,47 @@ export function withAccepted(
 }
 
 /**
- * GET /eulas/{id}, asked again every `pollMs` while the agent still reports it pending, and every
- * `failedPollMs` after a failure, so the agent's own retry shows up without a reload.
+ * GET /eulas/{id}, kept current by the `eula` SSE events for that id (the agent's retry shows up
+ * without a reload), and asked again when the stream reconnects.
  */
-function useEula(id: string, pollMs: number, failedPollMs: number) {
+function useEula(id: string) {
+  const store = useContext(EventsContext);
   const [eula, setEula] = useState<EULA | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [attempt, setAttempt] = useState(0);
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is a refetch trigger
   useEffect(() => {
     let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = () =>
+    // Counts events; a GET answer is dropped when an event arrived after the GET started.
+    let events = 0;
+    // Listen before the GET, so an event sent while it is in flight is not missed.
+    const offEvent = store.on("eula", (e) => {
+      if (e.id !== id) return;
+      events++;
+      setEula(e);
+      setError(null);
+    });
+    const load = () => {
+      const seen = events;
       api.getEula(id).then(
         (e) => {
-          if (!live) return;
+          if (!live || seen !== events) return;
           setEula(e);
           setError(null);
-          if (e.state === "pending") timer = setTimeout(load, pollMs);
-          else if (e.state === "failed") timer = setTimeout(load, failedPollMs);
         },
         (err) => {
-          if (live) setError(err);
+          if (live && seen === events) setError(err);
         },
       );
-    void load();
+    };
+    load();
+    const offReconnect = store.onReconnect(load);
     return () => {
       live = false;
-      clearTimeout(timer);
+      offEvent();
+      offReconnect();
     };
-  }, [id, pollMs, failedPollMs, attempt]);
+  }, [store, id, attempt]);
   return { eula, error, retry: () => setAttempt((n) => n + 1) };
 }
 
@@ -63,18 +76,14 @@ export function EulaAccept({
   eula: info,
   accepted,
   onChange,
-  pollMs = 2000,
-  failedPollMs = 30_000,
 }: {
   eula: SetupEULA;
   /** The textSha256 recorded for this licence (acceptedSha), or undefined when not accepted. */
   accepted: string | undefined;
   /** The sha256 of the text shown when ticked, null when unticked. */
   onChange: (textSha256: string | null) => void;
-  pollMs?: number;
-  failedPollMs?: number;
 }) {
-  const { eula, error, retry } = useEula(info.id, pollMs, failedPollMs);
+  const { eula, error, retry } = useEula(info.id);
   const current = eula?.textSha256 ?? null;
   // Only a text the agent has read and that differs counts as changed; pending is not.
   const changed = accepted !== undefined && current !== null && current !== accepted;

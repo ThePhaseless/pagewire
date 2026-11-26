@@ -61,8 +61,9 @@ func (e *StorageError) Unwrap() error { return e.Err }
 const (
 	// shortcut: one deadline for the whole job, all pages; make it per page if
 	// long high-resolution ADF batches hit it.
-	scanTimeout     = 10 * time.Minute
-	janitorInterval = time.Hour
+	scanTimeout = 10 * time.Minute
+	// janitorRetry is the floor for the next sweep when an expired scan could not be deleted.
+	janitorRetry = time.Hour
 )
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -73,7 +74,9 @@ type Options struct {
 	// Scanner returns the scanner with entry id, or a nil interface when that
 	// scanner is unknown or not available.
 	Scanner func(id string) Scanner
-	// Retention is read on every janitor run; 0 (or a nil func) keeps scans forever.
+	// Retention is read on every janitor sweep: at start, at the next expiry,
+	// after a scan finishes and after RetentionChanged. 0 (or a nil func) keeps
+	// scans forever.
 	Retention func() time.Duration
 	// Events receives every scan state change; the receiver must keep draining it.
 	Events  chan<- apitypes.Scan
@@ -90,6 +93,7 @@ type Service struct {
 	running string             // id of the running scan, "" when idle
 	stop    context.CancelFunc // cancels the running scan
 	cancel  bool               // Cancel was called for the running scan
+	kick    chan struct{}      // buffered(1): wakes RunJanitor for a sweep
 
 	pageLimit, quota int64 // MaxPageBytes and MaxStoredBytes; tests lower them
 }
@@ -103,7 +107,7 @@ func New(o Options) *Service {
 	if o.Context == nil {
 		o.Context = context.Background()
 	}
-	s := &Service{o: o, scans: map[string]*apitypes.Scan{}, pageLimit: MaxPageBytes, quota: MaxStoredBytes}
+	s := &Service{o: o, scans: map[string]*apitypes.Scan{}, kick: make(chan struct{}, 1), pageLimit: MaxPageBytes, quota: MaxStoredBytes}
 	entries, err := os.ReadDir(o.Dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("cannot read scan directory", "dir", o.Dir, "err", err)
@@ -356,6 +360,7 @@ func (s *Service) finish(id, state string, err error) {
 	s.running, s.cancel = "", false
 	s.stop()
 	s.mu.Unlock()
+	s.RetentionChanged() // the finished scan may now be the next to expire
 	s.emit(cur)
 }
 
@@ -506,35 +511,76 @@ func (s *Service) Delete(id string) error {
 	return nil
 }
 
-// RunJanitor deletes expired scans now and then every hour until ctx is done.
+// RunJanitor deletes expired scans now, then again at the next scan's expiry,
+// after a scan finishes and after RetentionChanged, until ctx is done.
 func (s *Service) RunJanitor(ctx context.Context) {
-	t := time.NewTicker(janitorInterval)
-	defer t.Stop()
 	for {
-		s.sweep()
+		var fire <-chan time.Time
+		var t *time.Timer
+		if next := s.sweep(); !next.IsZero() {
+			t = time.NewTimer(next.Sub(s.o.Now()))
+			fire = t.C
+		}
 		select {
 		case <-ctx.Done():
+		case <-s.kick:
+		case <-fire:
+		}
+		if t != nil {
+			t.Stop()
+		}
+		if ctx.Err() != nil {
 			return
-		case <-t.C:
 		}
 	}
 }
 
-// sweep deletes every finished scan older than the current retention.
-func (s *Service) sweep() {
+// RetentionChanged makes RunJanitor sweep at once with the current retention.
+func (s *Service) RetentionChanged() {
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+}
+
+// sweep deletes every finished scan older than the current retention and
+// returns when the next sweep is due: now+janitorRetry when an expired scan
+// could not be deleted, else the earliest expiry among the finished scans, or
+// zero when nothing will expire (no scans, or retention off). A running scan
+// is skipped; its finish kicks a new sweep.
+func (s *Service) sweep() time.Time {
 	if s.o.Retention == nil {
-		return
+		return time.Time{}
 	}
 	keep := s.o.Retention()
 	if keep <= 0 {
-		return
+		return time.Time{}
 	}
-	cutoff := s.o.Now().Add(-keep)
+	now := s.o.Now()
+	var next time.Time
+	stuck := false
 	for _, sc := range s.List() {
-		if sc.CreatedAt.Before(cutoff) {
-			if err := s.Delete(sc.ID); err != nil && !errors.Is(err, ErrRunning) && !errors.Is(err, ErrNotFound) {
+		if sc.State == ScanScanning {
+			continue
+		}
+		at := sc.CreatedAt.Add(keep)
+		if !at.After(now) {
+			err := s.Delete(sc.ID)
+			if err == nil || errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if !errors.Is(err, ErrRunning) {
 				slog.Warn("janitor cannot delete scan", "id", sc.ID, "err", err)
 			}
+			stuck = true
+			continue
+		}
+		if next.IsZero() || at.Before(next) {
+			next = at
 		}
 	}
+	if stuck { // floor: retry the failed delete (and warn) at most hourly
+		return now.Add(janitorRetry)
+	}
+	return next
 }

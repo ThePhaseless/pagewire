@@ -24,6 +24,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/apitypes"
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
@@ -191,7 +192,7 @@ func (s *server) print(w http.ResponseWriter, r *http.Request) {
 		job = apitypes.Job{ID: id, Name: name, State: "pending", Reasons: []string{}, CreatedAt: time.Now()}
 	}
 	job.Printer = printerID
-	s.hub.Publish(apitypes.EventJob, job)
+	s.publishJob(job)
 	watching = true
 	go func() {
 		defer func() { <-s.watchers }()
@@ -380,23 +381,81 @@ func terminalJob(state string) bool {
 	return state == "completed" || state == "canceled" || state == "aborted"
 }
 
-// watchJob polls a web-submitted job and publishes a job event on every state
-// or reasons change, until a terminal state, ErrNotFound, JobWatchTimeout or
-// BaseContext's end.
+// JobWatcher is an optional Printer capability: IPP job notifications
+// (*printing.Client). WatchJob calls changed after subscribing and on each
+// batch of job id's events. It returns nil once the job reached a terminal
+// state, ctx.Err() when ctx ends, and otherwise an error, wrapping
+// ippnotify.ErrUnsupported or ippnotify.ErrRefused when the printer has no
+// subscriptions or refused this one.
+type JobWatcher interface {
+	WatchJob(ctx context.Context, id int, changed func()) error
+}
+
+// watchJob follows a web-submitted job and publishes a job event on every
+// state or reasons change, until a terminal state, ErrNotFound,
+// JobWatchTimeout or BaseContext's end. A JobWatcher's notifications trigger
+// the reads. The JobPollInterval poll takes over for the rest of the job when
+// the printer has no JobWatcher, or WatchJob fails or returns early: printers
+// without IPP subscriptions (go-mfp's, some ipp-usb devices) still get their
+// job states, and a missed terminal event is still read.
 func (s *server) watchJob(p Printer, last apitypes.Job) {
 	if terminalJob(last.State) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, s.d.JobWatchTimeout)
 	defer cancel()
-	t := time.NewTicker(s.d.JobPollInterval)
-	defer t.Stop()
+	wake := make(chan struct{}, 1)
+	var ticker *time.Ticker
+	var tick <-chan time.Time // nil until polling starts
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	poll := func() {
+		ticker = time.NewTicker(s.d.JobPollInterval)
+		tick = ticker.C
+	}
+	var watched chan error // nil once WatchJob has returned, or without a JobWatcher
+	if jw, ok := p.(JobWatcher); ok {
+		ch, stopped := make(chan error, 1), make(chan struct{})
+		watched = ch
+		go func() {
+			defer close(stopped)
+			ch <- jw.WatchJob(ctx, last.ID, func() {
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+			})
+		}()
+		// Wait for WatchJob (and its Cancel-Subscription) before the watcher
+		// slot is freed, so live subscriptions stay within maxJobWatchers.
+		defer func() {
+			cancel()
+			<-stopped
+		}()
+	} else {
+		poll()
+	}
 	warned := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case err := <-watched:
+			watched = nil
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil && !errors.Is(err, ippnotify.ErrUnsupported) && !errors.Is(err, ippnotify.ErrRefused) {
+				slog.Warn("job watcher cannot follow job events; polling", "job", last.ID, "err", err)
+			}
+			poll()
+			// Read now: the job may have ended (WatchJob returned nil) or
+			// changed since the last event.
+		case <-wake:
+		case <-tick:
 		}
 		job, err := p.Job(ctx, last.ID)
 		job.Printer = last.Printer
@@ -411,12 +470,20 @@ func (s *server) watchJob(p Printer, last apitypes.Job) {
 			continue
 		}
 		if job.State != last.State || !slices.Equal(job.Reasons, last.Reasons) {
-			s.hub.Publish(apitypes.EventJob, job)
+			s.publishJob(job)
 			last = job
 		}
 		if terminalJob(job.State) {
 			return
 		}
+	}
+}
+
+// publishJob publishes a job event, then calls OnJob.
+func (s *server) publishJob(job apitypes.Job) {
+	s.hub.Publish(apitypes.EventJob, job)
+	if s.d.OnJob != nil {
+		s.d.OnJob()
 	}
 }
 
@@ -504,7 +571,7 @@ func (s *server) deleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if job, err := p.Job(r.Context(), id); err == nil {
 		job.Printer = r.PathValue("id")
-		s.hub.Publish(apitypes.EventJob, job)
+		s.publishJob(job)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

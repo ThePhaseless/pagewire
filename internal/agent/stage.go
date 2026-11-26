@@ -29,7 +29,8 @@ const (
 // Stager stages EULA texts from verified vendor archives, one goroutine per
 // ref, so Core's report loop never waits on a download. Results are cached
 // for the life of the process; a failure is retried after 5 min, doubling up
-// to 6 h while failures continue. Set the
+// to 6 h while failures continue: a timer calls Wake when the retry is due, so
+// the next cycle's Stage starts it. Set the
 // fields before the first Stage call; they must not change afterwards.
 type Stager struct {
 	Dir    string       // the blob volume; "": every ref fails with MsgNoBlobVolume
@@ -38,7 +39,7 @@ type Stager struct {
 	// points it at its synthetic vendor.
 	Blob func(id string) (catalog.Blob, bool)
 	Keys func(id string) (openpgp.EntityList, error) // nil: catalog.BlobKey
-	Wake func()                                      // called when a ref's state or text changes; nil: none
+	Wake func()                                      // called when a ref's state or text changes and when a retry is due; nil: none
 
 	retry time.Duration                                         // first retry delay; 0: stageRetry
 	now   func() time.Time                                      // nil: time.Now
@@ -52,7 +53,8 @@ type stageEntry struct {
 	res      device.EULAText
 	running  bool
 	retryAt  time.Time
-	failures int // in a row; reset by a success
+	failures int         // in a row; reset by a success
+	timer    *time.Timer // calls Wake at retryAt after a failure; stopped by the next run
 }
 
 // backoff is the retry delay after the given number of failures in a row.
@@ -86,6 +88,9 @@ func (s *Stager) Stage(ctx context.Context, refs []device.EULARef) []device.EULA
 			e.res.State, e.res.Message = device.EULAFailed, MsgNoBlobVolume
 		} else if !e.running && (e.res.State == device.EULAPending || e.res.State == device.EULAFailed && !now.Before(e.retryAt)) {
 			e.running = true
+			if e.timer != nil {
+				e.timer.Stop()
+			}
 			go s.run(ctx, ref, e)
 		}
 		out = append(out, e.res)
@@ -125,7 +130,11 @@ func (s *Stager) run(ctx context.Context, ref device.EULARef, e *stageEntry) {
 	} else {
 		e.failures = 0
 	}
-	e.res, e.running, e.retryAt = res, false, s.clock().Add(backoff(retry, e.failures))
+	wait := backoff(retry, e.failures)
+	e.res, e.running, e.retryAt = res, false, s.clock().Add(wait)
+	if err != nil && s.Wake != nil && ctx.Err() == nil {
+		e.timer = time.AfterFunc(wait, s.Wake) // also when the state did not change: Stage retries only when called
+	}
 	s.mu.Unlock()
 	if !changed || ctx.Err() != nil {
 		return

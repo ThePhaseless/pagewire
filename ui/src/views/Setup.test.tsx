@@ -328,10 +328,13 @@ class FakeEventSource {
     this.listeners.set(type, fn);
   }
   close() {}
-  status(s: Status) {
+  emit(type: string, data: unknown) {
     act(() => {
-      this.listeners.get("status")?.(new MessageEvent("status", { data: JSON.stringify(s) }));
+      this.listeners.get(type)?.(new MessageEvent(type, { data: JSON.stringify(data) }));
     });
+  }
+  status(s: Status) {
+    this.emit("status", s);
   }
 }
 
@@ -455,9 +458,19 @@ describe("mediaForLanguage", () => {
 describe("EulaAccept", () => {
   const renderEula = (accepted: string | undefined, onChange = mock((_: string | null) => {})) => {
     mockServer(() => hpSetup);
-    render(<EulaAccept eula={hplipEula} accepted={accepted} onChange={onChange} pollMs={5} />);
+    store = createEventStore({
+      newEventSource: () => new FakeEventSource() as unknown as EventSource,
+      minBackoffMs: 1,
+    });
+    store.start();
+    render(
+      <EventsContext value={store}>
+        <EulaAccept eula={hplipEula} accepted={accepted} onChange={onChange} />
+      </EventsContext>,
+    );
     return onChange;
   };
+  const eulaGets = () => calls.filter((c) => c.url.endsWith("/eulas/hplip-plugin")).length;
 
   test("shows the exact text in a focusable region and accepts it with its sha256", async () => {
     const onChange = renderEula(undefined);
@@ -476,20 +489,18 @@ describe("EulaAccept", () => {
     expect(onChange).toHaveBeenCalledWith(SHA_A);
   });
 
-  test("pending shows progress and asks again until the text is available", async () => {
-    // The second answer waits until the pending state has been checked.
-    let release!: () => void;
-    const second = new Promise<EULA>((r) => {
-      release = () => r(eulaOf());
-    });
-    eulaResponses = [eulaOf({ state: "pending", text: null, textSha256: null }), second];
+  test("pending shows progress until an eula event brings the text", async () => {
+    eulaResponses = [eulaOf({ state: "pending", text: null, textSha256: null })];
     renderEula(undefined);
     expect(await screen.findByRole("progressbar")).toBeTruthy();
     expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
-    release();
+    // An event for another licence changes nothing.
+    FakeEventSource.last.emit("eula", eulaOf({ id: "other" }));
+    expect(screen.getByRole("progressbar")).toBeTruthy();
+    FakeEventSource.last.emit("eula", eulaOf());
     await screen.findByRole("region", { name: /licence text/ });
     expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(false);
-    expect(calls.filter((c) => c.url.endsWith("/eulas/hplip-plugin")).length).toBe(2);
+    expect(eulaGets()).toBe(1);
   });
 
   test("failed shows the agent's message and cannot be accepted", async () => {
@@ -511,24 +522,50 @@ describe("EulaAccept", () => {
     await screen.findByRole("region", { name: /licence text/ });
   });
 
-  test("after a failure it asks again on its own and shows the text once the agent has it", async () => {
-    let release!: () => void;
-    const second = new Promise<EULA>((r) => {
-      release = () => r(eulaOf());
-    });
+  test("after a failure an eula event shows the text once the agent has it", async () => {
     eulaResponses = [
       eulaOf({ state: "failed", message: "download: timeout", text: null, textSha256: null }),
-      second,
     ];
-    mockServer(() => hpSetup);
-    render(
-      <EulaAccept eula={hplipEula} accepted={undefined} onChange={() => {}} failedPollMs={20} />,
-    );
+    renderEula(undefined);
     await screen.findByText("download: timeout");
-    release();
+    FakeEventSource.last.emit("eula", eulaOf());
     await screen.findByRole("region", { name: /licence text/ });
-    expect(calls.filter((c) => c.url.endsWith("/eulas/hplip-plugin")).length).toBe(2);
+    expect(eulaGets()).toBe(1);
     expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(false);
+  });
+
+  test("an event sent while the GET is in flight wins over the GET's older answer", async () => {
+    let release!: () => void;
+    eulaResponses = [
+      new Promise<EULA>((r) => {
+        release = () => r(eulaOf({ state: "pending", text: null, textSha256: null }));
+      }),
+    ];
+    renderEula(undefined);
+    await waitFor(() => expect(eulaGets()).toBe(1));
+    FakeEventSource.last.emit("eula", eulaOf());
+    await screen.findByRole("region", { name: /licence text/ });
+    // Let the late answer reach the hook; it must not replace the event's text.
+    await act(async () => {
+      release();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByRole("region", { name: /licence text/ }).textContent).toBe(LICENCE);
+  });
+
+  test("asks again when the event stream reconnects", async () => {
+    eulaResponses = [eulaOf({ state: "pending", text: null, textSha256: null })];
+    renderEula(undefined);
+    await screen.findByRole("progressbar");
+    const first = FakeEventSource.last;
+    act(() => first.onopen?.(new Event("open")));
+    eulaResponses = [eulaOf()];
+    act(() => first.onerror?.(new Event("error")));
+    await waitFor(() => expect(FakeEventSource.last).not.toBe(first));
+    act(() => FakeEventSource.last.onopen?.(new Event("open")));
+    await screen.findByRole("region", { name: /licence text/ });
+    expect(eulaGets()).toBe(2);
   });
 
   test("a changed text asks for acceptance again and records the new sha256", async () => {

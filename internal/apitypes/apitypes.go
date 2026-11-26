@@ -19,6 +19,7 @@ const (
 	EventConfig = "config" // ConfigEvent
 	EventJob    = "job"    // Job
 	EventScan   = "scan"   // Scan
+	EventEULA   = "eula"   // EULA
 )
 
 // Status enum values.

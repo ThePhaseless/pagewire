@@ -742,6 +742,65 @@ func TestUnlistedQueueFindDevicesBackoff(t *testing.T) {
 	}
 }
 
+// A USB add (DeviceChanged) lifts the backoff for a queue the app listed
+// nothing for, so the printer just plugged in gets its queue at once.
+func TestDeviceChangedResetsFindBackoff(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Drivers: hpDrivers})
+	now := time.Unix(1_000_000, 0)
+	pappl.SetNow(c, func() time.Time { return now })
+	reconcile(t, c, want("P"), dev("ABC123", hpID))
+	now = now.Add(time.Second)
+	if r := reconcile(t, c, want("P"), dev("ABC123", hpID)); r.State != device.QueuePending || fake.FindDevicesCalls() != 1 {
+		t.Fatalf("within backoff: result %+v, Find-Devices calls %d; want pending and 1", r, fake.FindDevicesCalls())
+	}
+	c.DeviceChanged()
+	reconcile(t, c, want("P"), dev("ABC123", hpID))
+	if n := fake.FindDevicesCalls(); n != 2 {
+		t.Errorf("after DeviceChanged: Find-Devices calls = %d, want 2", n)
+	}
+}
+
+// DeviceChanged never unsettles a queue whose device was already picked: an
+// hplip queue on the only listed usb entry is settled by its pick alone.
+func TestDeviceChangedKeepsSettledQueue(t *testing.T) {
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices()[:1], Drivers: hpDrivers})
+	w := want("P")
+	w.Schemes = []string{"hp", "usb"}
+	mustOK(t, reconcile(t, c, w, dev("ABC123", hpID)))
+	c.DeviceChanged()
+	mustOK(t, reconcile(t, c, w, dev("ABC123", hpID)))
+	if n := fake.FindDevicesCalls(); n != 1 {
+		t.Errorf("Find-Devices calls = %d, want 1 (the one that created the queue)", n)
+	}
+}
+
+// A value PAPPL accepts but stores differently is not sent again: its own
+// Set emits printer-config-changed, and resending would loop through the
+// agent's watch. It is reported as refused until the wanted value changes.
+func TestNormalizedDefaultSentOnce(t *testing.T) {
+	const stored = "iso_a5_148x210mm"
+	fake, c := newSystem(t, papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers, ReadBack: map[string]string{"media-default": stored}})
+	w := want("P")
+	w.Defaults.Media = "na_letter_8.5x11in"
+	mustOK(t, reconcile(t, c, w, dev("ABC123", hpID)))
+	if n := fake.SetCalls(); n != 1 {
+		t.Fatalf("first reconcile: Set-Printer-Attributes calls = %d, want 1", n)
+	}
+	wantRefused := []device.Dropped{{Option: device.OptionMedia, Value: "na_letter_8.5x11in", Using: stored}}
+	for i := range 3 {
+		r := reconcile(t, c, w, dev("ABC123", hpID))
+		mustOK(t, r)
+		if n := fake.SetCalls(); n != 1 || !slices.Equal(r.Refused, wantRefused) {
+			t.Errorf("reconcile %d: Set-Printer-Attributes calls = %d, refused %+v; want 1 and %+v", i+2, n, r.Refused, wantRefused)
+		}
+	}
+	w.Defaults.Media = "iso_a4_210x297mm"
+	mustOK(t, reconcile(t, c, w, dev("ABC123", hpID)))
+	if sets := fake.Sets(); len(sets) != 2 || !slices.Equal(sets[1], []string{"media-default"}) {
+		t.Errorf("sets = %q, want the new media sent once", sets)
+	}
+}
+
 // A failed Find-Devices is not a "not listed" answer, so it does not back off.
 func TestFindDevicesErrorNoBackoff(t *testing.T) {
 	fake := papplfake.New(papplfake.Options{Devices: hpDevices(), Drivers: hpDrivers})

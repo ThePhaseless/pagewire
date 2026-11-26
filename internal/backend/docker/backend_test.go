@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 
 	"github.com/ThePhaseless/pagewire/internal/device"
@@ -78,6 +80,8 @@ func newTestBackend(f *fakeEngine, p Params) *Backend {
 	b := New(f, p)
 	b.SetUSBDevices([]device.USBDevice{testPrinter()}, false)
 	b.healthTimeout, b.healthPoll = 50*time.Millisecond, 2*time.Millisecond
+	b.eventsRetry, b.eventsStable = 10*time.Millisecond, 20*time.Millisecond
+	b.watchUSB = func(ctx context.Context, _ func()) error { <-ctx.Done(); return nil } // no netlink in unit tests
 	return b
 }
 
@@ -1418,4 +1422,406 @@ func TestIdenticalTwins(t *testing.T) {
 	if label != testNode+",/dev/bus/usb/001/012" {
 		t.Errorf("label %q", label)
 	}
+}
+
+// notifyRec records Notify's callbacks.
+type notifyRec struct {
+	mu       sync.Mutex
+	changed  int
+	degraded []string
+	onChange func() // called from changed, if set before runNotify
+}
+
+func (r *notifyRec) changes() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.changed
+}
+
+func (r *notifyRec) lastDegraded() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.degraded) == 0 {
+		return ""
+	}
+	return r.degraded[len(r.degraded)-1]
+}
+
+// runNotify runs b.Notify into r and stops it at cleanup.
+func runNotify(t *testing.T, b *Backend, r *notifyRec) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		b.Notify(ctx, func() {
+			r.mu.Lock()
+			r.changed++
+			f := r.onChange
+			r.mu.Unlock()
+			if f != nil {
+				f()
+			}
+		}, func(msg string) {
+			r.mu.Lock()
+			r.degraded = append(r.degraded, msg)
+			r.mu.Unlock()
+		})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Notify did not return")
+		}
+	})
+}
+
+func eventsUp(b *Backend) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.eventsOK && b.ueventsOK
+}
+
+func containerID(f *fakeEngine, name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c := f.containers[name]; c != nil {
+		return c.id
+	}
+	return ""
+}
+
+func ev(action, id string, attrs map[string]string) events.Message {
+	return events.Message{Type: events.ContainerEventType, Action: events.Action(action), Actor: events.Actor{ID: id, Attributes: attrs}}
+}
+
+// eventsBackend is a running backend with a healthy simulated workload, a
+// connected events stream and no fallback timer; counters start after setup.
+func eventsBackend(t *testing.T) (*fakeEngine, *Backend, *notifyRec) {
+	t.Helper()
+	f := newFakeWithSelf()
+	f.setEventsErr(nil)
+	p := testParams(t)
+	p.Resync = time.Hour
+	b := newTestBackend(f, p)
+	r := &notifyRec{}
+	runBackend(t, b)
+	runNotify(t, b, r)
+	waitFor(t, "the events stream", func() bool { return eventsUp(b) })
+	mustApply(t, b, simSpec())
+	waitFor(t, "the rollout", func() bool { return observe(t, b).Phase == device.PhaseRunning })
+	return f, b, r
+}
+
+func TestEventFilters(t *testing.T) {
+	f, _, _ := eventsBackend(t)
+	calls := f.eventsCalls()
+	if len(calls) == 0 {
+		t.Fatal("no Events call")
+	}
+	want := client.Filters{
+		"type":  {"container": true},
+		"label": {"io.github.thephaseless.pagewire.managed-by=pagewire": true},
+		"event": {},
+	}
+	for _, a := range []string{"create", "start", "restart", "die", "stop", "kill", "oom", "destroy", "pause", "unpause", "rename", "health_status"} {
+		want["event"][a] = true
+	}
+	for _, c := range calls {
+		if !reflect.DeepEqual(c.Filters, want) {
+			t.Errorf("filters %v, want %v", c.Filters, want)
+		}
+		for a := range c.Filters["event"] {
+			if strings.HasPrefix(a, "exec_") {
+				t.Errorf("event filter holds %s", a)
+			}
+		}
+	}
+}
+
+func TestDieEventRecreates(t *testing.T) {
+	f, b, _ := eventsBackend(t)
+	name := Prefix + "sim-printer-0"
+	old := containerID(f, name)
+	f.setState(name, container.StateExited, 137)
+	f.emit(t, ev("die", old, nil))
+	waitFor(t, "a new "+name, func() bool {
+		id := containerID(f, name)
+		return id != "" && id != old && observe(t, b).Phase == device.PhaseRunning
+	})
+}
+
+// TestEventGuard: actions outside the lifecycle list wake nothing; the start
+// event after them shows the stream was read past them.
+func TestEventGuard(t *testing.T) {
+	f, _, r := eventsBackend(t)
+	time.Sleep(50 * time.Millisecond) // let the rollout's own wakes settle
+	changes, lists := r.changes(), countCalls(f, "ContainerList")
+	id := containerID(f, Prefix+"sim-printer-0")
+	f.emit(t, ev("exec_die", id, nil))
+	f.emit(t, ev("extract-to-dir", id, nil))
+	f.emit(t, ev("exec_start: /bin/true", id, nil))
+	f.emit(t, ev("start", id, nil))
+	waitFor(t, "the start event", func() bool { return r.changes() > changes })
+	waitFor(t, "its converge", func() bool { return countCalls(f, "ContainerList") > lists })
+	time.Sleep(50 * time.Millisecond)
+	if got := r.changes() - changes; got != 1 {
+		t.Errorf("%d changed calls, want 1 (the start event only)", got)
+	}
+	if got := countCalls(f, "ContainerList") - lists; got != 1 {
+		t.Errorf("%d converges, want 1", got)
+	}
+}
+
+func TestHealthStatusDedupe(t *testing.T) {
+	f, _, r := eventsBackend(t)
+	time.Sleep(50 * time.Millisecond)
+	id := containerID(f, Prefix+"sim-printer-0")
+	step := func(what string, want int, msgs ...events.Message) {
+		t.Helper()
+		base := r.changes()
+		for _, m := range msgs {
+			f.emit(t, m)
+		}
+		f.emit(t, ev("start", "sentinel", nil)) // passes, so the ones before were read
+		waitFor(t, what, func() bool { return r.changes() >= base+want+1 })
+		time.Sleep(20 * time.Millisecond)
+		if got := r.changes() - base - 1; got != want {
+			t.Errorf("%s: %d changed calls, want %d", what, got, want)
+		}
+	}
+	healthy, unhealthy := ev("health_status: healthy", id, nil), ev("health_status: unhealthy", id, nil)
+	step("three identical", 1, healthy, healthy, healthy)
+	step("a change", 1, unhealthy)
+	attr := func(st string) events.Message { return ev("health_status", id, map[string]string{"health_status": st}) }
+	step("the same status as an attribute", 0, attr("unhealthy"))
+	step("a changed attribute", 1, attr("healthy"), attr("healthy"))
+	step("destroy, then the same status", 2, ev("destroy", id, nil), healthy) // destroy passes and forgets the status
+}
+
+func TestChangedAfterRollout(t *testing.T) {
+	f := newFakeWithSelf()
+	p := testParams(t)
+	p.Resync = time.Hour
+	b := newTestBackend(f, p)
+	r := &notifyRec{}
+	var mu sync.Mutex
+	var phases []string
+	r.onChange = func() {
+		o, err := b.Observe(context.Background())
+		if err == nil {
+			mu.Lock()
+			phases = append(phases, o[0].Phase)
+			mu.Unlock()
+		}
+	}
+	runBackend(t, b)
+	runNotify(t, b, r)
+	mustApply(t, b, simSpec())
+	waitFor(t, "changed seeing the finished rollout", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(phases, device.PhaseRunning)
+	})
+}
+
+func TestEventsErrorFallsBack(t *testing.T) {
+	f := newFakeWithSelf()
+	p := testParams(t)
+	p.Resync = 20 * time.Millisecond
+	b := newTestBackend(f, p)
+	r := &notifyRec{}
+	runBackend(t, b)
+	runNotify(t, b, r)
+	mustApply(t, b, simSpec())
+	waitFor(t, "the rollout", func() bool { return observe(t, b).Phase == device.PhaseRunning })
+	if d := r.lastDegraded(); !strings.HasPrefix(d, "Docker events unavailable (events not supported)") {
+		t.Errorf("degraded %q", d)
+	}
+	// Each fallback re-check also tells the controller, which has no tick of
+	// its own, so what converge leaves alone (an unhealthy container) shows.
+	n := r.changes()
+	waitFor(t, "changed on unchanged re-checks", func() bool { return r.changes() >= n+3 })
+	name := Prefix + "sim-printer-0"
+	old := containerID(f, name)
+	f.setState(name, container.StateExited, 137) // no event: the Resync finds it
+	waitFor(t, "a new "+name, func() bool {
+		id := containerID(f, name)
+		return id != "" && id != old
+	})
+}
+
+func TestDegradedJoinsSources(t *testing.T) {
+	f := newFakeWithSelf()
+	b := newTestBackend(f, testParams(t))
+	b.watchUSB = func(context.Context, func()) error { return errors.New("no netlink") }
+	r := &notifyRec{}
+	runNotify(t, b, r)
+	evMsg := "Docker events unavailable (events not supported); re-checking every 30 s — allow GET /events in the socket proxy"
+	usbMsg := "USB events unavailable (no netlink); re-checking every 5 s"
+	waitFor(t, "both problems", func() bool { return r.lastDegraded() == evMsg+"; "+usbMsg })
+	f.setEventsErr(nil)
+	waitFor(t, "the events problem to clear", func() bool { return r.lastDegraded() == usbMsg })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if slices.Contains(r.degraded, "") {
+		t.Errorf("degraded %q: one source recovering cleared the other", r.degraded)
+	}
+}
+
+// TestEventsReconnect: a broken stream degrades, and the reconnect wakes the
+// worker and clears it.
+func TestEventsReconnect(t *testing.T) {
+	f, _, r := eventsBackend(t)
+	calls := len(f.eventsCalls())
+	changes := r.changes()
+	f.setEventsErr(errors.New("proxy says no"))
+	f.breakEvents(errors.New("EOF"))
+	waitFor(t, "degraded", func() bool { return strings.HasPrefix(r.lastDegraded(), "Docker events unavailable") })
+	f.setEventsErr(nil)
+	waitFor(t, "the reconnect", func() bool { return r.lastDegraded() == "" && r.changes() > changes })
+	if len(f.eventsCalls()) <= calls {
+		t.Error("no reconnect")
+	}
+}
+
+// TestEventsFlapStaysDegraded: a stream that ends soon after it connects
+// (a proxy's idle timeout) keeps the degraded message and its backoff; only a
+// stream that stays up eventsStable clears them.
+func TestEventsFlapStaysDegraded(t *testing.T) {
+	f := newFakeWithSelf()
+	f.setEventsErr(nil)
+	b := newTestBackend(f, testParams(t))
+	b.eventsStable = time.Hour
+	r := &notifyRec{}
+	runNotify(t, b, r)
+	waitFor(t, "the events stream", func() bool { return eventsUp(b) })
+	for range 3 {
+		calls := len(f.eventsCalls())
+		f.breakEvents(errors.New("EOF"))
+		waitFor(t, "the reconnect", func() bool { return len(f.eventsCalls()) > calls && eventsUp(b) })
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.degraded) != 1 || !strings.HasPrefix(r.degraded[0], "Docker events unavailable (EOF)") {
+		t.Errorf("degraded %q, want one unavailable message", r.degraded)
+	}
+}
+
+// TestGateOpensOnUSBEvent: with uevents running the closed gate arms no
+// timer, and a uevent re-converges at once.
+func TestGateOpensOnUSBEvent(t *testing.T) {
+	f := newFakeWithSelf()
+	f.setEventsErr(nil)
+	p := testParams(t)
+	p.SysRoot, p.Resync = sysfs(t, false), time.Hour
+	b := newTestBackend(f, p)
+	usbChanged := make(chan func(), 1)
+	b.watchUSB = func(ctx context.Context, changed func()) error {
+		usbChanged <- changed
+		<-ctx.Done()
+		return nil
+	}
+	r := &notifyRec{}
+	runBackend(t, b)
+	runNotify(t, b, r)
+	waitFor(t, "the event sources", func() bool { return eventsUp(b) })
+	mustApply(t, b, ippusbSpec())
+	waitFor(t, "the gate", func() bool { return observe(t, b).Unschedulable })
+	time.Sleep(50 * time.Millisecond)
+	lists := countCalls(f, "ContainerList")
+	time.Sleep(100 * time.Millisecond)
+	if n := countCalls(f, "ContainerList"); n != lists {
+		t.Errorf("%d converges while gated with uevents, want none", n-lists)
+	}
+	setPrinter(t, p.SysRoot, true)
+	start := time.Now()
+	(<-usbChanged)()
+	waitFor(t, "the rollout", func() bool { return observe(t, b).Phase == device.PhaseRunning })
+	if d := time.Since(start); d >= gateRecheck {
+		t.Errorf("gate opened after %v, not on the uevent", d)
+	}
+}
+
+func TestPassEvent(t *testing.T) {
+	last := map[string]string{}
+	for _, c := range []struct {
+		m    events.Message
+		want bool
+	}{
+		{ev("exec_create: sh -c true", "a", nil), false},
+		{ev("attach", "a", nil), false},
+		{ev("archive-path", "a", nil), false},
+		{ev("die", "a", nil), true},
+		{ev("health_status: healthy", "a", nil), true},
+		{ev("health_status: healthy", "a", nil), false},
+		{ev("health_status", "a", map[string]string{"health_status": "healthy"}), false},
+		{ev("health_status: healthy", "b", nil), true}, // per container
+		{ev("health_status:unhealthy", "a", nil), true},
+		{ev("destroy", "a", nil), true},
+		{ev("health_status: unhealthy", "a", nil), true}, // a destroyed container's status is forgotten
+	} {
+		if got := passEvent(c.m, last); got != c.want {
+			t.Errorf("passEvent(%s %s) = %v, want %v", c.m.Action, c.m.Actor.ID, got, c.want)
+		}
+	}
+}
+
+func TestFallbackWait(t *testing.T) {
+	const resync = 30 * time.Second
+	for _, c := range []struct {
+		name                   string
+		events, uevents, gated bool
+		waiting                []string
+		fails                  int
+		want                   time.Duration
+	}{
+		{name: "no Notify", want: resync},
+		{name: "no Notify, gated", gated: true, want: gateRecheck},
+		{name: "both sources up", events: true, uevents: true},
+		{name: "both up, gated", events: true, uevents: true, gated: true},
+		{name: "both up, a device node missing", events: true, uevents: true, waiting: []string{"p"}},
+		{name: "both up, failing", events: true, uevents: true, fails: 2, want: time.Minute},
+		{name: "no uevents, a device node missing", events: true, waiting: []string{"p"}, want: gateRecheck},
+		{name: "no uevents, gated and failing", events: true, gated: true, fails: 3, want: gateRecheck},
+		{name: "no uevents, a device node missing, failing", events: true, waiting: []string{"p"}, fails: 3, want: 2 * time.Minute},
+		{name: "no events", uevents: true, want: resync},
+		{name: "no events, failing", uevents: true, fails: 3, want: 2 * time.Minute},
+	} {
+		b := New(newFake(), Params{Resync: resync})
+		b.eventsOK, b.ueventsOK, b.gated, b.waiting, b.fails = c.events, c.uevents, c.gated, c.waiting, c.fails
+		if got := b.fallbackWait(); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestBackoffHoldsAgainstEvents: a failing rollout's own container events, and
+// the controller's re-Apply of the same spec on each changed, never cut the
+// failure backoff short; a new spec still does.
+func TestBackoffHoldsAgainstEvents(t *testing.T) {
+	f := newFakeWithSelf()
+	f.setEventsErr(nil)
+	f.exitCodes[Prefix+"fetch-blobs"] = 1
+	p := testParams(t)
+	p.Resync = time.Hour
+	b := newTestBackend(f, p)
+	r := &notifyRec{onChange: func() { _ = b.Apply(context.Background(), []*device.Spec{usbSpec()}) }}
+	runBackend(t, b)
+	runNotify(t, b, r)
+	waitFor(t, "the event sources", func() bool { return eventsUp(b) })
+	mustApply(t, b, usbSpec())
+	waitFor(t, "the failure", func() bool { return observe(t, b).Message == "fetch-blobs: exited with code 1" })
+	time.Sleep(50 * time.Millisecond)
+	creates := countCalls(f, "ContainerCreate")
+	f.emit(t, ev("die", "fetch-blobs", nil))
+	f.emit(t, ev("destroy", "fetch-blobs", nil))
+	time.Sleep(100 * time.Millisecond)
+	if n := countCalls(f, "ContainerCreate") - creates; n != 0 {
+		t.Errorf("%d containers created during the backoff, want none", n)
+	}
+	mustApply(t, b, ippusbSpec())
+	waitFor(t, "the new spec's rollout", func() bool { return countCalls(f, "ContainerCreate") > creates })
 }

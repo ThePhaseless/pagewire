@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/ippcaps"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/pappl"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
@@ -41,15 +43,18 @@ const (
 	queueName        = "it"
 )
 
-// controlPlane answers agent reports with one fixed DesiredState and keeps
-// the latest report.
+// controlPlane answers agent reports with its DesiredState and keeps the
+// latest report. Like the controller, it holds a report that asks to wait
+// (AgentReport.Wait) for the version the agent holds, until setDefaults
+// changes the state, device.AgentWait passes or the request ends.
 type controlPlane struct {
 	token   string
 	desired device.DesiredState
 
-	mu     sync.Mutex
-	latest *device.AgentReport
-	errs   []string
+	mu      sync.Mutex
+	changed chan struct{} // closed and replaced by setDefaults
+	latest  *device.AgentReport
+	errs    []string
 }
 
 func (cp *controlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -71,21 +76,47 @@ func (cp *controlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cp.mu.Lock()
 	cp.latest = &rep
+	desired, changed := cp.desiredLocked()
 	cp.mu.Unlock()
+	if rep.Wait && rep.DesiredVersion == desired.Version {
+		hold := time.NewTimer(device.AgentWait)
+		select {
+		case <-changed:
+		case <-hold.C:
+		case <-r.Context().Done():
+		}
+		hold.Stop()
+		cp.mu.Lock()
+		desired, _ = cp.desiredLocked()
+		cp.mu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
-	cp.mu.Lock()
-	desired := cp.desired
-	cp.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(desired)
 }
 
-// setDefaults changes the queue defaults the agent is told to keep.
+// desiredLocked is the desired state with its Version, and the channel
+// setDefaults closes when it changes; cp.mu must be held.
+func (cp *controlPlane) desiredLocked() (device.DesiredState, <-chan struct{}) {
+	if cp.changed == nil {
+		cp.changed = make(chan struct{})
+	}
+	d := cp.desired
+	d.Version = device.DesiredStateVersion(d)
+	return d, cp.changed
+}
+
+// setDefaults changes the queue defaults the agent is told to keep, and
+// releases held reports.
 func (cp *controlPlane) setDefaults(d device.PrintSettings) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 	q := slices.Clone(cp.desired.Queues)
 	q[0].Defaults = d
 	cp.desired.Queues = q
+	if cp.changed != nil {
+		close(cp.changed)
+	}
+	cp.changed = make(chan struct{})
 }
 
 func (cp *controlPlane) fail(msg string) {
@@ -142,10 +173,14 @@ func TestDevicePod(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	// The agent backs off up to 30 s while the control plane is down, then
-	// reconciles and browses once per 5 s cycle.
+	// reconciles and reports as soon as something changes.
 	rep := waitReport(ctx, t, cp, want, 120*time.Second)
 	if rep.PodUID != "it" {
 		t.Errorf("podUid = %q, want it", rep.PodUID)
+	}
+	// An agent built before the long-poll sends neither, and the hold checks below would pass on its 5 s cycle.
+	if rep.Instance == "" || rep.Seq == 0 {
+		t.Errorf("report instance %q seq %d, want an event-driven agent", rep.Instance, rep.Seq)
 	}
 	if q := rep.Queues[0]; q.ID != queueName || q.DeviceURI != "cups:"+simPrinterURI {
 		t.Errorf("queue %+v, want id %s and device URI cups:%s", q, queueName, simPrinterURI)
@@ -160,7 +195,12 @@ func TestDevicePod(t *testing.T) {
 
 	t.Run("print through PAPPL to ippeveprinter", func(t *testing.T) {
 		before := completedJobs(ctx, t, simPrinterURI)
+		// ps-printer-app's queue pushes printer events: one fires within 10 s of a submit.
+		w := startWatch(ctx, t, printing.New(queueURI).Watch)
+		w.waitSubscribed(ctx, t, "the PAPPL queue")
+		submitted := time.Now()
 		printAndWait(ctx, t, queueURI, sample)
+		w.firedWithin(ctx, t, submitted, 10*time.Second, "a printer event from the PAPPL queue")
 		// The PAPPL job completes once the CUPS ipp backend has handed the
 		// document over; ippeveprinter then finishes its own job.
 		waitFor(ctx, t, 60*time.Second, "a new completed job on ippeveprinter", func() (bool, string) {
@@ -170,7 +210,31 @@ func TestDevicePod(t *testing.T) {
 	})
 
 	t.Run("print to ippeveprinter directly", func(t *testing.T) {
+		// ippeveprinter either pushes printer events or refuses the
+		// subscription in a way the controller falls back to polling for.
+		w := startWatch(ctx, t, printing.New(simPrinterURI).Watch)
+		var subscribed bool
+		waitFor(ctx, t, 10*time.Second, "ippeveprinter to answer the subscription", func() (bool, string) {
+			if w.calls() > 0 {
+				subscribed = true
+				return true, ""
+			}
+			done, err := w.result()
+			return done, fmt.Sprintf("watch returned: %v", err)
+		})
+		submitted := time.Now()
 		printAndWait(ctx, t, simPrinterURI, sample)
+		if subscribed {
+			w.firedWithin(ctx, t, submitted, 10*time.Second, "a printer event from ippeveprinter")
+			t.Log("ippeveprinter supports IPP notifications")
+			return
+		}
+		switch _, err := w.result(); {
+		case errors.Is(err, ippnotify.ErrUnsupported), errors.Is(err, ippnotify.ErrRefused):
+			t.Logf("ippeveprinter has no IPP notifications for pagewire: %v", err)
+		default:
+			t.Fatalf("printer watch on ippeveprinter: %v, want an event, ErrUnsupported or ErrRefused", err)
+		}
 	})
 
 	t.Run("scan through AirSane", func(t *testing.T) {
@@ -198,7 +262,7 @@ func TestDevicePod(t *testing.T) {
 	})
 
 	// Every default the queue reports and PAPPL accepts reads back as set, so
-	// the agent's set-only-on-change guard does not resend it every cycle. A
+	// the agent's set-only-on-change guard does not resend it on every reconcile. A
 	// default the printer refuses (ps-printer-app refuses output-bin-default
 	// face-down while listing it as supported) is left out of the check.
 	t.Run("queue defaults read back", func(t *testing.T) {
@@ -247,9 +311,119 @@ func TestDevicePod(t *testing.T) {
 		})
 	})
 
+	// The agent's report is held; a desired change releases it and the agent
+	// applies the new default well before its next heartbeat.
+	t.Run("desired change reaches the queue", func(t *testing.T) {
+		c := pappl.New(papplSystemURI)
+		q := onlyQueue(ctx, t, c)
+		cp.mu.Lock()
+		d := cp.desired.Queues[0].Defaults
+		cp.mu.Unlock()
+		// The first queue's media (waitReport saw it read back), else another supported one.
+		d.Media = want.Defaults.Media
+		if d.Media == q.Caps.MediaDefault {
+			i := slices.IndexFunc(q.Caps.Media, func(m string) bool { return m != q.Caps.MediaDefault })
+			if i < 0 {
+				t.Skipf("the queue lists one media size (%v); nothing to change", q.Caps.Media)
+			}
+			d.Media = q.Caps.Media[i]
+		}
+		cp.setDefaults(d)
+		waitFor(ctx, t, 5*time.Second, "media-default "+d.Media+" on the queue", func() (bool, string) {
+			got := onlyQueue(ctx, t, c).Caps.MediaDefault
+			return got == d.Media, "media-default " + got
+		})
+	})
+
+	// Last, because the queue comes back as a new printer: the agent's system
+	// watch sees the delete and re-creates the queue at once.
+	t.Run("deleted queue comes back", func(t *testing.T) {
+		c := pappl.New(papplSystemURI)
+		w := startWatch(ctx, t, c.Watch)
+		w.waitSubscribed(ctx, t, "the PAPPL system")
+		old := onlyQueue(ctx, t, c)
+		deleted := time.Now()
+		if err := c.DeletePrinter(ctx, old.ID); err != nil {
+			t.Fatal(err)
+		}
+		w.firedWithin(ctx, t, deleted, 5*time.Second, "a system event for the delete")
+		waitFor(ctx, t, time.Until(deleted.Add(5*time.Second)), "the agent to re-create the queue", func() (bool, string) {
+			printers, err := c.Printers(ctx)
+			if err != nil {
+				return false, err.Error()
+			}
+			return len(printers) == 1 && printers[0].Name == queueName && printers[0].ID != old.ID, fmt.Sprintf("printers %+v", printers)
+		})
+	})
+
 	if _, errs := cp.report(); len(errs) > 0 {
 		t.Errorf("control plane saw bad agent requests: %v", errs)
 	}
+}
+
+// watcher runs an IPP notification watch until the test ends and records
+// when changed was called; the first call follows the subscribe.
+type watcher struct {
+	n    atomic.Int32
+	mu   sync.Mutex
+	at   []time.Time
+	err  error
+	done bool
+}
+
+func startWatch(ctx context.Context, t *testing.T, watch func(context.Context, func()) error) *watcher {
+	t.Helper()
+	w := &watcher{}
+	wctx, cancel := context.WithCancel(ctx)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		err := watch(wctx, func() {
+			w.mu.Lock()
+			w.at = append(w.at, time.Now())
+			w.mu.Unlock()
+			w.n.Add(1)
+		})
+		w.mu.Lock()
+		w.err, w.done = err, true
+		w.mu.Unlock()
+	}()
+	t.Cleanup(func() { cancel(); <-exited })
+	return w
+}
+
+func (w *watcher) calls() int { return int(w.n.Load()) }
+
+// result is whether the watch returned, and its return value.
+func (w *watcher) result() (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.done, w.err
+}
+
+func (w *watcher) waitSubscribed(ctx context.Context, t *testing.T, what string) {
+	t.Helper()
+	waitFor(ctx, t, 10*time.Second, "a subscription on "+what, func() (bool, string) {
+		if done, err := w.result(); done {
+			t.Fatalf("watch on %s returned: %v", what, err)
+		}
+		return w.calls() > 0, "not subscribed yet"
+	})
+}
+
+// firedWithin fails unless changed was called after from and by from+d.
+func (w *watcher) firedWithin(ctx context.Context, t *testing.T, from time.Time, d time.Duration, what string) {
+	t.Helper()
+	waitFor(ctx, t, time.Until(from.Add(d)), what, func() (bool, string) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, at := range w.at {
+			if at.After(from) {
+				return !at.After(from.Add(d)), fmt.Sprintf("first call %s after the start", at.Sub(from))
+			}
+		}
+		return false, fmt.Sprintf("no call since the start; watch returned %v (%v)", w.err, w.done)
+	})
 }
 
 // genericPostScriptDriver asks ps-printer-app for every driver and returns

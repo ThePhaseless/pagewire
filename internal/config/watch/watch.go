@@ -32,7 +32,10 @@ type Watcher[T any] struct {
 	// Parse turns the file's bytes into a value; any error, syntactic or
 	// semantic, makes the content invalid.
 	Parse func([]byte) (T, error)
-	// Debounce defaults to 300 ms, Resync to 30 s.
+	// Debounce defaults to 300 ms. Resync, default 30 s, is the fallback
+	// interval: the file is re-read on it only while Dir cannot be watched,
+	// after the event stream ends, or when Dir is on a network or FUSE
+	// filesystem, where changes made elsewhere raise no event.
 	Debounce time.Duration
 	Resync   time.Duration
 	// OnApply, OnInvalid and OnMissing may be nil. lastGood is nil when no
@@ -46,6 +49,8 @@ type Watcher[T any] struct {
 
 	// watch opens the event source; tests replace it to drop events.
 	watch func(dir string) (<-chan fsnotify.Event, <-chan error, func() error, error)
+	// remoteFS reports a network or FUSE filesystem; tests replace it.
+	remoteFS func(dir string) bool
 
 	mu       sync.Mutex
 	lastGood *T
@@ -81,6 +86,9 @@ func (w *Watcher[T]) Start(ctx context.Context) error {
 	}
 	if w.watch == nil {
 		w.watch = watchFS
+	}
+	if w.remoteFS == nil {
+		w.remoteFS = remoteFS
 	}
 	// Watch before the first read so no change slips in between.
 	events, errs, closeFn, watchErr := w.watch(w.Dir)
@@ -120,6 +128,9 @@ func (w *Watcher[T]) loop(ctx context.Context, events <-chan fsnotify.Event, err
 	defer func() { _ = closeFn() }()
 	resync := time.NewTicker(w.Resync)
 	defer resync.Stop()
+	if events != nil && !w.remoteFS(w.Dir) {
+		resync.Stop() // events cover every change; Reset below when they stop
+	}
 	debounce := time.NewTimer(w.Debounce)
 	debounce.Stop()
 	for {
@@ -128,7 +139,8 @@ func (w *Watcher[T]) loop(ctx context.Context, events <-chan fsnotify.Event, err
 			return
 		case ev, ok := <-events:
 			if !ok {
-				events = nil // keep resyncing
+				events = nil
+				resync.Reset(w.Resync)
 				continue
 			}
 			if filepath.Base(ev.Name) == w.Name {
@@ -137,9 +149,15 @@ func (w *Watcher[T]) loop(ctx context.Context, events <-chan fsnotify.Event, err
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
+				resync.Reset(w.Resync)
 				continue
 			}
-			slog.Warn("config watch: event error; resync still runs", "dir", w.Dir, "err", err)
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				slog.Info("config watch: event queue overflowed; re-reading the file", "dir", w.Dir)
+				w.sync()
+				continue
+			}
+			slog.Warn("config watch: event error", "dir", w.Dir, "err", err)
 		case <-debounce.C:
 			w.sync()
 		case <-resync.C:

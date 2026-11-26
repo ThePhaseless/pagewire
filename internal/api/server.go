@@ -125,6 +125,9 @@ type Deps struct {
 	BaseContext     context.Context
 	JobPollInterval time.Duration // default 1 s
 	JobWatchTimeout time.Duration // default 30 min
+	// OnJob is called after each job event; serve refreshes the controller so
+	// push-less printers' status follows a pagewire job. nil: none.
+	OnJob func()
 	// AllowedHosts are the Host names (port ignored, any case; IPv6 in
 	// brackets) the public routes answer, others get 421. Empty: no check.
 	// /healthz and /readyz are exempt.

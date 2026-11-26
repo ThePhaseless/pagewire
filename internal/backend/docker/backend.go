@@ -34,6 +34,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/google/renameio/v2"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 	corev1 "k8s.io/api/core/v1"
 
@@ -53,7 +54,7 @@ type Params struct {
 	HostIP    string        // "": the default route's source address, re-read per Observe
 	TokenFile string        // the agent token, created on the first Apply
 	SysRoot   string        // sysfs for the USB gate; "": /sys
-	Resync    time.Duration // health re-check interval; 0: 30s
+	Resync    time.Duration // fallback re-check while Docker events are unavailable; 0: 30s
 }
 
 const (
@@ -61,6 +62,9 @@ const (
 	gateRecheck       = 5 * time.Second
 	maxRetryWait      = 5 * time.Minute
 	defaultHealthWait = 60 * time.Second
+	eventsRetry       = time.Second            // first Events reconnect wait, doubled to maxRetryWait
+	eventsQuiet       = 100 * time.Millisecond // a new Events stream with no error by then is up
+	eventsStable      = 30 * time.Second       // an Events stream up this long ends a failure streak
 	msgNoPrinter      = "no USB printer or scanner on this host"
 	msgNoDevice       = "waiting for the USB device nodes of " // + the entry ids, comma-separated
 )
@@ -70,7 +74,26 @@ var (
 	_ device.PodRestarter     = (*Backend)(nil)
 	_ device.AgentTokenSource = (*Backend)(nil)
 	_ device.USBDeviceSetter  = (*Backend)(nil)
+	_ device.Notifier         = (*Backend)(nil)
 )
+
+// lifecycleActions are the container event actions that can change what
+// Observe reports or what converge does. The server-side event filter and the
+// client-side guard both use them, so the avahi HEALTHCHECK's exec_* events,
+// attach, CopyToContainer's extract-to-dir and archive-path, top and resize
+// never wake anything.
+var lifecycleActions = []string{
+	"create", "start", "restart", "die", "stop", "kill", "oom", "destroy", "pause", "unpause", "rename", "health_status",
+}
+
+// EventFilters selects the lifecycle events of the backend's own containers:
+// the server-side filters of the backend's Events stream. The Docker
+// integration test opens a stream with them too.
+func EventFilters() client.Filters {
+	return make(client.Filters).Add("type", "container").
+		Add("label", LabelManagedBy+"="+ManagedBy).
+		Add("event", lifecycleActions...)
+}
 
 // routeIP returns the source address of the default route. Dialing UDP sends
 // no packet; it only picks the route.
@@ -126,7 +149,17 @@ type Backend struct {
 	logged   string // last error logged, so a stuck rollout logs once
 	fails    int    // consecutive failed converges since the last success or new want
 
-	wake chan struct{}
+	eventsOK  bool     // Notify's Events stream is up: no Resync timer
+	ueventsOK bool     // Notify's USB uevent watch is running: no gateRecheck timer
+	changed   func()   // Notify's changed; nil before Notify
+	reported  progress // the worker state changed was last called for
+
+	wake     chan struct{}
+	softWake chan struct{} // softPoke; Run ignores it while fails > 0
+
+	watchUSB     func(ctx context.Context, changed func()) error // usb.Watch; tests replace it
+	eventsRetry  time.Duration
+	eventsStable time.Duration
 
 	ipMu      sync.Mutex
 	lastIP    string
@@ -152,13 +185,24 @@ func New(eng Engine, p Params) *Backend {
 	return &Backend{
 		eng: eng, p: p,
 		healthTimeout: defaultHealthWait, healthPoll: time.Second,
-		wake: make(chan struct{}, 1),
+		wake:     make(chan struct{}, 1),
+		softWake: make(chan struct{}, 1),
+		watchUSB: usb.Watch, eventsRetry: eventsRetry, eventsStable: eventsStable,
 	}
 }
 
 func (b *Backend) poke() {
 	select {
 	case b.wake <- struct{}{}:
+	default:
+	}
+}
+
+// softPoke wakes the worker unless it is backing off after a failure: the
+// rollout's own container events and same-spec Applies would retry it hot.
+func (b *Backend) softPoke() {
+	select {
+	case b.softWake <- struct{}{}:
 	default:
 	}
 }
@@ -218,6 +262,9 @@ func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
 	}
 
 	b.mu.Lock()
+	// The controller re-applies the same spec on every step, so only a new
+	// spec or new devices may cut a failure backoff short.
+	renewed := b.want == nil || b.want.hash != wh || b.staged
 	if b.want == nil || b.want.hash != wh {
 		b.fails = 0
 		if b.cancel != nil {
@@ -229,7 +276,11 @@ func (b *Backend) Apply(ctx context.Context, specs []*device.Spec) error {
 	b.applied = true
 	b.takeStaged()
 	b.mu.Unlock()
-	b.poke()
+	if renewed {
+		b.poke()
+	} else {
+		b.softPoke()
+	}
 	return nil
 }
 
@@ -361,10 +412,14 @@ func (b *Backend) RestartPod(_ context.Context, workload string) error {
 	return nil
 }
 
-// Run reconciles until ctx is done: after every Apply or RestartPod, every
-// Resync, and every 5 s while the USB gate is closed. It never tears the
-// workload down on exit.
+// Run reconciles until ctx is done: after every Apply, RestartPod, device
+// change and Notify event; while backing off after a failure, only a new
+// spec, new devices, RestartPod or a USB uevent end the wait early. Timers
+// remain only as fallbacks: the failure backoff, every Resync while Docker
+// events are unavailable, and every 5 s while a wanted USB device is missing
+// and uevents are unavailable. It never tears the workload down on exit.
 func (b *Backend) Run(ctx context.Context) {
+	timed := false // the last wait ended on the fallback timer
 	for {
 		cctx, cancel := context.WithCancel(ctx)
 		b.mu.Lock()
@@ -373,22 +428,265 @@ func (b *Backend) Run(ctx context.Context) {
 		b.converge(cctx)
 		b.mu.Lock()
 		b.cancel = nil
-		wait := retryWait(b.p.Resync, b.fails)
-		if b.gated {
-			wait = gateRecheck
+		wait := b.fallbackWait()
+		var soft <-chan struct{}
+		if b.fails == 0 {
+			soft = b.softWake
+		}
+		var recheck func() // without Docker events the controller re-observes on each fallback re-check too
+		if timed && !b.eventsOK {
+			recheck = b.changed
 		}
 		b.mu.Unlock()
 		cancel()
-		t := time.NewTimer(wait)
+		b.progressChanged()
+		if recheck != nil {
+			recheck()
+		}
+		var tc <-chan time.Time
+		var t *time.Timer
+		if wait > 0 {
+			t = time.NewTimer(wait)
+			tc = t.C
+		}
+		timed = false
+		select {
+		case <-ctx.Done():
+		case <-b.wake:
+		case <-soft:
+		case <-tc:
+			timed = true
+		}
+		if t != nil {
+			t.Stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// fallbackWait is how long Run sleeps without a wake; 0: no timer. b.mu is held.
+func (b *Backend) fallbackWait() time.Duration {
+	// Without uevents, sysfs is re-read until a missing device appears; a
+	// failing rollout keeps its backoff unless the whole workload is gated.
+	missing := b.noDev || len(b.waiting) > 0
+	switch {
+	case b.gated && !b.ueventsOK:
+		return gateRecheck
+	case b.fails > 0:
+		return retryWait(b.p.Resync, b.fails)
+	case missing && !b.ueventsOK:
+		return gateRecheck
+	case !b.eventsOK:
+		return b.p.Resync
+	}
+	return 0
+}
+
+// progress is the worker state Observe reports from.
+type progress struct {
+	busy, err, done string
+	gated, noDev    bool
+	waiting         string
+}
+
+// progressChanged calls Notify's changed when the worker state differs from
+// the last call, so the controller, which no longer polls, sees each step.
+func (b *Backend) progressChanged() {
+	b.mu.Lock()
+	p := progress{b.busy, b.err, b.done, b.gated, b.noDev, strings.Join(b.waiting, ",")}
+	same, changed := p == b.reported, b.changed
+	b.reported = p
+	b.mu.Unlock()
+	if !same && changed != nil {
+		changed()
+	}
+}
+
+// setFlag sets an event-source flag and wakes the worker when it flipped, so
+// Run re-arms or drops its fallback timer.
+func (b *Backend) setFlag(f *bool, v bool) {
+	b.mu.Lock()
+	flipped := *f != v
+	*f = v
+	b.mu.Unlock()
+	if flipped {
+		b.softPoke()
+	}
+}
+
+// Notify wakes the worker and calls changed on every lifecycle event of the
+// backend's containers (Docker Engine /events) and every USB uevent, until
+// ctx is done. While a source is unavailable, Run falls back to its timer and
+// degraded names it.
+func (b *Backend) Notify(ctx context.Context, changed func(), degraded func(msg string)) {
+	b.mu.Lock()
+	b.changed = changed
+	b.mu.Unlock()
+	pr := &problems{msgs: map[string]string{}, degraded: degraded}
+	var wg sync.WaitGroup
+	wg.Go(func() { b.watchEvents(ctx, func() { b.softPoke(); changed() }, pr) })
+	wg.Go(func() { b.watchUSBEvents(ctx, func() { b.poke(); changed() }, pr) })
+	wg.Wait()
+}
+
+// problems joins the messages of the degraded event sources, in a fixed order.
+type problems struct {
+	mu       sync.Mutex // held across degraded, so two sources never deliver out of order
+	msgs     map[string]string
+	last     string
+	degraded func(string)
+}
+
+func (p *problems) set(source, msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.msgs[source] = msg
+	var all []string
+	for _, s := range []string{"events", "usb"} {
+		if m := p.msgs[s]; m != "" {
+			all = append(all, m)
+		}
+	}
+	if j := strings.Join(all, "; "); j != p.last {
+		p.last = j
+		p.degraded(j)
+	}
+}
+
+// watchEvents follows the Events stream, reconnecting with backoff. A
+// stream that stays up eventsStable ends the failure streak: it resets the
+// backoff and clears the degraded message, so a stream a proxy keeps closing
+// logs and degrades once and reconnects ever more slowly.
+//
+// shortcut: a stream a proxy closes only after eventsStable or longer still
+// logs a Warn and Info pair and flips the backend-events item every cycle,
+// and after a single drop the degraded text lingers up to eventsStable;
+// accepted because this backend is scheduled for removal, upgrade to a
+// decaying failure count if it outlives that.
+func (b *Backend) watchEvents(ctx context.Context, wake func(), pr *problems) {
+	defer b.setFlag(&b.eventsOK, false)
+	delay, failing := b.eventsRetry, false
+	for {
+		err := b.streamEvents(ctx, wake, func() {
+			b.setFlag(&b.eventsOK, true)
+			wake() // events may have been missed while disconnected
+		}, func() {
+			delay = b.eventsRetry
+			pr.set("events", "")
+			if failing {
+				failing = false
+				slog.Info("Docker events available again")
+			}
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		b.setFlag(&b.eventsOK, false)
+		if !failing {
+			failing = true
+			slog.Warn("Docker events unavailable; falling back to a periodic re-check", "err", err, "every", b.p.Resync)
+		}
+		pr.set("events", fmt.Sprintf("Docker events unavailable (%v); re-checking every %g s — allow GET /events in the socket proxy", err, b.p.Resync.Seconds()))
+		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
-		case <-b.wake:
 		case <-t.C:
 		}
-		t.Stop()
+		delay = min(delay*2, maxRetryWait)
 	}
+}
+
+// streamEvents reads one Events stream until it fails or ctx ends. connected
+// runs once the stream is up: on its first message, or when no error came
+// within eventsQuiet (the client reports a refused request just after it
+// returns). stable runs once it has been up for eventsStable.
+func (b *Backend) streamEvents(ctx context.Context, wake, connected, stable func()) error {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r := b.eng.Events(sctx, client.EventsListOptions{Filters: EventFilters()})
+	quiet := time.NewTimer(eventsQuiet)
+	defer quiet.Stop()
+	steady := time.NewTimer(b.eventsStable)
+	steady.Stop()
+	defer steady.Stop()
+	var steadyC <-chan time.Time // nil until up
+	up := false
+	setUp := func() {
+		if !up {
+			up = true
+			connected()
+			steady.Reset(b.eventsStable)
+			steadyC = steady.C
+		}
+	}
+	lastHealth := map[string]string{} // container ID → health status; reset per stream
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-r.Err:
+			if err == nil { // closed after its one error
+				err = errors.New("events stream closed")
+			}
+			return err
+		case <-quiet.C:
+			setUp()
+		case <-steadyC:
+			steadyC = nil
+			stable()
+		case m := <-r.Messages:
+			setUp()
+			if passEvent(m, lastHealth) {
+				wake()
+			}
+		}
+	}
+}
+
+// passEvent is the client-side guard: it passes only lifecycle actions, and a
+// health_status only when the container's status changed (Podman logs one per
+// healthcheck run, Docker one per change).
+//
+// shortcut: the server-side event filter is assumed to match the action
+// before its first ":" on Docker and Podman; if TestDockerBackend's
+// self-heal sees no die or destroy on its EventFilters stream on an engine,
+// drop the "event" terms from EventFilters and rely on this guard.
+func passEvent(m events.Message, lastHealth map[string]string) bool {
+	action, status, _ := strings.Cut(string(m.Action), ":") // "health_status: healthy"
+	action = strings.TrimSpace(action)
+	if !slices.Contains(lifecycleActions, action) {
+		return false
+	}
+	id := m.Actor.ID
+	switch action {
+	case "destroy":
+		delete(lastHealth, id)
+	case "health_status":
+		status = cmp.Or(strings.TrimSpace(status), m.Actor.Attributes["health_status"])
+		if prev, ok := lastHealth[id]; ok && prev == status {
+			return false
+		}
+		lastHealth[id] = status
+	}
+	return true
+}
+
+// watchUSBEvents wakes on USB uevents. An open failure never recovers within
+// the process, so its degraded note stays.
+func (b *Backend) watchUSBEvents(ctx context.Context, wake func(), pr *problems) {
+	defer b.setFlag(&b.ueventsOK, false)
+	b.setFlag(&b.ueventsOK, true)
+	err := b.watchUSB(ctx, wake)
+	if ctx.Err() != nil || err == nil {
+		return
+	}
+	b.setFlag(&b.ueventsOK, false)
+	slog.Warn("USB events unavailable; re-checking every 5 s while a device is missing", "err", err)
+	pr.set("usb", fmt.Sprintf("USB events unavailable (%v); re-checking every %g s", err, gateRecheck.Seconds()))
 }
 
 // retryWait backs off like CrashLoopBackOff: resync doubled per consecutive
@@ -405,10 +703,12 @@ func (b *Backend) setBusy(msg string) {
 	b.mu.Lock()
 	b.busy = msg
 	b.mu.Unlock()
+	b.progressChanged()
 }
 
 // fail records a rollout error; one caused by the cancelled ctx is dropped.
 func (b *Backend) fail(ctx context.Context, err error) {
+	defer b.progressChanged()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.busy = ""
@@ -547,6 +847,7 @@ func (b *Backend) converge(ctx context.Context) {
 		b.mu.Lock()
 		b.gated, b.noDev, b.waiting, b.done = true, false, nil, ""
 		b.mu.Unlock()
+		b.progressChanged()
 		if err := b.teardown(ctx, owned); err != nil {
 			b.fail(ctx, err)
 		}
@@ -596,6 +897,7 @@ func (b *Backend) converge(ctx context.Context) {
 	b.mu.Lock()
 	b.done, b.busy = "", "starting"
 	b.mu.Unlock()
+	b.progressChanged()
 	if err := b.rollout(ctx, owned, w); err != nil {
 		b.fail(ctx, err)
 		return
@@ -879,7 +1181,10 @@ func (b *Backend) waitExit(ctx context.Context, name, id string) error {
 	}
 }
 
-// waitHealthy polls the engine's health status. An engine that does not run
+// waitHealthy polls the engine's health status, once per healthPoll for at
+// most healthTimeout of one rollout step: Docker sends health_status events
+// only on a change and Podman on every run, so an inspect loop is the one
+// answer both engines give alike. An engine that does not run
 // the check (no State.Health, or no result and no failure by the deadline)
 // does not block the rollout; that is warned once.
 func (b *Backend) waitHealthy(ctx context.Context, name, id string) error {

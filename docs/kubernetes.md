@@ -37,7 +37,7 @@ pagewire restarts at most once per change and device. The restart covers the who
 
 pagewire runs one device workload per node with USB devices: a Deployment and a ConfigMap named `pagewire-device`, `pagewire-device-1`, `pagewire-device-2` and `pagewire-device-3`. That is at most 4 nodes with devices; with more, the extra nodes are not served and the Status page names them under reconcile. Each workload holds that node's printers and scanners, because each node can run only one Avahi.
 
-To find those nodes, pagewire lists the cluster's nodes and takes those whose allocatable `PAGEWIRE_USB_RESOURCE` is above 0. Listing nodes needs the ClusterRole `pagewire-nodes` in `deploy/base/clusterrole.yaml` and its binding in `deploy/base/clusterrolebinding.yaml`. `deploy/base` applies both; they grant only `list` on nodes, and you need them only for devices on more than one node:
+To find those nodes, pagewire lists the cluster's nodes and takes those whose allocatable `PAGEWIRE_USB_RESOURCE` is above 0. Listing nodes needs the ClusterRole `pagewire-nodes` in `deploy/base/clusterrole.yaml` and its binding in `deploy/base/clusterrolebinding.yaml`. `deploy/base` applies both; they grant only `list` and `watch` on nodes, and you need them only for devices on more than one node:
 
 - Without the ClusterRole, the node list is refused and pagewire runs one device workload, `pagewire-device`, not pinned to any node, so Kubernetes schedules it on the node that advertises the resource. It logs "listing nodes failed; running one device workload (single-node mode)" once, and tries the node list again every 5 minutes. To run this way, remove both files from `deploy/base/kustomization.yaml`.
 - Any other node-list error, such as a timeout or an API server restart, counts as temporary: pagewire keeps its device workloads as they are and changes none of them until the list works again.
@@ -56,7 +56,7 @@ The vendor-file volume is ReadWriteOnce, so only one device workload mounts it: 
 
 ## RBAC
 
-`deploy/base/role.yaml` is limited to the namespace, and every rule names its objects except pods. It lets the control plane read its own Deployment (`pagewire`) and update its finalizers; read, create, patch and delete the device Deployments and ConfigMaps (`pagewire-device` and `pagewire-device-1` to `-3`); read, create and patch the agent token Secret (`pagewire-agent-token`); and list and delete pods, whose names are generated. `resourceNames` match exactly, which is why the slot names are a fixed set. If you change `PAGEWIRE_K8S_OWNER`, change the `pagewire` resource name in the Role too. The optional ClusterRole adds `list` on nodes, cluster-wide, and nothing else.
+`deploy/base/role.yaml` is limited to the namespace, and every rule names its objects except pods. It lets the control plane read its own Deployment (`pagewire`) and update its finalizers; read, create, patch and delete the device Deployments and ConfigMaps (`pagewire-device` and `pagewire-device-1` to `-3`); read, create and patch the agent token Secret (`pagewire-agent-token`); and list, watch and delete pods, whose names are generated. `resourceNames` match exactly, which is why the slot names are a fixed set. If you change `PAGEWIRE_K8S_OWNER`, change the `pagewire` resource name in the Role too. The optional ClusterRole adds `list` and `watch` on nodes, cluster-wide, and nothing else. pagewire watches the device pods and nodes to react to changes at once. With an older Role or ClusterRole that lacks `watch`, it falls back to re-checking every 30 s and says so under reconcile on the Status page.
 
 ## Namespace and admission policy
 
@@ -74,7 +74,7 @@ If you rename the namespace, change the binding's `namespaceSelector` too.
 
 `deploy/base/pvc.yaml` has two ReadWriteOnce claims:
 
-- `pagewire-data` (2Gi) holds the config file and stored scans, and is mounted by the control plane. Use a volume that delivers inotify events: network RWX file systems do not, and the config watcher would miss edits.
+- `pagewire-data` (2Gi) holds the config file and stored scans, and is mounted by the control plane. Use a volume that delivers inotify events. Network RWX file systems do not; on a network or FUSE volume pagewire notices it and re-reads the config file every 30 s instead.
 - `pagewire-blobs` (1Gi) holds vendor files, such as HP's plug-in, and is mounted by one device pod (see [Devices on several nodes](#devices-on-several-nodes)). The name is the default of `--blob-pvc` (`PAGEWIRE_BLOB_PVC`).
 
 In probe and usb modes that device pod always mounts the blob volume, even for printers that need no vendor file. Its agent container uses it to download and check a vendor archive, so the wizard can show the vendor's licence before you accept it. The volume therefore has to be mountable on the node that runs that pod: with one node, the node with the USB devices; with several, see [Devices on several nodes](#devices-on-several-nodes). A node-local ReadWriteOnce volume that was provisioned on another node leaves the device pod Pending. The device Deployment runs one replica with the Recreate strategy, so the old and new pod never hold the volume at the same time.

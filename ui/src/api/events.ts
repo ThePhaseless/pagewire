@@ -1,4 +1,4 @@
-// One EventSource for the whole app: Status, config, job and scan events from /api/v1/events.
+// One EventSource for the whole app: Status, config, job, scan and EULA events from /api/v1/events.
 import {
   createContext,
   useCallback,
@@ -13,6 +13,8 @@ import type { z } from "zod";
 import {
   type ConfigEvent,
   ConfigEventSchema,
+  type EULA,
+  EULASchema,
   type Job,
   JobSchema,
   type Scan,
@@ -28,10 +30,17 @@ const schemas = {
   config: ConfigEventSchema,
   job: JobSchema,
   scan: ScanSchema,
+  eula: EULASchema,
 } satisfies Record<string, z.ZodType>;
 
 export type EventType = keyof typeof schemas;
-export type EventPayload = { status: Status; config: ConfigEvent; job: Job; scan: Scan };
+export type EventPayload = {
+  status: Status;
+  config: ConfigEvent;
+  job: Job;
+  scan: Scan;
+  eula: EULA;
+};
 
 type EventSourceLike = Pick<EventSource, "addEventListener" | "close"> & {
   onopen: ((this: EventSource, ev: Event) => unknown) | null;

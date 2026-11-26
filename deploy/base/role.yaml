@@ -41,8 +41,9 @@ rules:
     resourceNames: [pagewire-agent-token]
     verbs: [get, create, patch]
   # Device pods get generated names, so these cannot be scoped by resourceNames.
-  # Observe and RestartPod list them by label; RestartPod deletes them one by one by
-  # name, so neither deletecollection nor get or watch is granted.
+  # Observe and RestartPod list them by label, and Notify watches them by label so
+  # pagewire reacts when a device pod changes; RestartPod deletes them one by one by
+  # name, so neither deletecollection nor get is granted.
   - apiGroups: [""]
     resources: [pods]
-    verbs: [list, delete]
+    verbs: [list, watch, delete]

@@ -143,6 +143,7 @@ export const statusStrings = {
       "config-migration": "Settings file update",
       "data-dir": "Data directory",
       nodes: "Nodes with devices",
+      "backend-events": "Change notifications",
     } as Record<string, string>,
     /** `workload/<node>` items; `default` is the one workload of a single-node install. */
     workload: (node: string) => (node === "default" ? "Devices" : `Devices on ${node}`),

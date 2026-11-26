@@ -1063,6 +1063,8 @@ func TestStatusLookups(t *testing.T) {
 			{ID: "off", Enabled: false, Available: true, URI: "ipp://b/ipp/print", Capabilities: caps},
 			{ID: "down", Enabled: true, Available: false, Capabilities: caps},
 			{ID: "nocaps", Enabled: true, Available: true, URI: "ipp://c/ipp/print"},
+			{ID: "usb", Enabled: true, Available: true, URI: "ipp://d:60000/ipp/print", Decision: &device.PrinterDecision{Family: "ipp-usb"}},
+			{ID: "pappl", Enabled: true, Available: true, URI: "ipp://e/ipp/print", Decision: &device.PrinterDecision{Family: "ps"}},
 		},
 		Scanners: []apitypes.StatusScanner{
 			{ID: "on", Enabled: true, URL: "http://a/eSCL"},
@@ -1078,6 +1080,11 @@ func TestStatusLookups(t *testing.T) {
 	for id, want := range map[string]error{"on": nil, "off": api.ErrUnknownScanner, "nope": api.ErrUnknownScanner, "down": scanning.ErrNoScanner} {
 		if url, err := scannerURL(st, id); !errors.Is(err, want) || (err == nil) != (url != "") {
 			t.Errorf("scannerURL(%s) = %q, %v; want %v", id, url, err, want)
+		}
+	}
+	for id, want := range map[string]bool{"usb": true, "pappl": false, "on": false, "nope": false} {
+		if got := servedByIPPUSB(st, id); got != want { // ipp-usb jobs are polled, never long-polled
+			t.Errorf("servedByIPPUSB(%s) = %v, want %v", id, got, want)
 		}
 	}
 	for id, want := range map[string]bool{"on": true, "off": false, "down": false, "nocaps": false, "nope": false} {

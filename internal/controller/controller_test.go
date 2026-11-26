@@ -19,6 +19,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/catalog"
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 	"github.com/ThePhaseless/pagewire/internal/scanning"
 	"github.com/ThePhaseless/pagewire/internal/schema"
@@ -163,7 +164,12 @@ type fakeScanner struct {
 	url string
 }
 
-func (s fakeScanner) Status(context.Context) (scanning.State, error) { return scanning.StateIdle, nil }
+func (s fakeScanner) Status(context.Context) (scanning.State, error) {
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
+	s.h.statusCalls[s.url]++
+	return scanning.StateIdle, nil
+}
 
 func (s fakeScanner) Capabilities(context.Context) (scanning.Caps, error) {
 	s.h.mu.Lock()
@@ -209,12 +215,13 @@ type harness struct {
 	clock *fakeClock
 	pubs  []apitypes.Status
 
-	mu        sync.Mutex
-	printed   []string                       // printer URIs queried
-	attrs     map[string]printing.Attributes // by URI; default idleAttrs
-	scanCaps  map[string]scanning.Caps
-	capsErr   map[string]error
-	capsCalls map[string]int
+	mu          sync.Mutex
+	printed     []string                       // printer URIs queried
+	attrs       map[string]printing.Attributes // by URI; default idleAttrs
+	scanCaps    map[string]scanning.Caps
+	capsErr     map[string]error
+	capsCalls   map[string]int
+	statusCalls map[string]int
 }
 
 var idleAttrs = printing.Attributes{State: "idle", Formats: []string{"application/pdf"}, Media: []string{"iso_a4_210x297mm"}}
@@ -224,6 +231,7 @@ func newHarness(t *testing.T, o Options) *harness {
 	h := &harness{
 		b: &fakeBackend{}, clock: &fakeClock{t: t0},
 		attrs: map[string]printing.Attributes{}, scanCaps: map[string]scanning.Caps{}, capsErr: map[string]error{}, capsCalls: map[string]int{},
+		statusCalls: map[string]int{},
 	}
 	switch b := o.Backend.(type) {
 	case nil:
@@ -233,6 +241,8 @@ func newHarness(t *testing.T, o Options) *harness {
 	case *nodeBackend:
 		h.b = b.fakeBackend
 	case *deviceBackend:
+		h.b = b.fakeBackend
+	case *notifyBackend:
 		h.b = b.fakeBackend
 	}
 	if o.BackendName == "" {
@@ -679,7 +689,7 @@ func TestTwoNodes(t *testing.T) {
 		nb.nodesErr = errors.New("list nodes: etcd timeout")
 		nb.mu.Unlock()
 		h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("hp", hp)}), "e2") // a change that would Apply
-		h.clock.add(resync)
+		h.clock.add(retryDelay(1))
 		s := h.step()
 		if n := len(h.b.applies()); n != before {
 			t.Fatalf("%d Applies during a transient node-list error, want %d: %+v", n, before, h.b.last(t))
@@ -1111,7 +1121,7 @@ func TestReplugMovedRestartsOnce(t *testing.T) {
 func TestUnallocatedNodeRestartsOnce(t *testing.T) {
 	r := newReplug(t, BackendK8s)
 	r.send("pod", 4, 4, []string{"001/099"})
-	r.h.clock.add(resync)
+	r.h.clock.add(replugDelay)
 	r.send("pod", 4, 4, []string{"001/099"})
 	r.want(1)
 	for range 4 {
@@ -1126,12 +1136,12 @@ func TestUnallocatedNodeRestartsOnce(t *testing.T) {
 func TestReplugTwiceRestartsTwice(t *testing.T) {
 	r := newReplug(t, BackendK8s)
 	r.send("pod", 4, 5, nil)
-	r.h.clock.add(resync)
+	r.h.clock.add(replugDelay)
 	r.send("pod", 4, 5, nil)
 	r.want(1)
 	r.send("pod-2", 5, 5, nil) // the new pod holds the new node: the latch resets
 	r.send("pod-2", 5, 6, nil)
-	r.h.clock.add(resync)
+	r.h.clock.add(replugDelay)
 	r.send("pod-2", 5, 6, nil)
 	r.want(2)
 }
@@ -1167,7 +1177,7 @@ func TestTwoDevicesOneRestart(t *testing.T) {
 	}
 	h.report(t, "office", moved)
 	h.step()
-	h.clock.add(resync)
+	h.clock.add(replugDelay)
 	h.report(t, "office", moved)
 	h.step()
 	if !slices.Equal(rb.restarts, []string{""}) {
@@ -1180,7 +1190,7 @@ func TestOldAgentNoRestarts(t *testing.T) {
 	for range 3 {
 		r.h.report(t, "ippusb-mfp")
 		r.h.step()
-		r.h.clock.add(resync)
+		r.h.clock.add(replugDelay)
 	}
 	r.want(0)
 }
@@ -1200,11 +1210,11 @@ func TestAppearedWithoutDeviceID(t *testing.T) {
 				t.Fatalf("spec %+v, want the scanner only until the printer's device ID is known", sp)
 			}
 			wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgNewDevice)
-			r.h.clock.add(resync)
+			r.h.clock.add(replugDelay)
 			r.h.report(t, "none", appeared)
 			r.h.step()
 			r.want(1)
-			r.h.clock.add(resync)
+			r.h.clock.add(replugDelay)
 			r.h.report(t, "none", appeared)
 			r.h.step()
 			r.want(1)
@@ -1236,7 +1246,7 @@ func TestAppearedStickyRestartsOnce(t *testing.T) {
 	r.h.report(t, "none", on)
 	r.h.step()
 	r.want(0)
-	r.h.clock.add(resync)
+	r.h.clock.add(replugDelay)
 	r.h.report(t, "none", on)
 	r.h.step()
 	r.want(1)
@@ -1284,10 +1294,10 @@ func TestScannerCapsCached(t *testing.T) {
 	h.step()
 	h.step()
 	if h.capsCalls[u] != 1 {
-		t.Fatalf("%d caps calls after a failure within resync, want 1", h.capsCalls[u])
+		t.Fatalf("%d caps calls after a failure within the retry delay, want 1", h.capsCalls[u])
 	}
 	h.capsErr[u] = nil
-	h.clock.add(resync)
+	h.clock.add(retryDelay(1))
 	s := h.step()
 	h.step()
 	h.clock.add(time.Hour)
@@ -1359,7 +1369,7 @@ func TestControlPlaneRestartSingleNode(t *testing.T) {
 			h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
 			s := h.step()
 			wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgWaitingAgent)
-			h.clock.set(t0, resync)
+			h.clock.set(t0, time.Minute)
 			h.step()
 			h.clock.set(t0, pendingWait-time.Second)
 			h.step()
@@ -1463,7 +1473,7 @@ func TestAgentOutage(t *testing.T) {
 	h.report(t, "ippusb-mfp")
 	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: "ipp://127.0.0.1:1/ipp/print"}, device.Endpoint{ID: "scanner", ScannerURL: "http://127.0.0.1:2/eSCL"}))
 	wantPhase(t, h.step(), "ready", "")
-	h.clock.add(31 * time.Second)
+	h.clock.add(agentGap)
 	s := h.step()
 	wantPhase(t, s, "degraded", "printer: "+msgNotReporting)
 	wantApplies(t, h.b, 1)
@@ -1602,7 +1612,7 @@ func TestInvalidConfig(t *testing.T) {
 		h := newHarness(t, Options{USBAvailable: true})
 		h.c.ConfigInvalid(errors.New("bad"), "e", nil)
 		h.step()
-		h.clock.add(resync)
+		h.clock.add(retryDelay(1))
 		h.step()
 		wantApplies(t, h.b, 0)
 	})
@@ -1957,7 +1967,7 @@ func TestApplyFailsOneWorkload(t *testing.T) {
 	}
 	// n2 recovers: its item clears.
 	h.b.applyErr = nil
-	h.clock.add(resync)
+	h.clock.add(retryDelay(1))
 	s = h.step()
 	for _, r := range s.Reconcile {
 		if !r.OK {
@@ -1976,7 +1986,7 @@ func TestStaleWorkloadItemCleared(t *testing.T) {
 	nb.nodes = []string{"n1"}
 	nb.mu.Unlock()
 	h.b.applyErr = nil
-	h.clock.add(resync)
+	h.clock.add(retryDelay(1))
 	s := h.step()
 	for _, r := range s.Reconcile {
 		if !r.OK {
@@ -2019,4 +2029,779 @@ func TestUpgradeFromSingleWorkload(t *testing.T) {
 		}
 	}
 	wantApplies(t, h.b, 1)
+}
+
+// notifyBackend is a device.Notifier: Notify hands its callbacks to the test.
+type notifyBackend struct {
+	*fakeBackend
+	cbs chan notifyCallbacks
+}
+
+type notifyCallbacks struct {
+	changed  func()
+	degraded func(string)
+}
+
+func (n *notifyBackend) Notify(ctx context.Context, changed func(), degraded func(string)) {
+	n.cbs <- notifyCallbacks{changed, degraded}
+	<-ctx.Done()
+}
+
+// watchFake is a PrinterWatcher: Watch returns err at once when set, else
+// blocks until its ctx ends.
+type watchFake struct {
+	mu      sync.Mutex
+	err     error
+	calls   int
+	changed func()
+	ctxs    []context.Context
+}
+
+func (w *watchFake) Watch(ctx context.Context, changed func()) error {
+	w.mu.Lock()
+	w.calls++
+	w.changed, w.ctxs = changed, append(w.ctxs, ctx)
+	err := w.err
+	w.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (w *watchFake) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
+}
+
+func (w *watchFake) last() (context.Context, func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ctxs[len(w.ctxs)-1], w.changed
+}
+
+type watchingPrinter struct {
+	PrinterObserver
+	*watchFake
+}
+
+// watching makes every printer the controller creates a PrinterWatcher backed by w.
+func (h *harness) watching(w *watchFake) {
+	base := h.c.printer
+	h.c.printer = func(uri string) PrinterObserver { return watchingPrinter{base(uri), w} }
+}
+
+// run runs the loop until the test ends.
+func (h *harness) run(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		h.c.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+	})
+}
+
+// observes counts the backend's Observe calls, one or two per step.
+func (h *harness) observes() int {
+	h.b.mu.Lock()
+	defer h.b.mu.Unlock()
+	n := 0
+	for _, c := range h.b.calls {
+		if c == "observe" {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *harness) count(m map[string]int, key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return m[key]
+}
+
+func (h *harness) queried(uri string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, u := range h.printed {
+		if u == uri {
+			n++
+		}
+	}
+	return n
+}
+
+// settle waits until the loop made no Observe call for 100 ms.
+func (h *harness) settle(t *testing.T) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	n := h.observes()
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		m := h.observes()
+		if m == n {
+			return n
+		}
+		n = m
+	}
+	t.Fatal("the loop kept stepping")
+	return 0
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func drain(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+	}
+}
+
+const (
+	testPrinterURI = "ipp://127.0.0.1:1/ipp/print"
+	testScannerURL = "http://127.0.0.1:2/eSCL"
+)
+
+// mfpHarness serves the ippusb-mfp printer and scanner at the test URIs, with
+// the agent's Attached list set by attached (nil: not reported).
+func mfpHarness(t *testing.T, o Options, attached []device.USBDevice) *harness {
+	t.Helper()
+	h := newHarness(t, o)
+	h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+	h.b.set(running(device.Endpoint{ID: "printer", PrinterURI: testPrinterURI}, device.Endpoint{ID: "scanner", ScannerURL: testScannerURL}))
+	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Attached = attached })
+	return h
+}
+
+func mfpDevice(t *testing.T) device.USBDevice {
+	t.Helper()
+	d := catalog.Fixture("ippusb-mfp").Devices[0]
+	d.DeviceID = ""
+	return d
+}
+
+func TestRetryDelay(t *testing.T) {
+	want := []time.Duration{0, 30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	for fails, w := range want {
+		if got := retryDelay(fails); got != w {
+			t.Errorf("retryDelay(%d) = %v, want %v", fails, got, w)
+		}
+	}
+	if retryDelay(1000) != retryMax {
+		t.Error("retryDelay overflows on a long streak")
+	}
+}
+
+// An idle healthy install records no deadline, and an identical heartbeat
+// neither wakes the loop nor makes it observe.
+func TestIdleHealthy(t *testing.T) {
+	h := mfpHarness(t, Options{USBAvailable: true}, []device.USBDevice{mfpDevice(t)})
+	beat := func(seq uint64) {
+		t.Helper()
+		h.report(t, "ippusb-mfp", func(r *device.AgentReport) {
+			r.Attached, r.Instance, r.Seq, r.Wait = []device.USBDevice{mfpDevice(t)}, "a", seq, false
+		})
+	}
+	beat(1)
+	wantPhase(t, h.step(), "ready", "")
+	h.step()
+	if !h.c.next.IsZero() {
+		t.Fatalf("an idle step recorded a deadline at %v", h.c.next)
+	}
+	drain(h.c.wake)
+	drain(h.c.rearm)
+	beat(2)
+	if len(h.c.wake) != 0 {
+		t.Fatal("an identical heartbeat poked the loop")
+	}
+	if len(h.c.rearm) != 1 {
+		t.Fatal("an identical heartbeat did not re-arm the agent gap")
+	}
+	h.clock.add(agentGap)
+	beat(3)
+	if len(h.c.wake) != 1 {
+		t.Fatal("a heartbeat after the agent gap did not poke the loop")
+	}
+	h.step()
+
+	h.run(t)
+	n := h.settle(t)
+	for seq := uint64(4); seq < 6; seq++ {
+		beat(seq)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := h.observes(); got != n {
+		t.Fatalf("%d Observe calls after identical heartbeats, want %d", got, n)
+	}
+	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Attached, r.Instance, r.Seq = []device.USBDevice{}, "a", 6 })
+	waitFor(t, "a step after a changed report", func() bool { return h.observes() > n })
+}
+
+// A device that is unplugged gets no caps re-ask and no deadline; its return
+// asks at once.
+func TestIdleDeviceAbsent(t *testing.T) {
+	h := mfpHarness(t, Options{USBAvailable: true}, []device.USBDevice{})
+	h.capsErr[testScannerURL] = errors.New("connection refused")
+	h.step()
+	h.step()
+	if !h.c.next.IsZero() {
+		t.Fatalf("deadline %v with the device unplugged", h.c.next)
+	}
+	for _, w := range h.c.watchWant {
+		if !w.absent {
+			t.Fatalf("watch target %+v not absent", w)
+		}
+	}
+	if len(h.c.watchWant) != 2 {
+		t.Fatalf("watch targets %+v", h.c.watchWant)
+	}
+	for range 5 {
+		h.clock.add(10 * time.Minute)
+		h.step()
+		if !h.c.next.IsZero() {
+			t.Fatalf("deadline %v with the device unplugged", h.c.next)
+		}
+	}
+	if n := h.capsCalls[testScannerURL]; n != 1 {
+		t.Fatalf("%d caps calls while unplugged, want 1", n)
+	}
+	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Attached = []device.USBDevice{mfpDevice(t)} })
+	h.step()
+	if n := h.capsCalls[testScannerURL]; n != 2 {
+		t.Fatalf("%d caps calls after the device returned, want 2", n)
+	}
+	h.step()
+	if n := h.capsCalls[testScannerURL]; n != 2 {
+		t.Fatalf("%d caps calls, want the retry to wait", n)
+	}
+}
+
+// A present device whose caps keep failing is re-asked with a backoff.
+func TestCapsRetryBackoff(t *testing.T) {
+	h := mfpHarness(t, Options{USBAvailable: true}, nil)
+	h.capsErr[testScannerURL] = errors.New("timeout")
+	h.step()
+	for i, want := range []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
+		now := h.clock.now()
+		if got := h.c.next.Sub(now); got != want {
+			t.Fatalf("retry %d: deadline in %v, want %v", i+1, got, want)
+		}
+		h.clock.set(h.c.next, 0)
+		h.report(t, "ippusb-mfp") // keep the agent reporting
+		h.step()
+		if n := h.capsCalls[testScannerURL]; n != i+2 {
+			t.Fatalf("%d caps calls at retry %d", n, i+1)
+		}
+	}
+	h.capsErr[testScannerURL] = nil
+	h.clock.set(h.c.next, 0)
+	h.step()
+	if !h.c.next.IsZero() {
+		t.Fatalf("deadline %v after the caps answered", h.c.next)
+	}
+}
+
+func TestNotifierWakesAndDegrades(t *testing.T) {
+	nb := &notifyBackend{fakeBackend: &fakeBackend{}, cbs: make(chan notifyCallbacks, 1)}
+	h := newHarness(t, Options{Backend: nb})
+	h.c.ConfigApplied(simConfig(), "e")
+	h.run(t)
+	var cb notifyCallbacks
+	select {
+	case cb = <-nb.cbs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not start Notify")
+	}
+	n := h.settle(t)
+	cb.changed()
+	deadline := time.Now().Add(time.Second)
+	for h.observes() == n {
+		if time.Now().After(deadline) {
+			t.Fatal("no step within 1 s of a backend notification")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	item := func() apitypes.ReconcileItem {
+		for _, r := range h.c.Current().Reconcile {
+			if r.Item == "backend-events" {
+				return r
+			}
+		}
+		t.Fatal("no backend-events item")
+		return apitypes.ReconcileItem{}
+	}
+	cb.degraded("A; B")
+	cb.degraded("B")
+	if r := item(); r.OK || r.Message != "B" {
+		t.Fatalf("item %+v, want failed with B", r)
+	}
+	cb.degraded("")
+	if r := item(); !r.OK || r.Message != "" {
+		t.Fatalf("item %+v, want ok", r)
+	}
+}
+
+// The loop wakes on its own when the agent goes silent.
+func TestSilenceAfterReport(t *testing.T) {
+	h := mfpHarness(t, Options{USBAvailable: true}, nil)
+	wantPhase(t, h.step(), "ready", "")
+	h.clock.add(5 * time.Second)
+	h.report(t, "ippusb-mfp")
+	at := t0.Add(5 * time.Second)
+	if got := h.c.gapDeadline(); !got.Equal(at.Add(agentGap)) {
+		t.Fatalf("gap deadline %v, want %v", got, at.Add(agentGap))
+	}
+	if got := h.c.deadline(); !got.Equal(at.Add(agentGap)) {
+		t.Fatalf("deadline %v, want the agent gap", got)
+	}
+	h.clock.set(at, agentGap)
+	wantPhase(t, h.step(), "degraded", "printer: "+msgNotReporting)
+	if got := h.c.deadline(); !got.IsZero() {
+		t.Fatalf("deadline %v after the silence showed", got)
+	}
+}
+
+func TestReplugDeadline(t *testing.T) {
+	r := newReplug(t, BackendK8s)
+	r.send("pod", 4, 5, nil)
+	if want := t0.Add(replugDelay); !r.h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", r.h.c.next, want)
+	}
+	r.want(0)
+	r.h.clock.set(t0, replugDelay)
+	r.h.step()
+	r.want(1)
+}
+
+// A config that binds an already reported device makes the next identical
+// heartbeat create a replug key, which must wake the loop to record its deadline.
+func TestHeartbeatNewLossKeyWakes(t *testing.T) {
+	rb := &restartBackend{fakeBackend: &fakeBackend{}}
+	h := newHarness(t, Options{Backend: rb, BackendName: BackendK8s, USBAvailable: true})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.c.ConfigMissing()
+	att := mfpDevice(t)
+	appeared := func(r *device.AgentReport) { r.Attached, r.ProbeNodes = []device.USBDevice{att}, []string{} }
+	h.report(t, "none", appeared)
+	h.step()
+	h.c.ConfigApplied(cfgOf([]config.Printer{usbPrinter("printer", att)}), "e")
+	h.step()
+	drain(h.c.wake)
+	h.clock.add(10 * time.Second)
+	h.report(t, "none", appeared)
+	if len(h.c.wake) != 1 {
+		t.Fatal("a heartbeat that created a replug key did not poke the loop")
+	}
+	h.step()
+	if want := t0.Add(10*time.Second + replugDelay); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", h.c.next, want)
+	}
+	h.clock.set(t0, 10*time.Second+replugDelay)
+	h.step()
+	if rb.count() != 1 {
+		t.Fatalf("%d restarts at the replug deadline, want 1", rb.count())
+	}
+}
+
+func TestUnreachableQueueDeadline(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+	h.b.set(device.Observation{Phase: device.PhaseRunning, HostIP: "192.168.1.20"})
+	h.c.ConfigApplied(mfpConfig(t, "samsung-scx4300-mfp"), "e")
+	h.report(t, "samsung-scx4300-mfp", func(r *device.AgentReport) {
+		r.Queues = []device.QueueResult{{ID: "printer", State: device.QueueError, Message: "get-printers: connection refused", Unreachable: true}}
+	})
+	s := h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "deploying", msgStartingApp)
+	if want := t0.Add(startGrace); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", h.c.next, want)
+	}
+	h.clock.set(t0, startGrace)
+	s = h.step()
+	wantEntry(t, s.Printers[0].Phase, s.Printers[0].Message, "error", "get-printers: connection refused")
+}
+
+func TestApplyRetryBackoff(t *testing.T) {
+	h := newHarness(t, Options{})
+	h.b.applyErr = errors.New("quota")
+	h.c.ConfigApplied(simConfig(), "e")
+	h.step()
+	if want := t0.Add(30 * time.Second); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", h.c.next, want)
+	}
+	h.clock.set(h.c.next, 0)
+	h.step()
+	wantApplies(t, h.b, 2)
+	if want := t0.Add(90 * time.Second); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v after the second failure, want %v", h.c.next, want)
+	}
+	h.b.applyErr = nil
+	h.clock.set(h.c.next, 0)
+	h.step()
+	wantApplies(t, h.b, 3)
+	if !h.c.next.IsZero() || h.c.failCount != 0 {
+		t.Fatalf("deadline %v, %d fails after a success", h.c.next, h.c.failCount)
+	}
+}
+
+func TestNodeListBlipRetry(t *testing.T) {
+	nb := newNodeBackend("n1")
+	nb.nodesErr = errors.New("list nodes: etcd timeout")
+	h := newHarness(t, Options{Backend: nb, BackendName: BackendK8s, USBAvailable: true})
+	h.c.ConfigMissing()
+	h.step()
+	if want := t0.Add(30 * time.Second); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", h.c.next, want)
+	}
+	h.clock.set(h.c.next, 0)
+	h.step()
+	if want := t0.Add(90 * time.Second); !h.c.next.Equal(want) {
+		t.Fatalf("deadline %v, want %v", h.c.next, want)
+	}
+	nb.mu.Lock()
+	nb.nodesErr = nil
+	nb.mu.Unlock()
+	h.step()
+	if !h.c.next.IsZero() || h.c.blipCount != 0 {
+		t.Fatalf("deadline %v, blip count %d after the list answered", h.c.next, h.c.blipCount)
+	}
+}
+
+// queueHarness has one PAPPL queue in the desired state of workload "".
+func queueHarness(t *testing.T, o Options) (*harness, device.DesiredState) {
+	t.Helper()
+	o.USBAvailable = true
+	h := newHarness(t, o)
+	h.c.ConfigApplied(mfpConfig(t, "hp-legacy-mfp"), "e")
+	h.report(t, "hp-legacy-mfp")
+	h.step()
+	ds := h.report(t, "hp-legacy-mfp")
+	if len(ds.Queues) != 1 || ds.Version != device.DesiredStateVersion(ds) {
+		t.Fatalf("desired %+v", ds)
+	}
+	return h, ds
+}
+
+func held(version string) device.AgentReport {
+	return device.AgentReport{PodUID: "pod", Inventory: catalog.Fixture("hp-legacy-mfp"), Wait: true, DesiredVersion: version}
+}
+
+func TestLongPoll(t *testing.T) {
+	t.Run("released by a desired change", func(t *testing.T) {
+		h, ds := queueHarness(t, Options{AgentWait: 5 * time.Second})
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cfg := mfpConfig(t, "hp-legacy-mfp")
+			cfg.Printers[0].Location = "Hall"
+			h.c.ConfigApplied(cfg, "e2")
+		}()
+		start := time.Now()
+		got, err := h.c.AgentReport(context.Background(), held(ds.Version))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Version == ds.Version || got.Queues[0].Location != "Hall" || time.Since(start) > 2*time.Second {
+			t.Fatalf("after %v: %+v", time.Since(start), got)
+		}
+	})
+	t.Run("AgentWait passes", func(t *testing.T) {
+		h, ds := queueHarness(t, Options{AgentWait: 100 * time.Millisecond})
+		start := time.Now()
+		got, err := h.c.AgentReport(context.Background(), held(ds.Version))
+		if err != nil || got.Version != ds.Version {
+			t.Fatalf("%+v, %v", got, err)
+		}
+		if d := time.Since(start); d < 100*time.Millisecond || d > 2*time.Second {
+			t.Fatalf("held %v, want about AgentWait", d)
+		}
+	})
+	t.Run("another version answers at once", func(t *testing.T) {
+		h, ds := queueHarness(t, Options{AgentWait: time.Hour})
+		got, err := h.c.AgentReport(context.Background(), held("old"))
+		if err != nil || got.Version != ds.Version {
+			t.Fatalf("%+v, %v", got, err)
+		}
+	})
+	t.Run("ctx cancel", func(t *testing.T) {
+		h, ds := queueHarness(t, Options{AgentWait: time.Hour})
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+		done := make(chan struct{})
+		go func() {
+			_, _ = h.c.AgentReport(ctx, held(ds.Version))
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("a held report did not return after ctx cancel")
+		}
+	})
+}
+
+func TestStaleReport(t *testing.T) {
+	h := newHarness(t, Options{USBAvailable: true})
+	send := func(instance string, seq uint64, attached []device.USBDevice) {
+		t.Helper()
+		h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Instance, r.Seq, r.Attached = instance, seq, attached })
+	}
+	stored := func() device.AgentReport {
+		h.c.mu.Lock()
+		defer h.c.mu.Unlock()
+		return h.c.reports[""].r
+	}
+	send("a", 2, []device.USBDevice{})
+	send("a", 1, nil)
+	if r := stored(); r.Seq != 2 || r.Attached == nil {
+		t.Fatalf("a stale report replaced the stored one: %+v", r)
+	}
+	send("b", 1, nil)
+	if r := stored(); r.Instance != "b" || r.Seq != 1 {
+		t.Fatalf("a new instance was not stored: %+v", r)
+	}
+	send("", 0, []device.USBDevice{}) // an old agent
+	if r := stored(); r.Instance != "" || r.Attached == nil {
+		t.Fatalf("an old agent's report was not stored: %+v", r)
+	}
+}
+
+// The sim backend's agent keeps PodUID "sim" across sim.Apply; its new Core
+// starts at Seq 1 with a new Instance.
+func TestSimRestartedAgentAccepted(t *testing.T) {
+	h := mfpHarness(t, Options{USBAvailable: true}, nil)
+	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.PodUID, r.Instance, r.Seq = "sim", "a", 9 })
+	wantPhase(t, h.step(), "ready", "")
+	h.clock.add(40 * time.Second)
+	h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.PodUID, r.Instance, r.Seq = "sim", "b", 1 })
+	h.clock.add(10 * time.Second)
+	wantPhase(t, h.step(), "ready", "")
+}
+
+func TestPublishEULA(t *testing.T) {
+	var got []apitypes.EULA
+	h := newHarness(t, Options{USBAvailable: true, PublishEULA: func(e apitypes.EULA) { got = append(got, e) }})
+	h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
+	h.report(t, "hp-legacy-mfp", withText(device.EULAAvailable))
+	h.report(t, "hp-legacy-mfp", withText(device.EULAPending))
+	if len(got) != 1 || got[0].State != apitypes.EULAAvailable || got[0].Text == nil {
+		t.Fatalf("published %+v, want one available EULA", got)
+	}
+	h.report(t, "hp-legacy-mfp", withText(device.EULAFailed))
+	if len(got) != 2 || got[1].State != apitypes.EULAFailed {
+		t.Fatalf("published %+v", got)
+	}
+}
+
+func TestWatchers(t *testing.T) {
+	present := func(t *testing.T) []device.USBDevice { return []device.USBDevice{mfpDevice(t)} }
+	t.Run("push wakes the loop", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		w := &watchFake{}
+		h.watching(w)
+		h.run(t)
+		waitFor(t, "Watch", func() bool { return w.count() == 1 })
+		n := h.settle(t)
+		_, changed := w.last()
+		changed()
+		waitFor(t, "a step after a printer event", func() bool { return h.observes() > n })
+	})
+	t.Run("unsupported: poll pokes only on a change", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		h.c.pollEvery = 20 * time.Millisecond
+		w := &watchFake{err: fmt.Errorf("create: %w", ippnotify.ErrUnsupported)}
+		h.watching(w)
+		h.run(t)
+		waitFor(t, "Watch", func() bool { return w.count() == 1 })
+		n := h.settle(t)
+		q := h.queried(testPrinterURI)
+		time.Sleep(150 * time.Millisecond)
+		if h.queried(testPrinterURI) <= q {
+			t.Fatal("the push-less printer was not polled")
+		}
+		if got := h.observes(); got != n {
+			t.Fatalf("%d Observe calls from unchanged polls, want %d", got, n)
+		}
+		h.mu.Lock()
+		h.attrs[testPrinterURI] = printing.Attributes{State: "processing"}
+		h.mu.Unlock()
+		waitFor(t, "a step after a polled change", func() bool { return h.observes() > n })
+		if w.count() != 1 {
+			t.Fatalf("Watch called %d times, want once", w.count())
+		}
+	})
+	t.Run("refused: polls for one lease, then subscribes again", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		h.c.pollEvery, h.c.leaseWait = 10*time.Millisecond, 400*time.Millisecond
+		w := &watchFake{err: fmt.Errorf("create: %w", ippnotify.ErrRefused)}
+		h.watching(w)
+		h.run(t)
+		waitFor(t, "Watch", func() bool { return w.count() == 1 })
+		q := h.queried(testPrinterURI)
+		n := h.settle(t)
+		waitFor(t, "a second subscribe after the lease", func() bool { return w.count() >= 2 })
+		if h.queried(testPrinterURI) <= q+1 {
+			t.Fatal("the refused printer was not polled meanwhile")
+		}
+		if got := h.observes(); got != n {
+			t.Fatalf("%d Observe calls from unchanged polls, want %d", got, n)
+		}
+	})
+	// direct runs syncWatchers without the loop; woken reports a pending loop wake.
+	direct := func(t *testing.T, pollEvery time.Duration) (h *harness, apply func(...watchTarget), woken func() bool) {
+		h = mfpHarness(t, Options{USBAvailable: true}, present(t))
+		h.c.pollEvery, h.c.pollRetry = pollEvery, 10*time.Millisecond
+		drain(h.c.wake)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(func() { cancel(); h.c.syncWatchers(ctx, nil) })
+		return h, func(want ...watchTarget) { h.c.syncWatchers(ctx, want) }, func() bool { return len(h.c.wake) > 0 }
+	}
+	idle := watchTarget{uri: testPrinterURI, seed: printerResult(idleAttrs, nil)}
+	t.Run("a later step's result is the poll's baseline", func(t *testing.T) {
+		h, apply, woken := direct(t, 10*time.Millisecond)
+		apply(idle)
+		q := h.queried(testPrinterURI)
+		waitFor(t, "a poll", func() bool { return h.queried(testPrinterURI) > q+1 })
+		if woken() {
+			t.Fatal("an unchanged poll woke the loop")
+		}
+		busy := idle
+		busy.seed = printerResult(printing.Attributes{State: "processing"}, nil)
+		apply(busy) // a step caused by something else saw the printer busy; it is idle again
+		waitFor(t, "a wake once the printer is idle again", woken)
+	})
+	t.Run("a failed seed is retried soon", func(t *testing.T) {
+		_, apply, woken := direct(t, time.Hour)
+		failed := idle
+		failed.seed = printerResult(printing.Attributes{}, errors.New("timeout"))
+		apply(failed)
+		waitFor(t, "a wake once the printer answers", woken)
+	})
+	t.Run("a failed baseline keeps the quick retry going", func(t *testing.T) {
+		h, apply, woken := direct(t, time.Hour)
+		failed := idle
+		failed.seed = printerResult(printing.Attributes{}, errors.New("timeout"))
+		apply(failed)
+		waitFor(t, "a wake once the printer answers", woken)
+		drain(h.c.wake)
+		apply(failed) // the step's query failed again: failed to failed sends no kick
+		waitFor(t, "a second wake while the baseline still fails", woken)
+	})
+	t.Run("a step's failed query restarts the quick retry", func(t *testing.T) {
+		_, apply, woken := direct(t, time.Hour)
+		apply(idle)
+		failed := idle
+		failed.seed = printerResult(printing.Attributes{}, errors.New("timeout"))
+		apply(failed)
+		waitFor(t, "a wake once the printer answers", woken)
+	})
+	t.Run("a watched printer is polled too", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		h.c.pollEvery = 10 * time.Millisecond
+		w := &watchFake{}
+		h.watching(w)
+		h.run(t)
+		waitFor(t, "Watch", func() bool { return w.count() == 1 })
+		n := h.settle(t)
+		q := h.queried(testPrinterURI)
+		waitFor(t, "a poll beside Watch", func() bool { return h.queried(testPrinterURI) > q+1 })
+		h.mu.Lock()
+		h.attrs[testPrinterURI] = printing.Attributes{State: "idle", Reasons: []string{"media-empty-error"}}
+		h.mu.Unlock()
+		waitFor(t, "a step after reasons changed without an event", func() bool { return h.observes() > n })
+		waitFor(t, "Status showing the reason", func() bool {
+			return slices.Equal(h.c.Current().Printers[0].Reasons, []string{"media-empty-error"})
+		})
+	})
+	t.Run("absent: paused, then started once", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, []device.USBDevice{})
+		h.c.pollEvery = 10 * time.Millisecond
+		w := &watchFake{}
+		h.watching(w)
+		h.run(t)
+		h.settle(t)
+		q, st := h.queried(testPrinterURI), h.count(h.statusCalls, testScannerURL)
+		time.Sleep(100 * time.Millisecond)
+		if w.count() != 0 || h.queried(testPrinterURI) != q || h.count(h.statusCalls, testScannerURL) != st {
+			t.Fatalf("watch calls %d, printer queries %d -> %d, scanner queries %d -> %d while unplugged",
+				w.count(), q, h.queried(testPrinterURI), st, h.count(h.statusCalls, testScannerURL))
+		}
+		h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Attached = present(t) })
+		waitFor(t, "Watch after the device returned", func() bool { return w.count() == 1 })
+		waitFor(t, "the scanner poll", func() bool { return h.count(h.statusCalls, testScannerURL) > st+1 })
+		time.Sleep(50 * time.Millisecond)
+		if w.count() != 1 {
+			t.Fatalf("Watch called %d times, want once", w.count())
+		}
+	})
+	t.Run("unplugging cancels a running watcher", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		w := &watchFake{}
+		h.watching(w)
+		h.run(t)
+		waitFor(t, "Watch", func() bool { return w.count() == 1 })
+		ctx, _ := w.last()
+		h.report(t, "ippusb-mfp", func(r *device.AgentReport) { r.Attached = []device.USBDevice{} })
+		select {
+		case <-ctx.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("the watcher kept running after the device was unplugged")
+		}
+	})
+	t.Run("ipp-usb: polled, never watched", func(t *testing.T) {
+		h := newHarness(t, Options{USBAvailable: true, BackendName: BackendK8s})
+		h.c.ConfigApplied(mfpConfig(t, "ippusb-mfp"), "e")
+		h.b.set(running())
+		h.report(t, "ippusb-mfp", func(r *device.AgentReport) {
+			r.Attached = present(t)
+			r.Services = []device.DNSSDService{svc(device.ServiceIPP, "HP", device.IPPUSBMinPort, "rp", "ipp/print")}
+		})
+		h.c.pollEvery = 10 * time.Millisecond
+		w := &watchFake{}
+		h.watching(w)
+		h.run(t)
+		uri := fmt.Sprintf("ipp://127.0.0.1:%d/ipp/print", device.IPPUSBMinPort)
+		waitFor(t, "the ipp-usb printer poll", func() bool { return h.queried(uri) > 3 })
+		h.c.mu.Lock()
+		got := h.c.status.Printers[0].URI
+		h.c.mu.Unlock()
+		if got != uri {
+			t.Fatalf("printer URI %q, want %q", got, uri)
+		}
+		if w.count() != 0 {
+			t.Fatalf("Watch called %d times on an ipp-usb printer, want 0", w.count())
+		}
+	})
+	t.Run("a direct step starts no watcher", func(t *testing.T) {
+		h := mfpHarness(t, Options{USBAvailable: true}, present(t))
+		h.c.pollEvery = 10 * time.Millisecond
+		w := &watchFake{}
+		h.watching(w)
+		h.step()
+		st := h.count(h.statusCalls, testScannerURL)
+		time.Sleep(100 * time.Millisecond)
+		if w.count() != 0 || h.count(h.statusCalls, testScannerURL) != st || st != 1 {
+			t.Fatalf("watch calls %d, scanner queries %d -> %d after a direct step", w.count(), st, h.count(h.statusCalls, testScannerURL))
+		}
+	})
 }

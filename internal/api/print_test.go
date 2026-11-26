@@ -2,9 +2,11 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/jpeg"
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/ThePhaseless/pagewire/internal/config"
 	"github.com/ThePhaseless/pagewire/internal/device"
 	"github.com/ThePhaseless/pagewire/internal/ippcaps"
+	"github.com/ThePhaseless/pagewire/internal/ippnotify"
 	"github.com/ThePhaseless/pagewire/internal/printing"
 )
 
@@ -319,6 +323,7 @@ func scripted(states ...string) func(int) (apitypes.Job, error) {
 	}
 }
 
+// printerFake has no WatchJob: this is the poll path.
 func TestJobWatcherPublishesChanges(t *testing.T) {
 	e := newEnv(t)
 	je := collectJobs(t, e.hub)
@@ -334,6 +339,109 @@ func TestJobWatcherPublishesChanges(t *testing.T) {
 	}
 	if e.printer.calls() != calls || calls != 4 {
 		t.Fatalf("Job calls %d then %d, want 4 and none after completed", calls, e.printer.calls())
+	}
+}
+
+// watchPrinter is printerFake with the JobWatcher capability.
+type watchPrinter struct {
+	*printerFake
+	watch    func(ctx context.Context, id int, changed func()) error
+	returned atomic.Bool // WatchJob has returned
+}
+
+func (w *watchPrinter) WatchJob(ctx context.Context, id int, changed func()) error {
+	defer w.returned.Store(true)
+	return w.watch(ctx, id, changed)
+}
+
+type watchPrinters struct{ p *watchPrinter }
+
+func (w watchPrinters) Printer(id string) (Printer, error) {
+	if id != "p1" {
+		return nil, ErrUnknownPrinter
+	}
+	return w.p, nil
+}
+
+// newWatchEnv is newEnv with printer p1 implementing JobWatcher through watch.
+func newWatchEnv(t *testing.T, watch func(ctx context.Context, id int, changed func()) error, mod ...func(*Deps)) (*testEnv, *watchPrinter) {
+	t.Helper()
+	wp := &watchPrinter{watch: watch}
+	e := newEnv(t, append([]func(*Deps){func(d *Deps) { d.Printers = watchPrinters{wp} }}, mod...)...)
+	wp.printerFake = e.printer
+	return e, wp
+}
+
+func TestJobWatcherFollowsNotifications(t *testing.T) {
+	events := make(chan struct{})
+	e, wp := newWatchEnv(t, func(ctx context.Context, _ int, changed func()) error {
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-events:
+				changed()
+			}
+		}
+	}, func(d *Deps) { d.JobPollInterval = time.Hour })
+	je := collectJobs(t, e.hub)
+	e.printer.job = scripted("pending", "processing", "completed")
+	if code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF}); code != 202 {
+		t.Fatalf("%d %s", code, body)
+	}
+	for _, want := range []string{"processing", "completed"} {
+		events <- struct{}{}
+		waitFor(t, want+" event", func() bool { s := je.states(); return len(s) > 0 && s[len(s)-1] == want })
+	}
+	waitFor(t, "WatchJob to end", wp.returned.Load)
+	if got := je.states(); strings.Join(got, ",") != "pending,processing,completed" {
+		t.Fatalf("events %v", got)
+	}
+	if n := e.printer.calls(); n != 3 {
+		t.Fatalf("Job calls %d, want 3 (submit and one per notification)", n)
+	}
+}
+
+// A WatchJob that fails or ends before the job does hands over to the poll.
+func TestJobWatcherFallsBackToPoll(t *testing.T) {
+	for name, err := range map[string]error{
+		"refused":     fmt.Errorf("create job subscription: %w", ippnotify.ErrRefused),
+		"unsupported": fmt.Errorf("create job subscription: %w", ippnotify.ErrUnsupported),
+		"other error": errors.New("boom"),
+		"nil early":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, _ := newWatchEnv(t, func(context.Context, int, func()) error { return err })
+			je := collectJobs(t, e.hub)
+			e.printer.job = scripted("pending", "processing", "processing", "completed")
+			if code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF}); code != 202 {
+				t.Fatalf("%d %s", code, body)
+			}
+			waitFor(t, "completed event", func() bool { s := je.states(); return len(s) > 0 && s[len(s)-1] == "completed" })
+			if got := je.states(); strings.Join(got, ",") != "pending,processing,completed" {
+				t.Fatalf("events %v", got)
+			}
+		})
+	}
+}
+
+func TestOnJobPerEvent(t *testing.T) {
+	var onJob atomic.Int32
+	e := newEnv(t, func(d *Deps) { d.OnJob = func() { onJob.Add(1) } })
+	je := collectJobs(t, e.hub)
+	e.printer.job = scripted("pending", "processing", "processing", "completed")
+	if code, body := e.print([3]string{"options", "", goodOptions}, [3]string{"file", "a.pdf", samplePDF}); code != 202 {
+		t.Fatalf("%d %s", code, body)
+	}
+	waitFor(t, "completed event", func() bool { s := je.states(); return len(s) > 0 && s[len(s)-1] == "completed" })
+	if rec := e.do("DELETE", "/api/v1/printers/p1/jobs/1", nil); rec.Code != 204 {
+		t.Fatalf("DELETE %d %s", rec.Code, rec.Body)
+	}
+	// OnJob runs after Publish, so wait on it rather than on the events.
+	waitFor(t, "OnJob for every event", func() bool { return onJob.Load() >= 4 })
+	time.Sleep(30 * time.Millisecond)
+	if n, s := onJob.Load(), je.states(); n != 4 || len(s) != 4 {
+		t.Fatalf("OnJob called %d times for job events %v, want 4 and 4", n, s)
 	}
 }
 

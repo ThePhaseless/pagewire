@@ -1,6 +1,13 @@
 package device
 
-import "context"
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"slices"
+	"time"
+)
 
 // Agent protocol constants.
 const (
@@ -19,6 +26,10 @@ const (
 
 	// AgentWorkloadArg is the agent flag that names its workload (Spec.Node).
 	AgentWorkloadArg = "--workload"
+
+	// AgentWait is the agent long-poll hold; must stay below the internal
+	// listener's 30 s WriteTimeout.
+	AgentWait = 20 * time.Second
 )
 
 // BrowseTypes are the DNS-SD service types the controller always asks for.
@@ -67,7 +78,8 @@ type EULAText struct {
 	Message    string `json:"message"`
 }
 
-// QueueSpec is one PAPPL queue the agent reconciles on every cycle.
+// QueueSpec is one PAPPL queue the agent reconciles whenever its desired
+// state, its printer application or its USB device changes.
 type QueueSpec struct {
 	ID       string `json:"id"` // config printer entry id
 	Name     string `json:"name"`
@@ -123,13 +135,27 @@ type DNSSDService struct {
 
 // AgentReport is the body of POST AgentReportPath with
 // "Authorization: Bearer <token>".
+//
+// A report is stale, and the controller ignores it, when its PodUID and
+// non-empty Instance equal the stored report's and its non-zero Seq is lower.
+// A different Instance always replaces the stored report.
 type AgentReport struct {
-	PodUID      string    `json:"podUid"`
+	PodUID string `json:"podUid"`
+	// Instance is random hex per agent process; "" for old agents.
+	Instance string `json:"instance"`
+	// Seq counts this Instance's reports from 1; 0 for old agents.
+	Seq uint64 `json:"seq"`
+	// Wait asks the controller to hold the answer until the desired state's
+	// Version differs from DesiredVersion, or AgentWait passes.
+	Wait bool `json:"wait"`
+	// DesiredVersion is the DesiredState.Version the agent holds.
+	DesiredVersion string `json:"desiredVersion"`
+
 	Workload    string    `json:"workload"`    // the agent's --workload (Spec.Node)
 	AppliedHash string    `json:"appliedHash"` // DesiredState.Hash the agent last received
 	Inventory   Inventory `json:"inventory"`   // the static probe result
-	// Attached is this cycle's sysfs device list (DeviceID empty); nil when
-	// not reported (old agents, no inventory file).
+	// Attached is the sysfs device list read for this report (DeviceID
+	// empty); nil when not reported (old agents, no inventory file).
 	Attached []USBDevice `json:"attached"`
 	// ProbeNodes are the usbfs nodes (USBDevice.Node form) the probe found
 	// under /dev/bus/usb; nil when unknown, [] when there were none.
@@ -141,11 +167,15 @@ type AgentReport struct {
 }
 
 // DesiredState is the 200 response to an AgentReport (401 bad token, 400 malformed).
+// Agents detect a change by comparing the whole state; Version only names it
+// for the hold (AgentReport.Wait).
 type DesiredState struct {
 	Hash string `json:"hash"` // the Spec.Hash of the report's workload ("" when it has no spec)
+	// Version is DesiredStateVersion of this state; "" from old controllers.
+	Version string `json:"version"`
 	// Queues are built from the current config on every report: one per PAPPL
-	// printer of the workload's spec. The agent reconciles them every cycle,
-	// so queue changes need no pod roll.
+	// printer of the workload's spec. The agent reconciles them when they
+	// change, so queue changes need no pod roll.
 	Queues []QueueSpec `json:"queues"`
 	Browse []string    `json:"browse"` // service types to browse; the controller always sends BrowseTypes
 	// StageEULAs are the EULAs whose text the agent stages and reports, sorted
@@ -156,3 +186,34 @@ type DesiredState struct {
 // ReportFunc is the controller's agent-report handler, which the sim backend
 // calls in-process, only from its agent goroutine.
 type ReportFunc func(ctx context.Context, r AgentReport) (DesiredState, error)
+
+// DesiredStateVersion returns the hex sha256 of the JSON of ds with Version
+// cleared and every nil slice, nested ones included, replaced by an empty
+// one, so nil and [] version alike (as SpecHash does).
+func DesiredStateVersion(ds DesiredState) string {
+	ds.Version = ""
+	ds.Queues = slices.Clone(ds.Queues) // copy before normalising the nested lists
+	if ds.Queues == nil {
+		ds.Queues = []QueueSpec{}
+	}
+	for i := range ds.Queues {
+		if ds.Queues[i].Schemes == nil {
+			ds.Queues[i].Schemes = []string{}
+		}
+		if ds.Queues[i].Device.Interfaces == nil {
+			ds.Queues[i].Device.Interfaces = []USBInterface{}
+		}
+	}
+	if ds.Browse == nil {
+		ds.Browse = []string{}
+	}
+	if ds.StageEULAs == nil {
+		ds.StageEULAs = []EULARef{}
+	}
+	b, err := json.Marshal(ds)
+	if err != nil {
+		panic("device: marshal desired state: " + err.Error()) // only strings, ints, bools and slices of them
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}

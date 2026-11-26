@@ -25,6 +25,7 @@ type Engine interface {
 	VolumeInspect(ctx context.Context, volumeID string, options client.VolumeInspectOptions) (client.VolumeInspectResult, error)
 	VolumeCreate(ctx context.Context, options client.VolumeCreateOptions) (client.VolumeCreateResult, error)
 	VolumeRemove(ctx context.Context, volumeID string, options client.VolumeRemoveOptions) (client.VolumeRemoveResult, error)
+	Events(ctx context.Context, options client.EventsListOptions) client.EventsResult
 }
 
 var _ Engine = (*client.Client)(nil)

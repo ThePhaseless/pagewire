@@ -67,11 +67,10 @@ func agentCmd(ctx context.Context, args []string) error {
 		fl.StringVar(&c.PodUID, "pod-uid", "", "this pod's UID")
 		fl.StringVar(&c.Workload, strings.TrimPrefix(device.AgentWorkloadArg, "--"), "", "this workload's node name (Spec.Node); empty for a single workload")
 		fl.StringVar(&c.InventoryFile, "inventory", "", "inventory JSON from agent probe")
-		fl.StringVar(&c.BlobStatusFile, "blob-status", "", "blob status JSON from agent fetch, re-read every cycle")
+		fl.StringVar(&c.BlobStatusFile, "blob-status", "", "blob status JSON from agent fetch, re-read when it changes")
 		fl.StringVar(&c.BlobDir, "blob-dir", "", "blob volume where vendor archives are staged to show their licence text; empty: licence texts report failed")
 		fl.StringVar(&c.SysRoot, "sys-root", "/sys", "sysfs root")
 		fl.StringVar(&c.DBusAddress, "dbus-address", device.DBusAddress, "D-Bus system bus for Avahi; empty disables DNS-SD browsing")
-		fl.DurationVar(&c.Interval, "interval", 0, "report interval (default 5s)")
 		if err := parseAgentFlags(fl, args[1:]); err != nil {
 			return err
 		}
