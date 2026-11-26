@@ -617,7 +617,8 @@ func TestAptSourceFetchShared(t *testing.T) {
 		stages := parseDockerfile(t, file)
 		for _, s := range stages {
 			for _, l := range s.lines {
-				if strings.Contains(l, "apt-get source") {
+				// Comments may name the command; only instructions count.
+				if !strings.HasPrefix(strings.TrimSpace(l), "#") && strings.Contains(l, "apt-get source") {
 					t.Errorf("%s: stage %s runs apt-get source itself, not through %s", file, s.name, script)
 				}
 			}
