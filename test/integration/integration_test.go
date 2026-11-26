@@ -376,6 +376,79 @@ func TestDevicePod(t *testing.T) {
 		check(http.MethodPost, p+"/", "action=pause-printer", http.StatusForbidden)
 	})
 
+	// PAPPL's printer admin IPP operations answer only local clients, while
+	// printing and status stay open to the LAN.
+	t.Run("PAPPL IPP admin refused to remote clients", func(t *testing.T) {
+		// Everything runs on the host network, so the host's own LAN address is
+		// a non-localhost peer for PAPPL: httpAddrIsLocalhost admits 127/8 and
+		// ::1 only. PAPPL accepts IP-literal Host headers. The dial sends no packet.
+		c, err := (&net.Dialer{}).DialContext(ctx, "udp4", "192.0.2.1:9")
+		if err != nil {
+			t.Fatalf("need a non-loopback IPv4 address to reach PAPPL as a remote client: %v", err)
+		}
+		a, _ := c.LocalAddr().(*net.UDPAddr)
+		_ = c.Close()
+		if a == nil || a.IP.IsLoopback() || a.IP.IsUnspecified() {
+			t.Fatalf("need a non-loopback IPv4 address to reach PAPPL as a remote client, got %v", c.LocalAddr())
+		}
+		ip := a.IP.String()
+		u, err := url.Parse(queueURI)
+		if err != nil || u.Port() == "" {
+			t.Fatalf("queue URI %s: %v, want a host:port", queueURI, err)
+		}
+		remote := *u
+		remote.Host = net.JoinHostPort(ip, u.Port())
+		remoteURI := remote.String()
+
+		// Undo whatever an unpatched PAPPL let through, over loopback, so later
+		// subtests find the queue as it was. The parent ctx, because the
+		// subtest's own is gone by the time cleanups run.
+		t.Cleanup(func() {
+			for _, op := range []goipp.Op{goipp.OpResumePrinter, goipp.OpEnablePrinter} {
+				if code, _ := ippDo(ctx, t, queueURI, op); code != http.StatusOK {
+					t.Logf("cleanup %v over loopback: HTTP %d", op, code)
+				}
+			}
+		})
+
+		if code, _ := ippDo(ctx, t, remoteURI, goipp.OpPausePrinter); code != http.StatusForbidden {
+			t.Fatalf("Pause-Printer from %s: HTTP %d, want 403: PAPPL does not see this address as remote, so the checks below prove nothing", ip, code)
+		}
+
+		if _, err := printing.New(remoteURI).Attributes(ctx); err != nil {
+			t.Errorf("Get-Printer-Attributes from %s: %v", ip, err)
+		}
+		// Validate-Job takes Print-Job's auth path; no full remote print until the cfFilterChain fork deadlock fix lands.
+		if code, rsp := ippDo(ctx, t, remoteURI, goipp.OpValidateJob); code != http.StatusOK || rsp.Code >= 0x0400 {
+			t.Errorf("Validate-Job from %s: HTTP %d (%s), want 200 and a successful IPP status", ip, code, ippStatus(rsp))
+		}
+
+		// Disable before Enable, so on an unpatched PAPPL Enable undoes Disable.
+		for _, op := range []goipp.Op{goipp.OpDisablePrinter, goipp.OpEnablePrinter, goipp.OpCancelCurrentJob} {
+			if code, rsp := ippDo(ctx, t, remoteURI, op); code != http.StatusForbidden {
+				t.Errorf("%v from %s: HTTP %d (%s), want 403", op, ip, code, ippStatus(rsp))
+			}
+		}
+
+		code, rsp := ippDo(ctx, t, queueURI, goipp.OpGetPrinterAttributes,
+			goipp.MakeAttribute("requested-attributes", goipp.TagKeyword, goipp.String("printer-is-accepting-jobs")))
+		accepting := false
+		if rsp != nil {
+			for _, at := range rsp.Printer {
+				if at.Name == "printer-is-accepting-jobs" && len(at.Values) > 0 {
+					b, _ := at.Values[0].V.(goipp.Boolean)
+					accepting = bool(b)
+				}
+			}
+		}
+		if code != http.StatusOK || !accepting {
+			t.Errorf("printer-is-accepting-jobs over loopback: HTTP %d, accepting %v, want 200 and true", code, accepting)
+		}
+		if a, err := printing.New(queueURI).Attributes(ctx); err != nil || a.State == "stopped" {
+			t.Errorf("queue state over loopback: %q, %v; want it not stopped", a.State, err)
+		}
+	})
+
 	// Last, because the queue comes back as a new printer: the agent's system
 	// watch sees the delete and re-creates the queue at once.
 	t.Run("deleted queue comes back", func(t *testing.T) {
@@ -721,6 +794,51 @@ func httpStatus(ctx context.Context, t *testing.T, method, u, body string) (int,
 	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 	return resp.StatusCode, string(b)
+}
+
+// ippDo sends one IPP request for op to uri (ipp:// sent as http://) with
+// printer-uri and requesting-user-name, plus extra operation attributes, and
+// returns the HTTP status and, on 200, the decoded response.
+func ippDo(ctx context.Context, t *testing.T, uri string, op goipp.Op, extra ...goipp.Attribute) (int, *goipp.Message) {
+	t.Helper()
+	m := goipp.NewRequest(goipp.DefaultVersion, op, 1)
+	m.Operation.Add(goipp.MakeAttribute("attributes-charset", goipp.TagCharset, goipp.String("utf-8")))
+	m.Operation.Add(goipp.MakeAttribute("attributes-natural-language", goipp.TagLanguage, goipp.String("en")))
+	m.Operation.Add(goipp.MakeAttribute("printer-uri", goipp.TagURI, goipp.String(uri)))
+	m.Operation.Add(goipp.MakeAttribute("requesting-user-name", goipp.TagName, goipp.String("it")))
+	for _, a := range extra {
+		m.Operation.Add(a)
+	}
+	enc, err := m.EncodeBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.Replace(uri, "ipp://", "http://", 1), bytes.NewReader(enc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", goipp.ContentType)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("%v %s: %v", op, uri, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil
+	}
+	rsp := &goipp.Message{}
+	if err := rsp.Decode(io.LimitReader(resp.Body, 1<<20)); err != nil {
+		t.Fatalf("%v %s: decode response: %v", op, uri, err)
+	}
+	return resp.StatusCode, rsp
+}
+
+// ippStatus is rsp's IPP status for a failure message, or "no IPP response".
+func ippStatus(rsp *goipp.Message) string {
+	if rsp == nil {
+		return "no IPP response"
+	}
+	return "IPP " + goipp.Status(rsp.Code).String()
 }
 
 // waitFor polls cond every second until it holds, d passes or ctx ends, and

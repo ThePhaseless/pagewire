@@ -1,0 +1,92 @@
+pagewire's change to PAPPL v1.4.12: answer Disable-Printer, Enable-Printer
+and Cancel-Current-Job only for local clients.
+
+Upstream these three operations authorize through _papplPrinterIsAuthorized(),
+which calls _papplClientIsAuthorizedForGroup() with allow_remote=true. With no
+auth service, every client may then stop a queue accepting jobs, start it
+again, or cancel the job that is printing. That is how the retrofit Printer
+Applications run in pagewire, and they listen on every address of the node.
+
+With this patch the three use papplClientIsAuthorized() like Pause-Printer:
+loopback or the domain socket only, or an authenticated client when an auth
+service is set. Cancel-Current-Job checks before it looks for the job, so a
+remote client gets 403 whether or not a job is printing. Job operations
+(Print-Job, Create-Job, Send-Document, Validate-Job, Get-Jobs,
+Get-Job-Attributes, Cancel-Job, Hold-Job, Release-Job, Close-Job) and
+subscriptions are unchanged.
+
+PAPPL is Copyright (c) 2019-2026 by Michael R Sweet and is licensed under
+the Apache License, Version 2.0, with an (optional) exception to allow
+linking against GPL2/LGPL2 software (see the LICENSE and NOTICE files in the
+PAPPL source). This patch is a modification of PAPPL and is distributed
+under the same licence.
+
+diff --git a/pappl/printer-ipp.c b/pappl/printer-ipp.c
+index 45278bf..84abbd9 100644
+--- a/pappl/printer-ipp.c
++++ b/pappl/printer-ipp.c
+@@ -1483,7 +1483,17 @@ ipp_cancel_current_job(
+     pappl_client_t *client)		// I - Client
+ {
+   pappl_job_t	*job;			// Job information
++  http_status_t	auth_status;		// Authorization status
++
+ 
++  // pagewire: Cancel-Current-Job cancels whichever job is printing, so it
++  // is an operator operation: local clients only, checked before the job
++  // lookup so remote clients learn nothing about the printer's state.
++  if ((auth_status = papplClientIsAuthorized(client)) != HTTP_STATUS_CONTINUE)
++  {
++    papplClientRespond(client, auth_status, NULL, NULL, 0, 0);
++    return;
++  }
+ 
+   // Get the job...
+   if ((job = client->printer->processing_job) == NULL)
+@@ -1492,10 +1502,6 @@ ipp_cancel_current_job(
+     return;
+   }
+ 
+-  // Authorize access...
+-  if (!_papplPrinterIsAuthorized(client))
+-    return;
+-
+   // See if the job is already completed, canceled, or aborted; if so,
+   // we can't cancel...
+   switch (job->state)
+@@ -1610,9 +1616,15 @@ static void
+ ipp_disable_printer(
+     pappl_client_t *client)		// I - Client
+ {
+-  // Authorize access...
+-  if (!_papplPrinterIsAuthorized(client))
++  http_status_t	auth_status;		// Authorization status
++
++
++  // pagewire: Disable-Printer is an operator operation, local clients only, like Pause-Printer.
++  if ((auth_status = papplClientIsAuthorized(client)) != HTTP_STATUS_CONTINUE)
++  {
++    papplClientRespond(client, auth_status, NULL, NULL, 0, 0);
+     return;
++  }
+ 
+   // Disable the printer...
+   papplPrinterDisable(client->printer);
+@@ -1627,9 +1639,15 @@ static void
+ ipp_enable_printer(
+     pappl_client_t *client)		// I - Client
+ {
+-  // Authorize access...
+-  if (!_papplPrinterIsAuthorized(client))
++  http_status_t	auth_status;		// Authorization status
++
++
++  // pagewire: Enable-Printer is an operator operation, local clients only, like Pause-Printer.
++  if ((auth_status = papplClientIsAuthorized(client)) != HTTP_STATUS_CONTINUE)
++  {
++    papplClientRespond(client, auth_status, NULL, NULL, 0, 0);
+     return;
++  }
+ 
+   // Enable the printer...
+   papplPrinterEnable(client->printer);

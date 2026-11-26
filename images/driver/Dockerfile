@@ -28,6 +28,8 @@ ARG PUSHED_IMAGE=scratch
 # images/driver/patches/pappl-max-vendor.patch (PAPPL_MAX_VENDOR is still 32 in 1.4.12).
 # images/driver/patches/pappl-web-admin-closed.patch is pagewire's own: it closes the
 # web interface's admin pages and printer actions when no auth service is set.
+# images/driver/patches/pappl-ipp-admin-local.patch is pagewire's own too: Disable-Printer,
+# Enable-Printer and Cancel-Current-Job answer only local clients.
 # images/driver/patches/pappl-retrofit-fd-leak.patch is upstream's fix for the
 # descriptors 1.0b3 leaks on every device listing; drop it with the first tag that has it.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS pappl-base
@@ -40,7 +42,7 @@ RUN apt-get update \
       libcups2-dev libcupsfilters-dev libppd-dev libgnutls28-dev libavahi-client-dev \
       libjpeg-dev libpng-dev libusb-1.0-0-dev libpam0g-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
-COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-retrofit-fd-leak.patch /src/
+COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-ipp-admin-local.patch images/driver/patches/pappl-retrofit-fd-leak.patch /src/
 WORKDIR /src/pappl
 # The installed patch is the notice of modification that Apache-2.0 4(b) asks for.
 RUN git init -q . \
@@ -50,10 +52,11 @@ RUN git init -q . \
  && git archive --prefix="pappl-${PAPPL_COMMIT}/" -o "/out/upstream/pappl-${PAPPL_COMMIT}.tar.gz" HEAD \
  && patch -p1 < /src/pappl-max-vendor.patch \
  && patch -p1 < /src/pappl-web-admin-closed.patch \
+ && patch -p1 < /src/pappl-ipp-admin-local.patch \
  && ./configure --prefix=/usr/local --enable-libjpeg --enable-libpng --enable-libusb --with-dnssd=avahi \
  && make -j"$(nproc)" \
  && make install \
- && install -D -m 0644 -t /out/licenses/pappl LICENSE NOTICE /src/pappl-max-vendor.patch /src/pappl-web-admin-closed.patch
+ && install -D -m 0644 -t /out/licenses/pappl LICENSE NOTICE /src/pappl-max-vendor.patch /src/pappl-web-admin-closed.patch /src/pappl-ipp-admin-local.patch
 WORKDIR /src/pappl-retrofit
 RUN git init -q . \
  && git fetch -q --depth 1 https://github.com/OpenPrinting/pappl-retrofit.git "${PAPPL_RETROFIT_COMMIT}" \
