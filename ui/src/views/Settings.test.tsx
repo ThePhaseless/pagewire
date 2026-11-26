@@ -513,23 +513,21 @@ describe("Settings form", () => {
     expect(writesOf("PATCH")[0]?.body).toEqual({ printers: [{ ...bare, location: "Hall" }, hp] });
   });
 
-  test("switching a printer to simulated drops its USB selector and driver name", async () => {
-    getConfig = () =>
-      json(applied("e1", withPrinter(0, { driver: "legacy", driverName: "samsung-scx" })));
+  test("a USB printer offers no simulated mode; a simulated one can switch to USB", async () => {
+    const { usb: _, ...rest } = samsung;
+    const sim = { ...rest, mode: "simulated" as const };
+    getConfig = () => json(applied("e1", config({ printers: [sim, hp] })));
     await mount();
+    const hpEntry = await edit(hp.name);
+    expect(within(hpEntry).queryByRole("radio", { name: "Simulated printer" })).toBeNull();
     const entry = await edit("Samsung SCX-4300");
-    expect(field("Driver name", entry).value).toBe("samsung-scx");
     act(() => {
-      fireEvent.click(within(entry).getByRole("radio", { name: "Simulated printer" }));
+      fireEvent.click(within(entry).getByRole("radio", { name: "USB printer" }));
     });
-    expect(within(entry).queryByRole("textbox", { name: "Driver name" })).toBeNull();
-    expect(within(entry).queryByRole("button", { name: /USB device/ })).toBeNull();
+    expect(within(entry).queryByRole("radio", { name: "Simulated printer" })).toBeNull();
     writes.push(() => json(applied("e2")));
     await save();
-    const { usb: _, ...rest } = samsung;
-    expect(writesOf("PATCH")[0]?.body).toEqual({
-      printers: [{ ...rest, mode: "simulated", driver: "legacy" }, hp],
-    });
+    expect(writesOf("PATCH")[0]?.body).toEqual({ printers: [{ ...rest, mode: "usb" }, hp] });
   });
 
   test("choosing the driverless driver hides and drops the driver name", async () => {

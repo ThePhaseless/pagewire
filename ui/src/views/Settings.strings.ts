@@ -42,7 +42,8 @@ export const settingsStrings = {
         ? { usb: "USB printer", simulated: "Simulated printer" }
         : { usb: "USB scanner", simulated: "Simulated scanner" },
     usb: "USB device",
-    usbHint: "The device this entry uses. Plug it in to see it in the list.",
+    usbHint: (role: Role) =>
+      `Which plugged-in device is this ${role}. Not in the list? Connect it and turn it on.`,
     anyDevice: "Any device not used by another entry",
     notDetected: (label: string) => `${label} (not plugged in)`,
     driver: "Printer driver",

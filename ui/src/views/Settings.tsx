@@ -735,26 +735,23 @@ function EntryEditor({
             onChange={(location) => set({ location })}
             {...at(`${path}/location`)}
           />
-          <RadioGroup
-            label={f.mode}
-            options={PrinterSchema.shape.mode.options.map((id) => ({
-              id,
-              label: f.modeOptions(role)[id] ?? id,
-            }))}
-            value={entry.mode}
-            onChange={(v) => {
-              const mode = PrinterSchema.shape.mode.parse(v);
-              // A USB selector and a driver name are only allowed with mode usb.
-              set(
-                mode === "simulated" ? { mode, usb: undefined, driverName: undefined } : { mode },
-              );
-            }}
-            {...at(`${path}/mode`)}
-          />
+          {/* Simulated devices are for tests and demos: only an entry that already is one can switch to USB. */}
+          {entry.mode === "simulated" && (
+            <RadioGroup
+              label={f.mode}
+              options={PrinterSchema.shape.mode.options.map((id) => ({
+                id,
+                label: f.modeOptions(role)[id] ?? id,
+              }))}
+              value={entry.mode}
+              onChange={(v) => set({ mode: PrinterSchema.shape.mode.parse(v) })}
+              {...at(`${path}/mode`)}
+            />
+          )}
           {entry.mode === "usb" && (
             <Select
               label={f.usb}
-              description={f.usbHint}
+              description={f.usbHint(role)}
               options={[...usbOptions].map(([id, label]) => ({ id, label }))}
               selectedKey={current}
               onSelectionChange={(k) => {
