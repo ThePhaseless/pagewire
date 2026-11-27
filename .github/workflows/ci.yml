@@ -258,7 +258,7 @@ jobs:
           - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile, target: gutenprint, licenses: NOASSERTION}
           - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile, target: ghostscript, licenses: NOASSERTION}
           - {image: pagewire-driver-legacy, file: images/driver/Dockerfile, target: legacy, licenses: NOASSERTION}
-    uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
+    uses: docker/github-builder/.github/workflows/build.yml@bb1eb9fb69408ac52395fb21f49c6b52d564529a # v1.20.0
     permissions:
       contents: read
       id-token: write
@@ -311,7 +311,7 @@ jobs:
           - {image: pagewire-driver-gutenprint, file: images/driver/Dockerfile}
           - {image: pagewire-driver-ghostscript, file: images/driver/Dockerfile}
           - {image: pagewire-driver-legacy, file: images/driver/Dockerfile}
-    uses: docker/github-builder/.github/workflows/build.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
+    uses: docker/github-builder/.github/workflows/build.yml@bb1eb9fb69408ac52395fb21f49c6b52d564529a # v1.20.0
     permissions:
       contents: read
       id-token: write
