@@ -21,7 +21,7 @@ ARG MESSAGEBUS_UID=101
 ARG AVAHI_UID=102
 ARG NONROOT_UID=65532
 
-FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS ipp-usb
+FROM golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS ipp-usb
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 ARG IPP_USB_COMMIT
 RUN apt-get update \
@@ -189,7 +189,7 @@ LABEL io.github.thephaseless.pagewire.uid.messagebus="${MESSAGEBUS_UID}" \
 EXPOSE 8090 8631 60000-60009
 
 # The SANE USB index (internal/catalog/sane-usb.tsv) from the device stage's backends.
-FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS sane-index-build
+FROM golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS sane-index-build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY tools/saneindex/ tools/saneindex/
