@@ -43,6 +43,7 @@ const (
 	papplWebURL      = "http://127.0.0.1:18001"
 	airsaneWebURL    = "http://127.0.0.1:18090"
 	simPrinterURI    = "ipp://127.0.0.1:18631/ipp/print"
+	simPrinter2URI   = "ipp://127.0.0.1:18632/ipp/print" // the two-queue print test's second device
 	queueName        = "it"
 )
 
@@ -54,10 +55,11 @@ type controlPlane struct {
 	token   string
 	desired device.DesiredState
 
-	mu      sync.Mutex
-	changed chan struct{} // closed and replaced by setDefaults
-	latest  *device.AgentReport
-	errs    []string
+	mu       sync.Mutex
+	changed  chan struct{} // closed and replaced by setDefaults and setQueues
+	reported chan struct{} // closed and replaced by each report
+	latest   *device.AgentReport
+	errs     []string
 }
 
 func (cp *controlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +81,10 @@ func (cp *controlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cp.mu.Lock()
 	cp.latest = &rep
+	if cp.reported != nil {
+		close(cp.reported)
+	}
+	cp.reported = make(chan struct{})
 	desired, changed := cp.desiredLocked()
 	cp.mu.Unlock()
 	if rep.Wait && rep.DesiredVersion == desired.Version {
@@ -120,6 +126,43 @@ func (cp *controlPlane) setDefaults(d device.PrintSettings) {
 		close(cp.changed)
 	}
 	cp.changed = make(chan struct{})
+}
+
+// setQueues replaces the queues the agent is told to keep, and releases held
+// reports.
+func (cp *controlPlane) setQueues(q []device.QueueSpec) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.desired.Queues = q
+	if cp.changed != nil {
+		close(cp.changed)
+	}
+	cp.changed = make(chan struct{})
+}
+
+// waitAgent waits, report by report, for an agent report that ok accepts,
+// failing after d.
+func (cp *controlPlane) waitAgent(ctx context.Context, t *testing.T, d time.Duration, what string, ok func(*device.AgentReport) bool) *device.AgentReport {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	for {
+		cp.mu.Lock()
+		rep := cp.latest
+		if cp.reported == nil {
+			cp.reported = make(chan struct{})
+		}
+		next := cp.reported
+		cp.mu.Unlock()
+		if rep != nil && ok(rep) {
+			return rep
+		}
+		select {
+		case <-next:
+		case <-ctx.Done():
+			t.Fatalf("no agent report with %s within %s; last %+v", what, d, rep)
+		}
+	}
 }
 
 func (cp *controlPlane) fail(msg string) {
@@ -204,8 +247,9 @@ func TestDevicePod(t *testing.T) {
 		submitted := time.Now()
 		printAndWait(ctx, t, queueURI, sample)
 		w.firedWithin(ctx, t, submitted, 10*time.Second, "a printer event from the PAPPL queue")
-		// The PAPPL job completes once the CUPS ipp backend has handed the
-		// document over; ippeveprinter then finishes its own job.
+		// The PAPPL job completes once the CUPS ipp backend has ended, and that
+		// backend waits for ippeveprinter's job (waitjob), so the job below is
+		// there at once.
 		waitFor(ctx, t, 60*time.Second, "a new completed job on ippeveprinter", func() (bool, string) {
 			n := completedJobs(ctx, t, simPrinterURI)
 			return n > before, fmt.Sprintf("%d completed jobs, %d before", n, before)
@@ -448,6 +492,37 @@ func TestDevicePod(t *testing.T) {
 		t.Run("full print", func(t *testing.T) {
 			printAndWatch(ctx, t, remoteURI, sample, 60*time.Second)
 		})
+	})
+
+	// Two queues of one printer application print at the same time. Before
+	// pappl-retrofit-filter-reap.patch each job's cfFilterChain() reaped the
+	// other's filters and both stayed processing for good (pappl-retrofit issue 36).
+	t.Run("two queues print at once", func(t *testing.T) {
+		cp.mu.Lock()
+		first := cp.desired.Queues[0]
+		cp.mu.Unlock()
+		second := first
+		second.ID, second.Name, second.DeviceURI = queueName+"-2", queueName+"-2", "cups:"+simPrinter2URI
+		ok := func(r *device.AgentReport) bool {
+			return len(r.Queues) == 2 && !slices.ContainsFunc(r.Queues, func(q device.QueueResult) bool {
+				return q.State != device.QueueOK || q.PrinterURI == ""
+			})
+		}
+		cp.setQueues([]device.QueueSpec{first, second})
+		// Back to one queue for the subtests after this one, which expect it.
+		t.Cleanup(func() {
+			cp.setQueues([]device.QueueSpec{first})
+			cp.waitAgent(ctx, t, 30*time.Second, "one queue", func(r *device.AgentReport) bool { return len(r.Queues) == 1 })
+			onlyQueue(ctx, t, pappl.New(papplSystemURI))
+		})
+		rep := cp.waitAgent(ctx, t, 30*time.Second, "both queues ok", ok)
+		// Parallel subtests start together once this function returns.
+		for _, q := range rep.Queues {
+			t.Run(q.ID, func(t *testing.T) {
+				t.Parallel()
+				printAndWatch(ctx, t, q.PrinterURI, sample, 60*time.Second)
+			})
+		}
 	})
 
 	// Last, because the queue comes back as a new printer: the agent's system
@@ -707,7 +782,8 @@ func printAndWait(ctx context.Context, t *testing.T, uri string, doc []byte) {
 // printAndWatch submits doc to uri and follows the job through IPP job
 // notifications until it ends, failing unless it completed within d. A job
 // the printer application leaves in processing is the filter fork deadlock
-// the fork gate patch fixes (pappl-retrofit issue 35).
+// the fork gate patch fixes (pappl-retrofit issue 35), or jobs reaping each
+// other's filters, which the filter-reap patch fixes (issue 36).
 func printAndWatch(ctx context.Context, t *testing.T, uri string, doc []byte, d time.Duration) {
 	t.Helper()
 	c := printing.New(uri)
@@ -739,7 +815,7 @@ func printAndWatch(ctx context.Context, t *testing.T, uri string, doc []byte, d 
 	case ended(state):
 		t.Fatalf("job %d on %s ended %s: %v", id, uri, state, reasons)
 	case errors.Is(wctx.Err(), context.DeadlineExceeded):
-		t.Fatalf("job %d on %s still %s %v after %s: a filter child of the printer application is stuck (fork deadlock)", id, uri, state, reasons, d)
+		t.Fatalf("job %d on %s still %s %v after %s: the printer application never finished the job (fork deadlock, issue 35, or jobs reaping each other's filters, issue 36)", id, uri, state, reasons, d)
 	default:
 		t.Fatalf("watch job %d on %s: %v (state %q)", id, uri, werr, state)
 	}

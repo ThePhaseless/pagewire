@@ -36,6 +36,10 @@ ARG PUSHED_IMAGE=scratch
 # libpappl-retrofit, so the filter functions libcupsfilters and libppd run in a forked child
 # never inherit a lock another thread holds (pappl-retrofit issue 35). pappl-base tests it with
 # images/driver/fork-gate-test.c, and each final stage checks that its application uses it.
+# images/driver/patches/pappl-retrofit-filter-reap.patch is pagewire's own too: each job's
+# filter chain runs in a child process of its own, so two jobs printing at once no longer reap
+# each other's filters and hang (pappl-retrofit issue 36). pappl-base tests it with
+# images/driver/filter-chain-test.c.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS pappl-base
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
 ARG PAPPL_COMMIT
@@ -46,7 +50,7 @@ RUN apt-get update \
       libcups2-dev libcupsfilters-dev libppd-dev libgnutls28-dev libavahi-client-dev \
       libjpeg-dev libpng-dev libusb-1.0-0-dev libpam0g-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
-COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-ipp-admin-local.patch images/driver/patches/pappl-retrofit-fd-leak.patch images/driver/patches/pappl-retrofit-fork-gate.patch images/driver/fork-gate-test.c /src/
+COPY images/driver/patches/pappl-max-vendor.patch images/driver/patches/pappl-web-admin-closed.patch images/driver/patches/pappl-ipp-admin-local.patch images/driver/patches/pappl-retrofit-fd-leak.patch images/driver/patches/pappl-retrofit-fork-gate.patch images/driver/patches/pappl-retrofit-filter-reap.patch images/driver/fork-gate-test.c images/driver/filter-chain-test.c /src/
 WORKDIR /src/pappl
 # The installed patch is the notice of modification that Apache-2.0 4(b) asks for.
 RUN git init -q . \
@@ -68,12 +72,13 @@ RUN git init -q . \
  && git archive --prefix="pappl-retrofit-${PAPPL_RETROFIT_COMMIT}/" -o "/out/upstream/pappl-retrofit-${PAPPL_RETROFIT_COMMIT}.tar.gz" HEAD \
  && patch -p1 < /src/pappl-retrofit-fd-leak.patch \
  && patch -p1 < /src/pappl-retrofit-fork-gate.patch \
+ && patch -p1 < /src/pappl-retrofit-filter-reap.patch \
  && ./autogen.sh \
  && ./configure --prefix=/usr/local \
  && make -j"$(nproc)" \
  && make install \
  && ldconfig \
- && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING /src/pappl-retrofit-fd-leak.patch /src/pappl-retrofit-fork-gate.patch \
+ && install -D -m 0644 -t /out/licenses/pappl-retrofit LICENSE NOTICE COPYING /src/pappl-retrofit-fd-leak.patch /src/pappl-retrofit-fork-gate.patch /src/pappl-retrofit-filter-reap.patch \
  # pappl-retrofit runs CUPS backends from "/usr/lib/<app>/backend" (a
  # symlink to CUPS's serverbin that the apps' "make install" makes only for
  # prefix /usr), not from CUPS's /usr/lib/cups/backend. The targets below
@@ -109,6 +114,23 @@ RUN cc -O2 -Wall -Wextra -Werror -o /tmp/fork-gate-test /src/fork-gate-test.c -W
       test "$rc" -eq 2 || { echo "fork gate: case $c did not hang without the gate (exit $rc)" >&2; exit 1; }; \
     done \
  && rm -f /tmp/fork-gate-test /tmp/fork-gate-test-ungated /tmp/fork-gate.err
+
+# The filter chain's self-test (images/driver/filter-chain-test.c), built against the patched
+# library's _prFilterChain() and against cfFilterChain() as 1.0b3 called it from the job thread:
+# steal and reap must fail without the patch, or they test nothing (both and orphan fail only
+# sometimes without it, and pipefail passes: the unpatched chain returns without waiting).
+# Exit 2: a chain hung; 3: a child reaped by the wrong waiter.
+RUN cc -O2 -Wall -Wextra -Werror -DRUN_CHAIN=_prFilterChain -o /tmp/filter-chain-test /src/filter-chain-test.c -L/usr/local/lib -lpappl-retrofit -lcupsfilters -lcups \
+ && cc -O2 -Wall -Wextra -Werror -DRUN_CHAIN=cfFilterChain -o /tmp/filter-chain-test-unpatched /src/filter-chain-test.c -lcupsfilters -lcups \
+ && for c in steal reap both orphan pipefail; do \
+      /tmp/filter-chain-test "$c" 2>/tmp/filter-chain.err && ! test -s /tmp/filter-chain.err \
+        || { echo "filter chain: case $c failed" >&2; cat /tmp/filter-chain.err >&2; exit 1; }; \
+    done \
+ && for c in steal:2 reap:3; do \
+      rc=0; /tmp/filter-chain-test-unpatched "${c%:*}" 2>/dev/null || rc=$?; \
+      test "$rc" -eq "${c#*:}" || { echo "filter chain: case ${c%:*} exited $rc without the patch, want ${c#*:}" >&2; exit 1; }; \
+    done \
+ && rm -f /tmp/filter-chain-test /tmp/filter-chain-test-unpatched /tmp/filter-chain.err
 
 # Each retrofit app at its pinned commit, built as the rock's app part builds it
 # ("make LDFLAGS=-ljpeg", then "make install"), under /usr/local.

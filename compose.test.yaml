@@ -64,6 +64,27 @@ services:
       avahi:
         condition: service_healthy
 
+  # A second printer, so the two-queue print test's jobs go to two devices:
+  # one ippeveprinter takes one job at a time, and the CUPS ipp backend gives up on a busy one.
+  sim-printer-2:
+    <<: *hardened
+    image: pagewire-device:dev
+    user: "65532:65532"
+    entrypoint: ["/usr/sbin/ippeveprinter"]
+    command:
+      - "-p"
+      - "18632"
+      - "-f"
+      - "application/pdf,application/postscript,image/jpeg,image/pwg-raster,image/urf"
+      - "-l"
+      - "Integration test"
+      - "pagewire-it-sim-2"
+    volumes:
+      - run-dbus:/run/dbus
+    tmpfs:
+      - /tmp:mode=1777
+    depends_on: *avahi-ready
+
   airsane:
     <<: *hardened
     image: pagewire-device:dev

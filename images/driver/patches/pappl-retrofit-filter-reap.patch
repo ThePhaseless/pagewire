@@ -1,0 +1,217 @@
+pagewire's change to pappl-retrofit 1.0b3: run each job's filter chain in a
+child process of its own, and reap what the chain leaves behind.
+
+_prFilter() called cfFilterChain() (libcupsfilters 2.1.1) in the job thread.
+cfFilterChain() waits for its filter processes with wait(), which reaps any
+child of the process. Two jobs printing at once on two queues of one printer
+application each reap the other's filters; once its own children are gone,
+wait() fails with ECHILD and the loop retries for good. Both jobs stay in
+"processing" and the application spins at full CPU.
+
+With this patch _prFilter() runs the chain through _prFilterChain(): it forks
+one child, which runs cfFilterChain() and exits with its result, and waits for
+that child alone with waitpid(). The filters are children of that child only,
+so no other thread can reap them, and its wait() sees no other job's
+processes. _prRasterPrepareJob() already ran the chain in a child
+(cfFilterPOpen()); both now run _prFilterChainAndReap() there, which makes the
+child a child subreaper and, after the chain, waits until every process the
+chain left behind has ended (the CUPS backend that the "Backend" filter
+starts). The application is PID 1 in its container, so without this each job
+left one zombie: the stray wait() above used to reap them by accident.
+That stray wait() also reaped processes orphaned outside a chain, such as a
+backend left by a device listing that _prCUPSDevList() kills after its
+timeout; those now stay zombies for the life of the container.
+shortcut: no init process reaps them; run the application under one (tini as
+PID 1) once such zombies pile up.
+
+The patch also serializes the walk over the shared spooling-conversion array
+in _prFilter(): a CUPS array keeps its iteration position in itself, so two
+jobs looking up their pre-filter at once could miss it ("No pre-filter found
+for input format ...") and abort.
+
+Upstream report, open and unfixed:
+https://github.com/OpenPrinting/pappl-retrofit/issues/36
+Drop this patch, images/driver/filter-chain-test.c and the filter chain test
+step in images/driver/Dockerfile once that issue is fixed: when pappl-retrofit
+no longer calls cfFilterChain() in a job thread, or cfFilterChain() waits for
+its own processes only, and the chain's leftover processes are reaped.
+
+pappl-retrofit is Copyright (c) 2020-2023 by Till Kamppeter, OpenPrinting and
+others, and is licensed under the Apache License, Version 2.0, with the CUPS
+exceptions (see the LICENSE and NOTICE files in the pappl-retrofit source).
+This patch is a modification of pappl-retrofit and is distributed under the
+same licence.
+
+diff --git a/pappl-retrofit/print-job-private.h b/pappl-retrofit/print-job-private.h
+index bee9d3a..b40eef8 100644
+--- a/pappl-retrofit/print-job-private.h
++++ b/pappl-retrofit/print-job-private.h
+@@ -88,6 +88,11 @@ extern pappl_content_t _prGetFileContentType(pappl_job_t *job);
+ extern pr_job_data_t *_prCreateJobData(pappl_job_t *job,
+ 					 pappl_pr_options_t *job_options);
+ extern bool   _prFilter(pappl_job_t *job, pappl_device_t *device, void *data);
++extern int    _prFilterChain(int inputfd, int outputfd, int inputseekable,
++			     cf_filter_data_t *data, cups_array_t *chain);
++extern int    _prFilterChainAndReap(int inputfd, int outputfd,
++				    int inputseekable, cf_filter_data_t *data,
++				    void *parameters);
+ extern void   _prFreeJobData(pr_job_data_t *job_data);
+ extern int    _prJobIsCanceled(void *data);
+ extern void   _prJobLog(void *data, cf_loglevel_t level,
+diff --git a/pappl-retrofit/print-job.c b/pappl-retrofit/print-job.c
+index 473710c..42cd049 100644
+--- a/pappl-retrofit/print-job.c
++++ b/pappl-retrofit/print-job.c
+@@ -23,6 +23,9 @@
+ #include <pappl-retrofit/pappl-retrofit-private.h>
+ #include <pappl-retrofit/pappl1-private.h>
+ #include <pappl-retrofit/libcups2-private.h>
++#include <pthread.h>
++#include <sys/prctl.h>
++#include <sys/wait.h>
+ 
+ 
+ //
+@@ -929,6 +932,103 @@ _prCreateJobData(pappl_job_t *job,
+ }
+ 
+ 
++// Serializes the walks over the spooling conversions (pagewire patch)
++static pthread_mutex_t conversions_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++
++//
++// '_prFilterChainAndReap()' - Run cfFilterChain() and wait until every
++//                             process it started has ended (pagewire
++//                             patch).
++//
++//                             A filter function, called in a child process
++//                             of its own (see _prFilterChain()). As child
++//                             subreaper it also adopts the processes the
++//                             filters leave behind, such as the CUPS
++//                             backend the "Backend" filter starts, and
++//                             reaps them; otherwise they would end up as
++//                             zombies of the printer application, which is
++//                             PID 1 in its container and never reaps them.
++//
++
++int					// O - cfFilterChain()'s result
++_prFilterChainAndReap(int inputfd,	// I - File descriptor input stream
++		      int outputfd,	// I - File descriptor output stream
++		      int inputseekable,// I - Is input stream seekable?
++		      cf_filter_data_t *data,// I - Job and printer data
++		      void *parameters)	// I - Filter chain
++{
++  int	ret;				// cfFilterChain()'s result
++
++
++  prctl(PR_SET_CHILD_SUBREAPER, 1);
++  ret = cfFilterChain(inputfd, outputfd, inputseekable, data, parameters);
++  // When a pipe() fails, cfFilterChain() returns with the pipes to the filters
++  // it started still open; closed, a filter writing to them gets EPIPE
++  // instead of blocking this wait for good
++  closefrom(3);
++  while (wait(NULL) > 0 || errno == EINTR);
++
++  return (ret);
++}
++
++
++//
++// '_prFilterChain()' - Run a filter chain in a child process of its own
++//                      (pagewire patch).
++//
++//                      cfFilterChain() waits for its filters with wait(),
++//                      which reaps any child of the process. Called from
++//                      two job threads at once, each reaps the other's
++//                      filters and both loop on ECHILD forever. In a
++//                      child process the filters are its children only,
++//                      so no other thread reaps them and its wait() sees
++//                      no other thread's children.
++//
++
++int					// O - cfFilterChain()'s result, 1 on error
++_prFilterChain(int inputfd,		// I - File descriptor input stream
++	       int outputfd,		// I - File descriptor output stream
++	       int inputseekable,	// I - Is input stream seekable?
++	       cf_filter_data_t *data,	// I - Job and printer data
++	       cups_array_t *chain)	// I - Filter chain
++{
++  pid_t	pid;				// Process ID of the chain
++  int	status;				// Its exit status
++
++
++  if ((pid = fork()) == 0)
++    _exit(_prFilterChainAndReap(inputfd, outputfd, inputseekable, data, chain));
++
++  if (pid < 0)
++  {
++    if (data->logfunc)
++      data->logfunc(data->logdata, CF_LOGLEVEL_ERROR,
++		    "_prFilterChain: Could not fork: %s", strerror(errno));
++    return (1);
++  }
++
++  while (waitpid(pid, &status, 0) < 0)
++    if (errno != EINTR)
++    {
++      if (data->logfunc)
++	data->logfunc(data->logdata, CF_LOGLEVEL_ERROR,
++		      "_prFilterChain: Lost filter chain (PID %d): %s",
++		      (int)pid, strerror(errno));
++      return (1);
++    }
++
++  if (WIFEXITED(status))
++    return (WEXITSTATUS(status));
++
++  if (data->logfunc)
++    data->logfunc(data->logdata, CF_LOGLEVEL_ERROR,
++		  "_prFilterChain: Filter chain (PID %d) crashed on signal %d",
++		  (int)pid, WTERMSIG(status));
++  return (1);
++}
++
++
+ //
+ // '_prFilter()' - PAPPL generic filter function wrapper for printing
+ //                 in spooling mode
+@@ -1012,7 +1112,11 @@ _prFilter(
+   //
+   // Find filters to use for this job
+   //
+-  
++  // The array is shared by all job threads and keeps its iteration position
++  // in itself, so one job at a time walks it (pagewire patch)
++  //
++
++  pthread_mutex_lock(&conversions_mutex);
+   for (conversion =
+ 	 (pr_spooling_conversion_t *)
+ 	 cupsArrayGetFirst(global_data->config->spooling_conversions);
+@@ -1029,6 +1133,7 @@ _prFilter(
+ 			      global_data->filter_dir)) != NULL)
+       break;
+   }
++  pthread_mutex_unlock(&conversions_mutex);
+ 
+   if (conversion == NULL || filter_path == NULL)
+   {
+@@ -1166,7 +1271,7 @@ _prFilter(
+     return (false);
+   }
+ 
+-  if (cfFilterChain(fd, nullfd, 1, job_data->filter_data, job_data->chain) == 0)
++  if (_prFilterChain(fd, nullfd, 1, job_data->filter_data, job_data->chain) == 0)
+     ret = true;
+ 
+   //
+@@ -1866,7 +1971,7 @@ _prRasterPrepareJob(
+   _prUpdateStatus(papplJobGetPrinter(job), device);
+ 
+   // Call the filter chain and get the file descriptor to feed in the data
+-  job_data->device_fd = cfFilterPOpen(cfFilterChain, -1, nullfd,
++  job_data->device_fd = cfFilterPOpen(_prFilterChainAndReap, -1, nullfd,
+ 				      0, job_data->filter_data, job_data->chain,
+ 				      &(job_data->device_pid));
+   if (nullfd >= 0)

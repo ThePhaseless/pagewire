@@ -959,3 +959,21 @@ func TestForkGate(t *testing.T) {
 		}
 	}
 }
+
+// The filter chain patch (AGENTS.md, "Filter chain") is applied in pappl-base and its
+// self-test runs there against the patched library and against cfFilterChain() itself.
+func TestFilterChainPatch(t *testing.T) {
+	base := findStage(parseDockerfile(t, "images/driver/Dockerfile"), "pappl-base")
+	if base == nil {
+		t.Fatal("images/driver/Dockerfile: no stage pappl-base")
+	}
+	for _, want := range []string{
+		"patch -p1 < /src/pappl-retrofit-filter-reap.patch",
+		"-DRUN_CHAIN=_prFilterChain", // the patched self-test build
+		"-DRUN_CHAIN=cfFilterChain",  // the unpatched one
+	} {
+		if !slices.ContainsFunc(base.lines, func(l string) bool { return strings.Contains(l, want) }) {
+			t.Errorf("images/driver/Dockerfile stage pappl-base: no line with %q", want)
+		}
+	}
+}
