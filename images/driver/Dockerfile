@@ -434,7 +434,7 @@ EXPOSE 8005
 CMD ["/usr/local/bin/legacy-printer-app", "-o", "server-port=8005", "server"]
 
 # The driver index (internal/catalog/drivers.tsv.gz) from the five targets' driver lists.
-FROM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS driver-index-build
+FROM golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS driver-index-build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY tools/driverindex/ tools/driverindex/
