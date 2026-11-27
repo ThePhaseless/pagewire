@@ -34,7 +34,7 @@ spec:
         - name: pagewire
           # Use main until the first release, then a version tag pinned by digest
           # (<version>@sha256:<digest>); kustomization.yaml sets the same tag.
-          image: ghcr.io/thephaseless/pagewire:main
+          image: ghcr.io/thephaseless/pagewire:main@sha256:ff440c852ffdb50c9cfe9ab1a82ad42c20f6ede8075a43d1600013e867156093
           # main moves with every push, and the device pod already pulls it Always, so
           # both run the same agent protocol. Drop this once the image is pinned as
           # <version>@sha256:<digest>.
