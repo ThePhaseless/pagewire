@@ -23,4 +23,4 @@ images:
   # (and drop imagePullPolicy: Always in deployment.yaml).
   # The device pod's probe, agent and fetch-blobs containers reuse this exact image string.
   - name: ghcr.io/thephaseless/pagewire
-    newTag: main@sha256:ff440c852ffdb50c9cfe9ab1a82ad42c20f6ede8075a43d1600013e867156093
+    newTag: main@sha256:5b162992d4faa31a30fd5dee712253f8988b055a2130ecd5a12a208f36beeb26
