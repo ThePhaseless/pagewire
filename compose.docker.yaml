@@ -4,7 +4,7 @@
 name: pagewire-docker # apart from the demo stack in compose.yaml
 services:
   pagewire:
-    image: ${PAGEWIRE_IMAGE:-ghcr.io/thephaseless/pagewire:main}
+    image: ${PAGEWIRE_IMAGE:-ghcr.io/thephaseless/pagewire:main@sha256:ff440c852ffdb50c9cfe9ab1a82ad42c20f6ede8075a43d1600013e867156093}
     # --docker-container: the probe, agent and fetch-blobs run this container's image.
     container_name: pagewire
     command: ["serve", "--backend=docker"]
